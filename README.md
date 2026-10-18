@@ -39,7 +39,7 @@ $pio = "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe"
 
 The app binary is `%USERPROFILE%\.platformio\cyd-build\esp32dev\firmware.bin`, about 825 KB. Use it in one of two ways:
 
-- **As a launcher image** (board runs the `bootloader` branch): attach it to a GitHub release as `scanner.bin`, or write it to a slot over USB, as described in the `bootloader` README.
+- **As a launcher image** (board runs the `bootloader` branch): every push to this branch runs `.github/workflows/build.yml`, which builds the app and publishes it as `firmware.bin` on the release tagged `wifi_checker`. The launcher lists the branch and downloads that file. You can also write it to a slot over USB, as described in the `bootloader` README.
 - **On its own:** `& $pio run --target upload --upload-port COM11`. This replaces everything on the board, including the launcher.
 
 Monitor with `& $pio device monitor --port COM11 --baud 115200`. Ctrl+] exits. If you change `sdkconfig.defaults`, delete the generated `sdkconfig.esp32dev` so the new defaults apply.
