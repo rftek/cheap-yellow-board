@@ -166,6 +166,30 @@ esp_err_t cyd_fill_rect(int x, int y, int width, int height, uint16_t color)
     return result;
 }
 
+esp_err_t cyd_draw_pattern(int x, int y, int width, int height,
+                           cyd_pixel_fn pixel, void *context)
+{
+    ESP_RETURN_ON_FALSE(x >= 0 && y >= 0 && width > 0 && height > 0 &&
+                        x + width <= CYD_LCD_WIDTH && y + height <= CYD_LCD_HEIGHT,
+                        ESP_ERR_INVALID_ARG, TAG, "pattern outside display");
+    ESP_RETURN_ON_ERROR(lcd_set_window(x, y, width, height), TAG, "set pattern window");
+    /* Column-major, like text: whole columns are packed into text_chunk. */
+    size_t columns_per_chunk = sizeof(text_chunk) / ((size_t)height * 2);
+    size_t used = 0;
+    for (int column = 0; column < width; ++column) {
+        for (int row = 0; row < height; ++row) {
+            uint16_t color = pixel(x + column, y + row, context);
+            text_chunk[used++] = (uint8_t)(color >> 8);
+            text_chunk[used++] = (uint8_t)color;
+        }
+        if ((column + 1) % columns_per_chunk == 0 || column == width - 1) {
+            ESP_RETURN_ON_ERROR(lcd_data(text_chunk, used), TAG, "send pattern chunk");
+            used = 0;
+        }
+    }
+    return ESP_OK;
+}
+
 esp_err_t cyd_draw_cells(int row, const char *text,
                          const uint16_t *foreground, const uint16_t *background)
 {

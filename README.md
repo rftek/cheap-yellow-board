@@ -2,13 +2,14 @@
 
 PlatformIO/ESP-IDF firmware for the 320x240 display and resistive touchscreen on the ESP32 Cheap Yellow Display (CYD), following the [board documentation](https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display).
 
-The board runs a **launcher** on every power-on. The launcher picks one of two stored **boot images** or downloads a new one from this repository's GitHub releases. The first boot image is the Wi-Fi and Bluetooth scanner in this folder.
+The board runs a **launcher** on every power-on. The launcher picks one of two stored **boot images** or downloads a new one from this repository's GitHub releases.
 
 | Path | What it is |
 |---|---|
 | `launcher/` | Launcher firmware, custom second-stage bootloader and partition table |
 | `main/` | Wi-Fi and Bluetooth scanner boot image |
-| `components/cyd_display/` | Display, 5x7 font and touchscreen driver shared by both |
+| `apps/screen_check/` | Screen color test boot image |
+| `components/cyd_display/` | Display, 5x7 font, pattern drawing and touchscreen driver shared by all of them |
 
 ## Launcher
 
@@ -52,6 +53,19 @@ The full results, including Wi-Fi BSSIDs, are also printed to the serial log, al
 
 The scanner needs no network connection or credentials; it only listens. Classic (BR/EDR) Bluetooth devices are not scanned; only BLE, using the lightweight NimBLE host.
 
+## Screen check image
+
+A full-screen display test. Tap the right half of the screen for the next pattern and the left half for the previous one. The list wraps around. Each pattern's name shows on the bottom row for 1.5 seconds, then disappears so it doesn't get in the way of the test. Press EN to return to the launcher.
+
+| Pattern | What to look for |
+|---|---|
+| Red, green, blue, white, black, cyan, magenta, yellow, 50% gray | Dead or stuck pixels, uneven backlight, tint |
+| Color bars | Correct color order (white, yellow, cyan, green, magenta, red, blue, black); swapped red and blue |
+| RGB ramps | Smooth red, green, blue and gray gradients; banding |
+| Gray steps | 16 distinguishable steps from black to white |
+| Checkerboard | 1-pixel alternation; flicker or crosstalk |
+| Grid | Straight 40-pixel grid lines and a 1-pixel red border on all four edges; clipping or offset |
+
 ## Build and flash
 
 Install the PlatformIO IDE extension or PlatformIO Core. The first build installs the ESP32 platform and ESP-IDF toolchain.
@@ -64,6 +78,7 @@ From PowerShell at the repository root:
 $pio = "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe"
 & $pio run                                   # scanner
 & $pio run --project-dir launcher            # launcher + bootloader
+& $pio run --project-dir apps\screen_check   # screen check
 ```
 
 **Do not use `pio run --target upload` for either project.** It would flash a stock bootloader or put the scanner over the launcher. Flash everything with esptool instead. This erases the board:
@@ -80,7 +95,7 @@ $S = "$env:USERPROFILE\.platformio\cyd-build\esp32dev"
 & $pio device monitor --port COM11 --baud 115200
 ```
 
-To update only the scanner in slot A, write `0x150000 "$S\firmware.bin"` on its own. Change `COM11` to the board's serial port. The monitor exits with Ctrl+]. If you change an `sdkconfig.defaults`, delete the generated `sdkconfig.esp32dev` next to it so the new defaults apply.
+To update a single slot, write only that image: `0x150000` for slot A (the scanner above), or `0x2A0000` for slot B, for example `0x2A0000 "$env:USERPROFILE\.platformio\cyd-screen-check-build\esp32dev\firmware.bin"`. Change `COM11` to the board's serial port. The monitor exits with Ctrl+]. If you change an `sdkconfig.defaults`, delete the generated `sdkconfig.esp32dev` next to it so the new defaults apply.
 
 The project path must be short. Builds fail on Windows when source paths pass 260 characters.
 

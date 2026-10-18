@@ -43,6 +43,20 @@ esp_err_t cyd_display_init(void);
 
 esp_err_t cyd_fill_rect(int x, int y, int width, int height, uint16_t color);
 
+/* Returns the RGB565 color of display pixel (x, y). */
+typedef uint16_t (*cyd_pixel_fn)(int x, int y, void *context);
+
+/* Fills a rectangle pixel by pixel from a function of display coordinates,
+   for gradients and patterns without a frame buffer. */
+esp_err_t cyd_draw_pattern(int x, int y, int width, int height,
+                           cyd_pixel_fn pixel, void *context);
+
+/* Packs 8-bit channels into RGB565. */
+static inline uint16_t cyd_rgb(uint8_t red, uint8_t green, uint8_t blue)
+{
+    return (uint16_t)(((red & 0xF8) << 8) | ((green & 0xFC) << 3) | (blue >> 3));
+}
+
 /* Draws one full-width text row of CYD_TEXT_COLUMNS cells, each with its own
    colors. The bottom pixel row is always black so stacked buttons stay apart. */
 esp_err_t cyd_draw_cells(int row, const char *text,
