@@ -1,15 +1,21 @@
-# ESP32 CYD BirdNET Display
+# ESP32 CYD Wi-Fi and Bluetooth Scanner
 
 This PlatformIO/ESP-IDF application targets the 320x240 display and resistive touchscreen on the ESP32 Cheap Yellow Display (CYD), following the [board documentation](https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display).
 
-On startup, the application connects to Wi-Fi and queries the local BirdNET server. It then refreshes every two minutes or immediately after a touchscreen tap. The latest visit from today with a confidence of at least 80% is displayed as a full-screen Wikimedia image. The display intentionally contains no text or overlays. If there is no qualifying detection, the screen clears; a failed refresh preserves the last successfully displayed image.
+On every boot the board scans for nearby Wi-Fi networks, then for Bluetooth Low Energy devices (6-second active scan), and lists both on screen in large text:
 
-Configure the BirdNET server with `BIRDNET_BASE_URL` in the local Wi-Fi credentials header. It defaults to `http://birdnet.local`; replace that value with the server's address on your network. The firmware uses:
+- **Wi-Fi:** signal (dBm) and SSID, strongest first.
+- **Bluetooth LE:** signal (dBm) and advertised name, named devices first, then strongest first. Devices without a name show their address in gray.
 
-- `GET {BIRDNET_BASE_URL}/api/v1/detections/visits`
-- `GET {BIRDNET_BASE_URL}/api/v1/image/{URL-encoded-scientific-name}`
+The touchscreen drives the UI:
 
-Wikimedia's 1280-pixel thumbnail is streamed over HTTPS directly into the ESP32 ROM JPEG decoder and downscaled to fill the 320x240 display. Streaming avoids keeping the full image in the ESP32's limited RAM; the lower-resolution 500-pixel variant is intentionally not used because it looked blurry when enlarged.
+- **Entry buttons:** tap a network or device to see its details (Wi-Fi: SSID, RSSI, channel, auth, cipher, BSSID, PHY/WPS; BLE: name, RSSI, address and address type, advertising type, TX power, manufacturer, first 16-bit service UUID). Tap anywhere to go back.
+- **Arrow buttons:** the up/down arrows on each list header page through that list. They are dimmed when there is nothing more in that direction.
+- **Header title:** tap "WI-FI" or "BLE" to scan again.
+
+The full results, including Wi-Fi BSSIDs, are also printed to the serial log, along with the coordinates of every tap.
+
+No network connection or credentials are needed: the board only listens. Classic (BR/EDR) Bluetooth devices are not scanned; only BLE, using the lightweight NimBLE host.
 
 ## Command-line build and flash
 
@@ -24,7 +30,7 @@ $pio = "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe"
 
 Change `COM11` to the board's assigned serial port. The first build installs the ESP32 platform and ESP-IDF toolchain. The monitor exits with Ctrl+].
 
-Before building, create `%USERPROFILE%\.cyd_private\wifi_credentials.h` from `main\wifi_credentials.example.h` and set the local Wi-Fi SSID/password and BirdNET server URL. Never commit that private file. Build products and machine-specific ESP-IDF/VS Code settings are ignored.
+The firmware uses about 840 KB of the default 1 MB app partition. If you change `sdkconfig.defaults`, delete the generated `sdkconfig.esp32dev` so the new defaults are applied.
 
 Display pins: MOSI GPIO13, SCLK GPIO14, CS GPIO15, D/C GPIO2, backlight GPIO21.
-Touch pins: MOSI GPIO32, MISO GPIO39, SCLK GPIO25, CS GPIO33, IRQ GPIO36. Touch coordinates use the CYD documentation's XPT2046 calibration range mapped to the tested 320x240 landscape orientation.
+Touch pins: MOSI GPIO32, MISO GPIO39, SCLK GPIO25, CS GPIO33, IRQ GPIO36. Touch coordinates use the CYD documentation's XPT2046 calibration range (`TOUCH_RAW_*` in `main/main.c`) mapped to the 320x240 landscape orientation.
