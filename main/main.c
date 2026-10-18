@@ -3,7 +3,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 
 #include "cyd_display.h"
 #include "esp_crt_bundle.h"
@@ -24,16 +23,24 @@
 #include "nvs_flash.h"
 #include "wifi_credentials.h"
 
-/* Boot images are the .bin assets of this repository's latest release. */
+/* Each branch of this repository is one application. GitHub Actions on the
+   branch publishes its build as IMAGE_ASSET_NAME on a release tagged with
+   the branch name; branches without one are not offered. */
 #ifndef IMAGE_REPO
 #define IMAGE_REPO "rftek/cheap-yellow-board"
 #endif
-#define RELEASES_URL "https://api.github.com/repos/" IMAGE_REPO "/releases/latest"
+#define BRANCHES_URL "https://api.github.com/repos/" IMAGE_REPO "/branches?per_page=100"
+#define RELEASES_URL "https://api.github.com/repos/" IMAGE_REPO "/releases?per_page=100"
+#define IMAGE_ASSET_NAME "firmware.bin"
+
+/* Settings this launcher stores in NVS for the boot images, which are
+   published publicly and so carry no credentials of their own. */
+#define CONFIG_NAMESPACE "cyd_config"
 
 /* Countdown before the default image boots; each tap off an entry adds as much again. */
 #define MENU_TIMEOUT_US (20LL * 1000 * 1000)
 #define WIFI_CONNECT_TIMEOUT_MS 10000
-#define RELEASE_JSON_LIMIT (64 * 1024)
+#define GITHUB_JSON_LIMIT (64 * 1024)
 #define DOWNLOAD_CHUNK_SIZE 4096
 #define MAX_REDIRECTS 5
 
@@ -47,16 +54,20 @@
 
 static const char *TAG = "cyd_launcher";
 
+/* An asset's updated_at time, which changes with every upload. */
+#define VERSION_SIZE 24
+
 typedef struct {
     const esp_partition_t *partition;
     bool valid;
-    char name[48];
-    uint32_t size; /* release asset size; 0 when flashed some other way */
+    char name[48];                 /* branch name */
+    char version[VERSION_SIZE];    /* empty when flashed some other way */
 } slot_t;
 
 typedef struct {
-    char name[48];
+    char name[48]; /* branch name */
     char url[256];
+    char version[VERSION_SIZE];
     uint32_t size;
 } remote_image_t;
 
@@ -71,7 +82,7 @@ typedef enum {
     NET_CONNECTING,
     NET_FETCHING,
     NET_READY,
-    NET_NO_RELEASE,
+    NET_GITHUB_ERROR,
     NET_OFFLINE,
 } net_state_t;
 
@@ -122,32 +133,65 @@ static void load_slots(void)
             /* Flashed over USB rather than downloaded: use the project name. */
             snprintf(slot->name, sizeof(slot->name), "%s", description.project_name);
         }
-        slot_key(key, sizeof(key), "size", i);
-        if (have_nvs) {
-            nvs_get_u32(nvs, key, &slot->size);
+        size_t version_size = sizeof(slot->version);
+        slot_key(key, sizeof(key), "ver", i);
+        if (!have_nvs || nvs_get_str(nvs, key, slot->version, &version_size) != ESP_OK) {
+            slot->version[0] = '\0';
         }
-        ESP_LOGI(TAG, "Slot %c: %s (%u bytes)", 'A' + i, slot->name, (unsigned)slot->size);
+        ESP_LOGI(TAG, "Slot %c: %s (%s)", 'A' + i, slot->name,
+                 slot->version[0] != '\0' ? slot->version : "flashed over USB");
     }
     if (have_nvs) {
         nvs_close(nvs);
     }
 }
 
-static void save_slot(int slot, const char *name, uint32_t size)
+/* Records which branch and version a slot holds; NULL name clears it. */
+static void save_slot(int slot, const char *name, const char *version)
 {
     nvs_handle_t nvs;
     if (nvs_open("launcher", NVS_READWRITE, &nvs) != ESP_OK) {
         return;
     }
-    char key[16];
-    slot_key(key, sizeof(key), "name", slot);
+    char name_key[16];
+    char version_key[16];
+    slot_key(name_key, sizeof(name_key), "name", slot);
+    slot_key(version_key, sizeof(version_key), "ver", slot);
     if (name != NULL) {
-        nvs_set_str(nvs, key, name);
+        nvs_set_str(nvs, name_key, name);
+        nvs_set_str(nvs, version_key, version);
     } else {
-        nvs_erase_key(nvs, key);
+        nvs_erase_key(nvs, name_key);
+        nvs_erase_key(nvs, version_key);
     }
-    slot_key(key, sizeof(key), "size", slot);
-    nvs_set_u32(nvs, key, size);
+    nvs_commit(nvs);
+    nvs_close(nvs);
+}
+
+/* Writes key only when it differs, so unchanged settings cost no flash wear. */
+static void store_config_string(nvs_handle_t nvs, const char *key, const char *value)
+{
+    char current[128];
+    size_t size = sizeof(current);
+    if (nvs_get_str(nvs, key, current, &size) == ESP_OK && strcmp(current, value) == 0) {
+        return;
+    }
+    nvs_set_str(nvs, key, value);
+}
+
+/* Shares this launcher's private settings with the boot images. */
+static void store_config(void)
+{
+    nvs_handle_t nvs;
+    if (nvs_open(CONFIG_NAMESPACE, NVS_READWRITE, &nvs) != ESP_OK) {
+        ESP_LOGE(TAG, "Could not open NVS for settings");
+        return;
+    }
+    store_config_string(nvs, "wifi_ssid", WIFI_SSID);
+    store_config_string(nvs, "wifi_pass", WIFI_PASSWORD);
+#ifdef BIRDNET_BASE_URL
+    store_config_string(nvs, "birdnet_url", BIRDNET_BASE_URL);
+#endif
     nvs_commit(nvs);
     nvs_close(nvs);
 }
@@ -188,10 +232,11 @@ static void draw_status(void)
         snprintf(line, sizeof(line), "GitHub...");
         break;
     case NET_READY:
-        snprintf(line, sizeof(line), "%d online", remote_count);
+        snprintf(line, sizeof(line), "%d branch%s online", remote_count,
+                 remote_count == 1 ? "" : "es");
         break;
-    case NET_NO_RELEASE:
-        snprintf(line, sizeof(line), "no release");
+    case NET_GITHUB_ERROR:
+        snprintf(line, sizeof(line), "GitHub error");
         break;
     default:
         snprintf(line, sizeof(line), "offline");
@@ -200,18 +245,20 @@ static void draw_status(void)
     ESP_ERROR_CHECK(cyd_text_row(STATUS_ROW, CYD_COLOR_GRAY, CYD_COLOR_BLACK, line));
 }
 
+/* True when a slot already holds this exact build of the branch. */
 static bool remote_is_stored(const remote_image_t *image)
 {
     for (int i = 0; i < SLOT_COUNT; ++i) {
         if (slots[i].valid && strcmp(slots[i].name, image->name) == 0 &&
-            slots[i].size == image->size) {
+            strcmp(slots[i].version, image->version) == 0) {
             return true;
         }
     }
     return false;
 }
 
-/* Stored images first, then release assets that are not already stored. */
+/* Stored images first, then branches whose current build is not stored:
+   new branches and newer builds of stored ones. */
 static void build_entries(void)
 {
     entry_count = 0;
@@ -369,8 +416,8 @@ static esp_err_t http_buffer_handler(esp_http_client_event_t *event)
     }
     http_buffer_t *buffer = event->user_data;
     size_t needed = buffer->length + (size_t)event->data_len + 1;
-    if (needed > RELEASE_JSON_LIMIT) {
-        ESP_LOGE(TAG, "Release JSON exceeds %d bytes", RELEASE_JSON_LIMIT);
+    if (needed > GITHUB_JSON_LIMIT) {
+        ESP_LOGE(TAG, "GitHub response exceeds %d bytes", GITHUB_JSON_LIMIT);
         return ESP_ERR_INVALID_SIZE;
     }
     if (needed > buffer->capacity) {
@@ -441,48 +488,91 @@ static bool json_copy_string(const char *value, char *output, size_t size)
     return *value == '"';
 }
 
-/* Collects the .bin assets of a GitHub release. Each asset object ends with
-   its browser_download_url; its name and size come earlier in the object. */
-static void parse_release_assets(const char *json)
+/* The launcher itself and the legacy main branch are not boot images. */
+static bool branch_is_excluded(const char *branch)
 {
-    const char *assets = json_value(json, json + strlen(json), "assets");
-    if (assets == NULL || *assets != '[') {
-        return;
-    }
-    const char *end = json_value(assets, json + strlen(json), "tarball_url");
-    if (end == NULL) {
-        end = json + strlen(json);
-    }
-    const char *object_start = assets;
-    remote_count = 0;
-    for (const char *url = json_value(assets, end, "browser_download_url");
-         url != NULL && remote_count < MAX_REMOTE_IMAGES;
-         url = json_value(url, end, "browser_download_url")) {
-        remote_image_t *image = &remote_images[remote_count];
-        const char *size = json_last_value(object_start, url, "size");
-        if (json_copy_string(json_last_value(object_start, url, "name"), image->name,
-                             sizeof(image->name)) &&
-            json_copy_string(url, image->url, sizeof(image->url))) {
-            size_t name_length = strlen(image->name);
-            image->size = size != NULL ? (uint32_t)strtoul(size, NULL, 10) : 0;
-            if (name_length > 4 && strcasecmp(image->name + name_length - 4, ".bin") == 0) {
-                ESP_LOGI(TAG, "Release asset: %s (%u bytes)", image->name,
-                         (unsigned)image->size);
-                ++remote_count;
-            }
+    static const char *const excluded[] = {"bootloader", "main"};
+    for (size_t i = 0; i < sizeof(excluded) / sizeof(excluded[0]); ++i) {
+        if (strcmp(branch, excluded[i]) == 0) {
+            return true;
         }
-        object_start = url;
     }
+    return false;
 }
 
-static net_state_t fetch_release(void)
+/* Finds IMAGE_ASSET_NAME on the release tagged with the branch name. Each
+   asset object ends with its browser_download_url; its name, size and
+   updated_at come earlier in the same object. */
+static bool find_branch_image(const char *json, const char *branch, remote_image_t *image)
+{
+    const char *end = json + strlen(json);
+    for (const char *tag = json_value(json, end, "tag_name"); tag != NULL;
+         tag = json_value(tag, end, "tag_name")) {
+        char tag_name[48];
+        if (!json_copy_string(tag, tag_name, sizeof(tag_name)) || strcmp(tag_name, branch) != 0) {
+            continue;
+        }
+        const char *release_end = json_value(tag, end, "tag_name");
+        if (release_end == NULL) {
+            release_end = end;
+        }
+        const char *object_start = json_value(tag, release_end, "assets");
+        if (object_start == NULL) {
+            return false;
+        }
+        for (const char *url = json_value(object_start, release_end, "browser_download_url");
+             url != NULL; url = json_value(url, release_end, "browser_download_url")) {
+            char asset_name[48];
+            if (json_copy_string(json_last_value(object_start, url, "name"), asset_name,
+                                 sizeof(asset_name)) &&
+                strcmp(asset_name, IMAGE_ASSET_NAME) == 0 &&
+                json_copy_string(url, image->url, sizeof(image->url)) &&
+                json_copy_string(json_last_value(object_start, url, "updated_at"),
+                                 image->version, sizeof(image->version))) {
+                const char *size = json_last_value(object_start, url, "size");
+                image->size = size != NULL ? (uint32_t)strtoul(size, NULL, 10) : 0;
+                snprintf(image->name, sizeof(image->name), "%s", branch);
+                return true;
+            }
+            object_start = url;
+        }
+        return false;
+    }
+    return false;
+}
+
+/* GETs url into buffer, reusing the client's connection. */
+static esp_err_t github_get(esp_http_client_handle_t client, http_buffer_t *buffer,
+                            const char *url)
+{
+    buffer->length = 0;
+    if (buffer->data != NULL) {
+        buffer->data[0] = '\0';
+    }
+    esp_http_client_set_url(client, url);
+    esp_err_t result = esp_http_client_perform(client);
+    int status = esp_http_client_get_status_code(client);
+    if (result != ESP_OK) {
+        ESP_LOGW(TAG, "GitHub request failed: %s", esp_err_to_name(result));
+        return result;
+    }
+    if (status != 200 || buffer->data == NULL) {
+        ESP_LOGW(TAG, "GitHub returned HTTP %d for %s", status, url);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    return ESP_OK;
+}
+
+/* Lists the repository's branches and keeps those with a published image. */
+static net_state_t fetch_branch_images(void)
 {
     http_buffer_t buffer = {0};
     esp_http_client_config_t config = {
-        .url = RELEASES_URL,
+        .url = BRANCHES_URL,
         .timeout_ms = 10000,
         .buffer_size = 2048,
         .buffer_size_tx = 1024,
+        .keep_alive_enable = true,
         .crt_bundle_attach = esp_crt_bundle_attach,
         .event_handler = http_buffer_handler,
         .user_data = &buffer,
@@ -492,20 +582,37 @@ static net_state_t fetch_release(void)
         return NET_OFFLINE;
     }
     esp_http_client_set_header(client, "Accept", "application/vnd.github+json");
-    esp_err_t result = esp_http_client_perform(client);
-    int status = esp_http_client_get_status_code(client);
-    esp_http_client_cleanup(client);
 
-    net_state_t state = NET_OFFLINE;
-    if (result != ESP_OK) {
-        ESP_LOGW(TAG, "Release request failed: %s", esp_err_to_name(result));
-    } else if (status != 200 || buffer.data == NULL) {
-        ESP_LOGW(TAG, "Release request returned HTTP %d", status);
-        state = NET_NO_RELEASE;
-    } else {
-        parse_release_assets(buffer.data);
-        state = NET_READY;
+    net_state_t state = NET_GITHUB_ERROR;
+    char branches[MAX_REMOTE_IMAGES][48];
+    int branch_count = 0;
+    if (github_get(client, &buffer, BRANCHES_URL) == ESP_OK) {
+        const char *end = buffer.data + buffer.length;
+        for (const char *name = json_value(buffer.data, end, "name");
+             name != NULL && branch_count < MAX_REMOTE_IMAGES;
+             name = json_value(name, end, "name")) {
+            if (json_copy_string(name, branches[branch_count], sizeof(branches[0])) &&
+                !branch_is_excluded(branches[branch_count])) {
+                ++branch_count;
+            }
+        }
+        if (github_get(client, &buffer, RELEASES_URL) == ESP_OK) {
+            remote_count = 0;
+            for (int i = 0; i < branch_count; ++i) {
+                remote_image_t *image = &remote_images[remote_count];
+                if (find_branch_image(buffer.data, branches[i], image)) {
+                    ESP_LOGI(TAG, "Branch %s: %s, %u bytes", image->name, image->version,
+                             (unsigned)image->size);
+                    ++remote_count;
+                } else {
+                    ESP_LOGW(TAG, "Branch %s has no %s release yet", branches[i],
+                             IMAGE_ASSET_NAME);
+                }
+            }
+            state = NET_READY;
+        }
     }
+    esp_http_client_cleanup(client);
     free(buffer.data);
     return state;
 }
@@ -518,7 +625,7 @@ static void network_task(void *argument)
         net_state = NET_OFFLINE;
     } else {
         net_state = NET_FETCHING;
-        net_state = fetch_release();
+        net_state = fetch_branch_images();
     }
     vTaskDelete(NULL);
 }
@@ -629,7 +736,7 @@ static esp_err_t download_image(const remote_image_t *image, int slot_index)
 
     /* The slot's old contents are gone from here on. */
     slot->valid = false;
-    save_slot(slot_index, NULL, 0);
+    save_slot(slot_index, NULL, NULL);
     draw_download_progress("erase", 0, (size_t)length);
     result = esp_ota_begin(slot->partition, length > 0 ? (size_t)length : OTA_SIZE_UNKNOWN,
                            &ota);
@@ -668,9 +775,9 @@ static esp_err_t download_image(const remote_image_t *image, int slot_index)
     result = esp_ota_end(ota);
     if (result == ESP_OK) {
         snprintf(slot->name, sizeof(slot->name), "%s", image->name);
-        slot->size = image->size;
+        snprintf(slot->version, sizeof(slot->version), "%s", image->version);
         slot->valid = true;
-        save_slot(slot_index, image->name, image->size);
+        save_slot(slot_index, image->name, image->version);
         ESP_LOGI(TAG, "Stored %s in slot %c (%u bytes)", image->name, 'A' + slot_index,
                  (unsigned)received);
     }
@@ -723,6 +830,7 @@ void app_main(void)
         nvs_result = nvs_flash_init();
     }
     ESP_ERROR_CHECK(nvs_result);
+    store_config();
     load_slots();
     ESP_ERROR_CHECK(cyd_touch_start(&touch_queue));
 
