@@ -38,8 +38,21 @@ typedef struct {
     int16_t y;
 } cyd_touch_point_t;
 
-/* Initializes the LCD, clears it to black and turns on the backlight. */
+/* Backlight level in percent. The launcher saves it in NVS so every image
+   starts at the same brightness. */
+#define CYD_BRIGHTNESS_MIN 20
+#define CYD_BRIGHTNESS_MAX 100
+#define CYD_BRIGHTNESS_STEP 20
+#define CYD_CONFIG_NAMESPACE "cyd_config"
+#define CYD_CONFIG_BRIGHTNESS "brightness"
+
+/* Initializes the LCD, clears it to black and turns on the backlight at the
+   brightness saved in NVS (full brightness if none). */
 esp_err_t cyd_display_init(void);
+
+/* Sets the backlight, clamped to CYD_BRIGHTNESS_MIN..MAX; does not save it. */
+esp_err_t cyd_set_brightness(int percent);
+int cyd_get_brightness(void);
 
 esp_err_t cyd_fill_rect(int x, int y, int width, int height, uint16_t color);
 

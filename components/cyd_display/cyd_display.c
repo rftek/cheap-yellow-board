@@ -3,12 +3,15 @@
 #include <string.h>
 
 #include "driver/gpio.h"
+#include "driver/ledc.h"
 #include "driver/spi_master.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_rom_sys.h"
 #include "freertos/task.h"
+#include "nvs.h"
+#include "nvs_flash.h"
 
 #define LCD_HOST SPI2_HOST
 #define LCD_PIN_MOSI GPIO_NUM_13
@@ -16,6 +19,14 @@
 #define LCD_PIN_CS GPIO_NUM_15
 #define LCD_PIN_DC GPIO_NUM_2
 #define LCD_PIN_BACKLIGHT GPIO_NUM_21
+
+/* The backlight is dimmed with PWM. */
+#define BACKLIGHT_SPEED_MODE LEDC_LOW_SPEED_MODE
+#define BACKLIGHT_TIMER LEDC_TIMER_0
+#define BACKLIGHT_CHANNEL LEDC_CHANNEL_0
+#define BACKLIGHT_RESOLUTION LEDC_TIMER_10_BIT
+#define BACKLIGHT_MAX_DUTY ((1 << 10) - 1)
+#define BACKLIGHT_FREQUENCY_HZ 5000
 
 #define TOUCH_HOST SPI3_HOST
 #define TOUCH_PIN_MOSI GPIO_NUM_32
@@ -38,6 +49,7 @@ static const char *TAG = "cyd_display";
 static spi_device_handle_t lcd_spi;
 static spi_device_handle_t touch_spi;
 static QueueHandle_t touch_queue;
+static int brightness = CYD_BRIGHTNESS_MAX;
 static uint8_t text_chunk[TEXT_CHUNK_COLUMNS * CYD_FONT_HEIGHT * 2];
 
 /* Classic 5x7 ASCII font, 0x20-0x7E, then the up and down arrows; one byte
@@ -282,14 +294,68 @@ static esp_err_t lcd_init(void)
     return ESP_OK;
 }
 
+esp_err_t cyd_set_brightness(int percent)
+{
+    if (percent < CYD_BRIGHTNESS_MIN) {
+        percent = CYD_BRIGHTNESS_MIN;
+    }
+    if (percent > CYD_BRIGHTNESS_MAX) {
+        percent = CYD_BRIGHTNESS_MAX;
+    }
+    brightness = percent;
+    ESP_RETURN_ON_ERROR(ledc_set_duty(BACKLIGHT_SPEED_MODE, BACKLIGHT_CHANNEL,
+                                      (uint32_t)percent * BACKLIGHT_MAX_DUTY / 100),
+                        TAG, "set backlight duty");
+    return ledc_update_duty(BACKLIGHT_SPEED_MODE, BACKLIGHT_CHANNEL);
+}
+
+int cyd_get_brightness(void)
+{
+    return brightness;
+}
+
+/* The level the launcher saved, or full brightness when there is none. */
+static int saved_brightness(void)
+{
+    nvs_handle_t nvs;
+    uint8_t percent = CYD_BRIGHTNESS_MAX;
+    /* Safe if the app initializes NVS again later. */
+    if (nvs_flash_init() == ESP_OK &&
+        nvs_open(CYD_CONFIG_NAMESPACE, NVS_READONLY, &nvs) == ESP_OK) {
+        nvs_get_u8(nvs, CYD_CONFIG_BRIGHTNESS, &percent);
+        nvs_close(nvs);
+    }
+    return percent;
+}
+
+static esp_err_t backlight_init(void)
+{
+    ledc_timer_config_t timer = {
+        .speed_mode = BACKLIGHT_SPEED_MODE,
+        .duty_resolution = BACKLIGHT_RESOLUTION,
+        .timer_num = BACKLIGHT_TIMER,
+        .freq_hz = BACKLIGHT_FREQUENCY_HZ,
+        .clk_cfg = LEDC_AUTO_CLK,
+    };
+    ESP_RETURN_ON_ERROR(ledc_timer_config(&timer), TAG, "configure backlight timer");
+    ledc_channel_config_t channel = {
+        .gpio_num = LCD_PIN_BACKLIGHT,
+        .speed_mode = BACKLIGHT_SPEED_MODE,
+        .channel = BACKLIGHT_CHANNEL,
+        .timer_sel = BACKLIGHT_TIMER,
+        .duty = 0,
+    };
+    return ledc_channel_config(&channel);
+}
+
 esp_err_t cyd_display_init(void)
 {
     gpio_config_t display_gpio = {
-        .pin_bit_mask = (1ULL << LCD_PIN_DC) | (1ULL << LCD_PIN_BACKLIGHT),
+        .pin_bit_mask = 1ULL << LCD_PIN_DC,
         .mode = GPIO_MODE_OUTPUT,
     };
     ESP_RETURN_ON_ERROR(gpio_config(&display_gpio), TAG, "configure display GPIO");
-    ESP_RETURN_ON_ERROR(gpio_set_level(LCD_PIN_BACKLIGHT, 0), TAG, "backlight off");
+    ESP_RETURN_ON_ERROR(backlight_init(), TAG, "initialize backlight");
 
     spi_bus_config_t display_bus = {
         .mosi_io_num = LCD_PIN_MOSI,
@@ -313,7 +379,7 @@ esp_err_t cyd_display_init(void)
     ESP_RETURN_ON_ERROR(lcd_init(), TAG, "initialize LCD");
     ESP_RETURN_ON_ERROR(cyd_fill_rect(0, 0, CYD_LCD_WIDTH, CYD_LCD_HEIGHT, CYD_COLOR_BLACK),
                         TAG, "clear display");
-    return gpio_set_level(LCD_PIN_BACKLIGHT, 1);
+    return cyd_set_brightness(saved_brightness());
 }
 
 static esp_err_t touch_bus_init(void)
