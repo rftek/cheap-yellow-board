@@ -18,7 +18,6 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      USERPROFILE: ${{ runner.temp }}
       PLATFORMIO_BUILD_DIR: ${{ github.workspace }}/build
     steps:
       - uses: actions/checkout@v4
@@ -35,6 +34,9 @@ jobs:
       - run: pip install platformio
 
       - run: pio run
+        env:
+          # build_dir in platformio.ini is under USERPROFILE, which Linux lacks.
+          USERPROFILE: ${{ runner.temp }}
 
       - name: Publish firmware.bin
         env:
