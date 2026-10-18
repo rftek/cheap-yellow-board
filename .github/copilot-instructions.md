@@ -1,11 +1,8 @@
-# ESP32 CYD Launcher and Boot Images
+# ESP32 CYD BirdNET Viewer
 
-- PlatformIO projects using native ESP-IDF C for an ESP32 Cheap Yellow Display.
-- `launcher/` is the factory app: a 20-second boot menu (each tap off an entry adds 20 s) of the images in `ota_0`/`ota_1`, plus downloads of `.bin` assets from the latest GitHub release of this repo. Its `bootloader_components/main` overrides the bootloader: power-on reset boots factory, any other reset boots the otadata choice.
-- `main/` is the Wi-Fi/BLE scanner boot image. It never connects to a network and needs no credentials.
-- `apps/<name>/` holds further boot images, each its own PlatformIO project using `components/` (e.g. `apps/screen_check`, a display color test; `apps/birdnet`, the original BirdNET photo viewer).
-- `components/cyd_display` is shared by both: LCD, 5x7 font at 3x, touchscreen. The panel fills a window column-major; send pixel data in that order.
-- Only the launcher and the BirdNET image use Wi-Fi credentials, from `%USERPROFILE%\.cyd_private\wifi_credentials.h`; never commit secrets.
-- Build with `pio run` (scanner) and `pio run --project-dir launcher`. Flash with esptool at the offsets in README.md, never `pio run --target upload`.
-- Keep boot images under 1.31 MB and the launcher under 1.25 MB.
+- PlatformIO project using native ESP-IDF C for an ESP32 Cheap Yellow Display. Each application has its own branch: `bootloader`, `wifi_checker`, `birdnet_viewer` (this), `screen_check`.
+- Shows the latest BirdNET visit of the day (confidence of at least 80%) as a full-screen Wikimedia photo; refreshes every 2 minutes or on tap. Keep the image-only screen and bounded HTTP/JPEG streaming.
+- Wi-Fi credentials and `BIRDNET_BASE_URL` come from `%USERPROFILE%\.cyd_private\wifi_credentials.h`; never commit secrets.
+- `components/cyd_display` (LCD, 5x7 font at 3x, patterns, touch) is copied on every application branch; keep the copies in sync. The panel fills a window column-major; draw images through `cyd_draw_pattern`.
+- Build with `pio run`. The binary also runs as a `bootloader` launcher image; keep it under 1.31 MB.
 - Verify firmware changes with a PlatformIO build before flashing.

@@ -1,4 +1,3 @@
-#include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -6,659 +5,995 @@
 #include <string.h>
 
 #include "cyd_display.h"
+#include "esp_crt_bundle.h"
+#include "esp_check.h"
 #include "esp_event.h"
+#include "esp_http_client.h"
 #include "esp_log.h"
-#include "esp_mac.h"
+#include "esp_netif.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
+#include "esp_heap_caps.h"
+#include "rom/tjpgd.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/event_groups.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
-#include "host/ble_hs.h"
-#include "host/util/util.h"
-#include "nimble/nimble_port.h"
-#include "nimble/nimble_port_freertos.h"
 #include "nvs_flash.h"
+#include "wifi_credentials.h"
 
-#define MAX_WIFI_RESULTS 24
-#define MAX_BLE_RESULTS 32
-#define BLE_SCAN_DURATION_MS 6000
+#define LCD_WIDTH CYD_LCD_WIDTH
+#define LCD_HEIGHT CYD_LCD_HEIGHT
+#define QUERY_INTERVAL_US (120LL * 1000 * 1000)
+#ifndef BIRDNET_BASE_URL
+#define BIRDNET_BASE_URL "http://birdnet.local"
+#endif
+#define API_JSON_CAPACITY (16 * 1024)
+#define IMAGE_JPEG_CAPACITY (320 * 1024)
+#define JPEG_WORKBUF_SIZE 3100
+#define IMAGE_TOP 0
+#define IMAGE_HEIGHT LCD_HEIGHT
+#define TOUCH_TRIGGER_BIT BIT0
+#define MIN_BIRD_CONFIDENCE 0.80
+#define COLOR_BLACK CYD_COLOR_BLACK
 
-#define BLE_SYNCED_BIT BIT0
-#define BLE_SCAN_DONE_BIT BIT1
+static const char *TAG = "birdnet_cyd";
 
-/* List header layout: title (tap to rescan), then up and down arrow buttons. */
-#define HEADER_TITLE_COLUMNS 10
-#define ARROW_UP_COLUMN 10
-#define ARROW_DOWN_COLUMN 14
-#define ARROW_COLUMNS 3
-
-static const char *TAG = "cyd_scanner";
-static QueueHandle_t touch_queue;
-static EventGroupHandle_t ble_events;
-static uint8_t ble_own_addr_type;
-
-typedef struct {
-    uint8_t addr[6];
-    uint8_t addr_type;
-    uint8_t adv_type; /* advertising PDU type, excluding scan responses */
-    int8_t rssi;
-    int8_t tx_power;
-    bool has_tx_power;
-    bool has_company;
-    bool has_service;
-    uint16_t company_id;
-    uint16_t service_uuid16;
-    char name[32];
-} ble_device_t;
-
-enum { LIST_WIFI, LIST_BLE, LIST_COUNT };
+static volatile bool wifi_connected;
+static TaskHandle_t app_task_handle;
+static bool displayed_image_ready;
+static char displayed_species[96];
 
 typedef struct {
-    int header_row;
-    int rows;   /* visible entry rows below the header */
-    int offset; /* index of the first visible entry */
-} list_view_t;
+    uint8_t *data;
+    size_t length;
+    size_t capacity;
+    size_t limit;
+} http_response_t;
 
-/* A screen of text rows; the last row is reserved for a footer. */
 typedef struct {
-    char text[CYD_TEXT_ROWS][CYD_TEXT_COLUMNS + 1];
-    uint16_t color[CYD_TEXT_ROWS];
-    int count;
-} page_t;
+    char species[64];
+    char scientific_name[96];
+    char date[16];
+    char detected_time[16];
+    double confidence;
+    bool found;
+} bird_detection_t;
 
-static wifi_ap_record_t wifi_results[MAX_WIFI_RESULTS];
-static uint16_t wifi_result_count;
-static uint16_t wifi_total_count;
-static ble_device_t ble_results[MAX_BLE_RESULTS];
-static int ble_result_count;
-static bool ble_results_full;
-static list_view_t list_views[LIST_COUNT];
+typedef struct {
+    const uint8_t *data;
+    size_t length;
+    size_t offset;
+    esp_http_client_handle_t client;
+    bool read_error;
+} jpeg_reader_t;
 
-static const char *wifi_auth_name(wifi_auth_mode_t mode)
+typedef struct {
+    int offset_x;
+    int offset_y;
+    unsigned int source_width;
+    unsigned int source_height;
+    uint8_t *rgb565;
+    size_t buffer_capacity;
+    /* Placement of the resized tile currently in rgb565. */
+    int tile_left;
+    int tile_top;
+    int tile_width;
+} jpeg_output_t;
+
+typedef struct {
+    jpeg_reader_t reader;
+    jpeg_output_t output;
+} jpeg_context_t;
+
+typedef struct {
+    const char *data;
+    size_t length;
+    size_t position;
+} json_cursor_t;
+
+typedef struct {
+    size_t start;
+    size_t end;
+} json_value_t;
+
+static esp_err_t http_event_handler(esp_http_client_event_t *event)
 {
-    switch (mode) {
-    case WIFI_AUTH_OPEN:
-        return "OPEN";
-    case WIFI_AUTH_WEP:
-        return "WEP";
-    case WIFI_AUTH_WPA_PSK:
-        return "WPA-PSK";
-    case WIFI_AUTH_WPA2_PSK:
-        return "WPA2-PSK";
-    case WIFI_AUTH_WPA_WPA2_PSK:
-        return "WPA/WPA2-PSK";
-    case WIFI_AUTH_WPA2_ENTERPRISE:
-        return "WPA2-ENT";
-    case WIFI_AUTH_WPA3_PSK:
-        return "WPA3-SAE";
-    case WIFI_AUTH_WPA2_WPA3_PSK:
-        return "WPA2/WPA3";
-    case WIFI_AUTH_OWE:
-        return "OWE";
-    default:
-        return "OTHER";
+    if (event->event_id != HTTP_EVENT_ON_DATA || event->data_len <= 0) {
+        return ESP_OK;
     }
-}
-
-static const char *wifi_cipher_name(wifi_cipher_type_t cipher)
-{
-    switch (cipher) {
-    case WIFI_CIPHER_TYPE_NONE:
-        return "NONE";
-    case WIFI_CIPHER_TYPE_WEP40:
-    case WIFI_CIPHER_TYPE_WEP104:
-        return "WEP";
-    case WIFI_CIPHER_TYPE_TKIP:
-        return "TKIP";
-    case WIFI_CIPHER_TYPE_CCMP:
-        return "CCMP";
-    case WIFI_CIPHER_TYPE_TKIP_CCMP:
-        return "TKIP+CCMP";
-    case WIFI_CIPHER_TYPE_GCMP:
-        return "GCMP";
-    case WIFI_CIPHER_TYPE_GCMP256:
-        return "GCMP-256";
-    default:
-        return "OTHER";
+    http_response_t *response = event->user_data;
+    size_t chunk_length = (size_t)event->data_len;
+    if (response->length > response->limit ||
+        chunk_length > response->limit - response->length) {
+        ESP_LOGE(TAG, "HTTP response exceeded %u-byte limit",
+                 (unsigned)response->limit);
+        return ESP_ERR_INVALID_SIZE;
     }
-}
-
-static void wifi_phy_text(const wifi_ap_record_t *ap, char *text, size_t size)
-{
-    snprintf(text, size, "%s%s%s%s%s", ap->phy_11b ? "b" : "", ap->phy_11g ? "g" : "",
-             ap->phy_11n ? "n" : "", ap->phy_11ax ? "/ax" : "", ap->phy_lr ? " LR" : "");
-}
-
-static void wifi_init(void)
-{
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    wifi_init_config_t init_config = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&init_config));
-    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_start());
-}
-
-static void wifi_scan(void)
-{
-    wifi_result_count = 0;
-    wifi_total_count = 0;
-    esp_err_t result = esp_wifi_scan_start(NULL, true);
-    if (result != ESP_OK) {
-        ESP_LOGE(TAG, "Wi-Fi scan failed: %s", esp_err_to_name(result));
-        return;
-    }
-    esp_wifi_scan_get_ap_num(&wifi_total_count);
-    wifi_result_count = MAX_WIFI_RESULTS;
-    result = esp_wifi_scan_get_ap_records(&wifi_result_count, wifi_results);
-    if (result != ESP_OK) {
-        ESP_LOGE(TAG, "Could not read Wi-Fi scan results: %s", esp_err_to_name(result));
-        wifi_result_count = 0;
-        return;
-    }
-    ESP_LOGI(TAG, "Wi-Fi: %u networks", wifi_total_count);
-    for (int i = 0; i < wifi_result_count; ++i) {
-        const wifi_ap_record_t *ap = &wifi_results[i];
-        ESP_LOGI(TAG, "  %4d dBm ch%-2u %-4s " MACSTR " %s", ap->rssi, ap->primary,
-                 wifi_auth_name(ap->authmode), MAC2STR(ap->bssid),
-                 ap->ssid[0] != '\0' ? (const char *)ap->ssid : "(hidden)");
-    }
-}
-
-static int ble_find_or_add(const uint8_t *addr)
-{
-    for (int i = 0; i < ble_result_count; ++i) {
-        if (memcmp(ble_results[i].addr, addr, 6) == 0) {
-            return i;
+    size_t required = response->length + chunk_length;
+    if (required > response->capacity) {
+        size_t new_capacity = response->capacity * 2;
+        if (new_capacity < required) {
+            new_capacity = required;
         }
+        if (new_capacity > response->limit) {
+            new_capacity = response->limit;
+        }
+        uint8_t *new_data = heap_caps_realloc(response->data, new_capacity + 1,
+                                              MALLOC_CAP_8BIT);
+        if (new_data == NULL) {
+            ESP_LOGE(TAG, "Could not grow HTTP response buffer to %u bytes",
+                     (unsigned)new_capacity);
+            return ESP_ERR_NO_MEM;
+        }
+        response->data = new_data;
+        response->capacity = new_capacity;
     }
-    if (ble_result_count >= MAX_BLE_RESULTS) {
-        ble_results_full = true;
-        return -1;
-    }
-    ble_device_t *device = &ble_results[ble_result_count];
-    memset(device, 0, sizeof(*device));
-    memcpy(device->addr, addr, 6);
-    device->adv_type = 0xFF;
-    return ble_result_count++;
+    memcpy(response->data + response->length, event->data, chunk_length);
+    response->length += chunk_length;
+    return ESP_OK;
 }
 
-static int ble_gap_event(struct ble_gap_event *event, void *argument)
+static esp_err_t http_get(const char *url, size_t capacity, http_response_t *response)
 {
-    (void)argument;
-    if (event->type == BLE_GAP_EVENT_DISC) {
-        int index = ble_find_or_add(event->disc.addr.val);
-        if (index < 0) {
-            return 0;
-        }
-        ble_device_t *device = &ble_results[index];
-        device->rssi = event->disc.rssi;
-        device->addr_type = event->disc.addr.type;
-        if (event->disc.event_type != BLE_HCI_ADV_RPT_EVTYPE_SCAN_RSP) {
-            device->adv_type = event->disc.event_type;
-        }
-
-        /* Advertisements and scan responses carry different fields; keep the
-           first value seen for each. */
-        struct ble_hs_adv_fields fields;
-        if (ble_hs_adv_parse_fields(&fields, event->disc.data,
-                                    event->disc.length_data) != 0) {
-            return 0;
-        }
-        if (device->name[0] == '\0' && fields.name != NULL && fields.name_len > 0) {
-            size_t length = fields.name_len < sizeof(device->name) - 1
-                                ? fields.name_len
-                                : sizeof(device->name) - 1;
-            memcpy(device->name, fields.name, length);
-            device->name[length] = '\0';
-        }
-        if (!device->has_tx_power && fields.tx_pwr_lvl_is_present) {
-            device->tx_power = fields.tx_pwr_lvl;
-            device->has_tx_power = true;
-        }
-        if (!device->has_company && fields.mfg_data != NULL && fields.mfg_data_len >= 2) {
-            device->company_id = (uint16_t)(fields.mfg_data[0] | (fields.mfg_data[1] << 8));
-            device->has_company = true;
-        }
-        if (!device->has_service && fields.uuids16 != NULL && fields.num_uuids16 > 0) {
-            device->service_uuid16 = fields.uuids16[0].value;
-            device->has_service = true;
-        }
-    } else if (event->type == BLE_GAP_EVENT_DISC_COMPLETE) {
-        xEventGroupSetBits(ble_events, BLE_SCAN_DONE_BIT);
+    memset(response, 0, sizeof(*response));
+    size_t initial_capacity = capacity < 2048 ? capacity : 2048;
+    response->data = heap_caps_malloc(initial_capacity + 1, MALLOC_CAP_8BIT);
+    if (response->data == NULL) {
+        return ESP_ERR_NO_MEM;
     }
-    return 0;
-}
+    response->capacity = initial_capacity;
+    response->limit = capacity;
 
-static void ble_on_sync(void)
-{
-    if (ble_hs_id_infer_auto(0, &ble_own_addr_type) != 0) {
-        ESP_LOGE(TAG, "Could not determine BLE address type");
-        return;
-    }
-    xEventGroupSetBits(ble_events, BLE_SYNCED_BIT);
-}
-
-static void ble_host_task(void *argument)
-{
-    (void)argument;
-    nimble_port_run();
-    nimble_port_freertos_deinit();
-}
-
-static void ble_init(void)
-{
-    ble_events = xEventGroupCreate();
-    ESP_ERROR_CHECK(ble_events != NULL ? ESP_OK : ESP_ERR_NO_MEM);
-    ESP_ERROR_CHECK(nimble_port_init());
-    ble_hs_cfg.sync_cb = ble_on_sync;
-    nimble_port_freertos_init(ble_host_task);
-}
-
-/* Named devices first, then strongest signal first. */
-static int ble_compare(const void *left, const void *right)
-{
-    const ble_device_t *a = left;
-    const ble_device_t *b = right;
-    bool a_named = a->name[0] != '\0';
-    bool b_named = b->name[0] != '\0';
-    if (a_named != b_named) {
-        return a_named ? -1 : 1;
-    }
-    return b->rssi - a->rssi;
-}
-
-static void ble_scan(void)
-{
-    ble_result_count = 0;
-    ble_results_full = false;
-    if ((xEventGroupWaitBits(ble_events, BLE_SYNCED_BIT, pdFALSE, pdTRUE,
-                             pdMS_TO_TICKS(5000)) & BLE_SYNCED_BIT) == 0) {
-        ESP_LOGE(TAG, "BLE host did not start");
-        return;
-    }
-    /* Active scan without controller duplicate filtering so scan responses,
-       which usually carry the device name, are not dropped. */
-    struct ble_gap_disc_params params = {
-        .passive = 0,
-        .filter_duplicates = 0,
+    esp_http_client_config_t config = {
+        .url = url,
+        .timeout_ms = 15000,
+        .buffer_size = 1024,
+        .buffer_size_tx = 1024,
+        .crt_bundle_attach = strncmp(url, "https://", 8) == 0
+                                 ? esp_crt_bundle_attach
+                                 : NULL,
+        .event_handler = http_event_handler,
+        .user_data = response,
     };
-    xEventGroupClearBits(ble_events, BLE_SCAN_DONE_BIT);
-    int rc = ble_gap_disc(ble_own_addr_type, BLE_SCAN_DURATION_MS, &params,
-                          ble_gap_event, NULL);
-    if (rc != 0) {
-        ESP_LOGE(TAG, "BLE scan failed to start: %d", rc);
-        return;
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (client == NULL) {
+        heap_caps_free(response->data);
+        response->data = NULL;
+        return ESP_FAIL;
     }
-    xEventGroupWaitBits(ble_events, BLE_SCAN_DONE_BIT, pdTRUE, pdTRUE,
-                        pdMS_TO_TICKS(BLE_SCAN_DURATION_MS + 2000));
-    qsort(ble_results, ble_result_count, sizeof(ble_results[0]), ble_compare);
 
-    ESP_LOGI(TAG, "BLE: %d%s devices", ble_result_count, ble_results_full ? "+" : "");
-    for (int i = 0; i < ble_result_count; ++i) {
-        const ble_device_t *device = &ble_results[i];
-        /* NimBLE stores addresses little-endian; print most significant byte first. */
-        ESP_LOGI(TAG, "  %4d dBm %02x:%02x:%02x:%02x:%02x:%02x %s", device->rssi,
-                 device->addr[5], device->addr[4], device->addr[3],
-                 device->addr[2], device->addr[1], device->addr[0], device->name);
+    esp_err_t result = esp_http_client_perform(client);
+    int status = esp_http_client_get_status_code(client);
+    if (result == ESP_OK && status != 200) {
+        ESP_LOGE(TAG, "GET %s returned HTTP %d", url, status);
+        result = ESP_FAIL;
+    }
+    esp_http_client_cleanup(client);
+    if (result != ESP_OK) {
+        heap_caps_free(response->data);
+        response->data = NULL;
+        return result;
+    }
+    response->data[response->length] = '\0';
+    return ESP_OK;
+}
+
+static void http_response_free(http_response_t *response)
+{
+    heap_caps_free(response->data);
+    memset(response, 0, sizeof(*response));
+}
+
+static void json_skip_whitespace(json_cursor_t *cursor)
+{
+    while (cursor->position < cursor->length &&
+           (cursor->data[cursor->position] == ' ' ||
+            cursor->data[cursor->position] == '\t' ||
+            cursor->data[cursor->position] == '\r' ||
+            cursor->data[cursor->position] == '\n')) {
+        ++cursor->position;
     }
 }
 
-static void show_status(const char *message)
+static int json_hex_value(char character)
 {
-    ESP_ERROR_CHECK(cyd_fill_rect(0, 0, CYD_LCD_WIDTH, CYD_LCD_HEIGHT, CYD_COLOR_BLACK));
-    ESP_ERROR_CHECK(cyd_text_row(CYD_TEXT_ROWS / 2, CYD_COLOR_YELLOW, CYD_COLOR_BLACK, message));
+    if (character >= '0' && character <= '9') {
+        return character - '0';
+    }
+    if (character >= 'a' && character <= 'f') {
+        return character - 'a' + 10;
+    }
+    if (character >= 'A' && character <= 'F') {
+        return character - 'A' + 10;
+    }
+    return -1;
 }
 
-static void page_add(page_t *page, uint16_t color, const char *format, ...)
+static bool json_parse_string(json_cursor_t *cursor, char *output, size_t capacity)
 {
-    if (page->count >= CYD_TEXT_ROWS - 1) {
-        return;
+    if (cursor->position >= cursor->length || cursor->data[cursor->position++] != '"') {
+        return false;
     }
-    va_list arguments;
-    va_start(arguments, format);
-    vsnprintf(page->text[page->count], sizeof(page->text[0]), format, arguments);
-    va_end(arguments);
-    page->color[page->count++] = color;
-}
-
-/* Adds text split across up to max_rows full-width rows. */
-static void page_add_wrapped(page_t *page, uint16_t color, const char *text, int max_rows)
-{
-    size_t length = strlen(text);
-    for (int row = 0; row < max_rows && (row == 0 || length > 0); ++row) {
-        page_add(page, color, "%.*s", CYD_TEXT_COLUMNS, text);
-        size_t step = length < CYD_TEXT_COLUMNS ? length : CYD_TEXT_COLUMNS;
-        text += step;
-        length -= step;
-    }
-}
-
-static void page_show(const page_t *page, const char *footer)
-{
-    for (int row = 0; row < CYD_TEXT_ROWS; ++row) {
-        if (row < page->count) {
-            ESP_ERROR_CHECK(cyd_text_row(row, page->color[row], CYD_COLOR_BLACK, page->text[row]));
-        } else if (row == CYD_TEXT_ROWS - 1) {
-            ESP_ERROR_CHECK(cyd_text_row(row, CYD_COLOR_GRAY, CYD_COLOR_BLACK, footer));
-        } else {
-            ESP_ERROR_CHECK(cyd_text_row(row, CYD_COLOR_WHITE, CYD_COLOR_BLACK, ""));
-        }
-    }
-}
-
-static void show_wifi_detail(const wifi_ap_record_t *ap)
-{
-    page_t page = {0};
-    char phy[24];
-    wifi_phy_text(ap, phy, sizeof(phy));
-    page_add(&page, CYD_COLOR_YELLOW, "WI-FI NETWORK");
-    page_add_wrapped(&page, CYD_COLOR_WHITE,
-                     ap->ssid[0] != '\0' ? (const char *)ap->ssid : "(hidden)", 2);
-    page_add(&page, CYD_COLOR_WHITE, "RSSI %d dBm", ap->rssi);
-    page_add(&page, CYD_COLOR_WHITE, "CHANNEL %u", ap->primary);
-    page_add(&page, CYD_COLOR_WHITE, "AUTH %s", wifi_auth_name(ap->authmode));
-    page_add(&page, CYD_COLOR_WHITE, "CIPHER %s", wifi_cipher_name(ap->pairwise_cipher));
-    page_add(&page, CYD_COLOR_WHITE, MACSTR, MAC2STR(ap->bssid));
-    page_add(&page, CYD_COLOR_WHITE, "802.11%s%s", phy, ap->wps ? " WPS" : "");
-    page_show(&page, "tap to go back");
-}
-
-static const char *ble_company_name(uint16_t company_id)
-{
-    switch (company_id) {
-    case 0x0006:
-        return "Microsoft";
-    case 0x004C:
-        return "Apple";
-    case 0x0059:
-        return "Nordic";
-    case 0x0075:
-        return "Samsung";
-    case 0x0087:
-        return "Garmin";
-    case 0x00E0:
-        return "Google";
-    case 0x012D:
-        return "Sony";
-    case 0x0171:
-        return "Amazon";
-    case 0x02E5:
-        return "Espressif";
-    default:
-        return NULL;
-    }
-}
-
-static const char *ble_address_kind(const ble_device_t *device)
-{
-    if (device->addr_type == BLE_ADDR_PUBLIC) {
-        return "PUBLIC ADDRESS";
-    }
-    /* Random address subtype is in the two most significant bits. */
-    switch (device->addr[5] >> 6) {
-    case 3:
-        return "STATIC RANDOM";
-    case 1:
-        return "PRIVATE (RPA)";
-    case 0:
-        return "PRIVATE (NRPA)";
-    default:
-        return "RANDOM ADDRESS";
-    }
-}
-
-static const char *ble_advertising_kind(uint8_t adv_type)
-{
-    switch (adv_type) {
-    case BLE_HCI_ADV_RPT_EVTYPE_ADV_IND:
-        return "CONNECTABLE";
-    case BLE_HCI_ADV_RPT_EVTYPE_DIR_IND:
-        return "DIRECTED";
-    case BLE_HCI_ADV_RPT_EVTYPE_SCAN_IND:
-        return "SCANNABLE";
-    case BLE_HCI_ADV_RPT_EVTYPE_NONCONN_IND:
-        return "NON-CONNECTABLE";
-    default:
-        return "ADV TYPE ?";
-    }
-}
-
-static void show_ble_detail(const ble_device_t *device)
-{
-    page_t page = {0};
-    page_add(&page, CYD_COLOR_CYAN, "BLE DEVICE");
-    if (device->name[0] != '\0') {
-        page_add_wrapped(&page, CYD_COLOR_WHITE, device->name, 2);
-    } else {
-        page_add(&page, CYD_COLOR_GRAY, "(no name)");
-    }
-    page_add(&page, CYD_COLOR_WHITE, "RSSI %d dBm", device->rssi);
-    page_add(&page, CYD_COLOR_WHITE, "%02x:%02x:%02x:%02x:%02x:%02x",
-             device->addr[5], device->addr[4], device->addr[3],
-             device->addr[2], device->addr[1], device->addr[0]);
-    page_add(&page, CYD_COLOR_WHITE, "%s", ble_address_kind(device));
-    page_add(&page, CYD_COLOR_WHITE, "%s", ble_advertising_kind(device->adv_type));
-    if (device->has_tx_power) {
-        page_add(&page, CYD_COLOR_WHITE, "TX POWER %d dBm", device->tx_power);
-    }
-    if (device->has_company) {
-        const char *company = ble_company_name(device->company_id);
-        if (company != NULL) {
-            page_add(&page, CYD_COLOR_WHITE, "MFR %s", company);
-        } else {
-            page_add(&page, CYD_COLOR_WHITE, "MFR 0x%04X", device->company_id);
-        }
-    }
-    if (device->has_service) {
-        page_add(&page, CYD_COLOR_WHITE, "SERVICE 0x%04X", device->service_uuid16);
-    }
-    page_show(&page, "tap to go back");
-}
-
-static int list_count(int list)
-{
-    return list == LIST_WIFI ? wifi_result_count : ble_result_count;
-}
-
-/* Splits the rows below the two headers between the lists: each gets up to
-   half, and rows one list cannot fill go to the other. */
-static void layout_lists(void)
-{
-    int list_rows = CYD_TEXT_ROWS - 2;
-    int ble_wanted = ble_result_count < list_rows / 2 ? ble_result_count : list_rows / 2;
-    int wifi_rows = wifi_result_count < list_rows - ble_wanted
-                        ? wifi_result_count
-                        : list_rows - ble_wanted;
-    int ble_rows = ble_result_count < list_rows - wifi_rows
-                       ? ble_result_count
-                       : list_rows - wifi_rows;
-    list_views[LIST_WIFI] = (list_view_t){.header_row = 0, .rows = wifi_rows};
-    list_views[LIST_BLE] = (list_view_t){.header_row = 1 + wifi_rows, .rows = ble_rows};
-}
-
-static void draw_list_header(int list)
-{
-    const list_view_t *view = &list_views[list];
-    char text[CYD_TEXT_COLUMNS + 1];
-    char title[24];
-    uint16_t foreground[CYD_TEXT_COLUMNS];
-    uint16_t background[CYD_TEXT_COLUMNS];
-    uint16_t title_color = list == LIST_WIFI ? CYD_COLOR_YELLOW : CYD_COLOR_CYAN;
-    bool can_scroll_up = view->offset > 0;
-    bool can_scroll_down = view->offset + view->rows < list_count(list);
-
-    if (list == LIST_WIFI) {
-        snprintf(title, sizeof(title), "WI-FI %u", wifi_total_count);
-    } else {
-        snprintf(title, sizeof(title), "BLE %d%s", ble_result_count,
-                 ble_results_full ? "+" : "");
-    }
-    memset(text, ' ', CYD_TEXT_COLUMNS);
-    text[CYD_TEXT_COLUMNS] = '\0';
-    memcpy(text, title, strnlen(title, HEADER_TITLE_COLUMNS - 1));
-    for (int i = 0; i < CYD_TEXT_COLUMNS; ++i) {
-        foreground[i] = title_color;
-        background[i] = CYD_COLOR_BLACK;
-    }
-    for (int i = 0; i < ARROW_COLUMNS; ++i) {
-        background[ARROW_UP_COLUMN + i] = CYD_COLOR_BUTTON;
-        foreground[ARROW_UP_COLUMN + i] = can_scroll_up ? CYD_COLOR_WHITE : CYD_COLOR_BUTTON_DISABLED;
-        background[ARROW_DOWN_COLUMN + i] = CYD_COLOR_BUTTON;
-        foreground[ARROW_DOWN_COLUMN + i] =
-            can_scroll_down ? CYD_COLOR_WHITE : CYD_COLOR_BUTTON_DISABLED;
-    }
-    text[ARROW_UP_COLUMN + 1] = CYD_GLYPH_UP;
-    text[ARROW_DOWN_COLUMN + 1] = CYD_GLYPH_DOWN;
-    ESP_ERROR_CHECK(cyd_draw_cells(view->header_row, text, foreground, background));
-}
-
-static void draw_list_entry(int list, int index, int row, bool highlighted)
-{
-    /* 17 columns: "-dBm" plus a 12-character SSID or name. */
-    char line[CYD_TEXT_COLUMNS + 1];
-    uint16_t color = CYD_COLOR_WHITE;
-    if (list == LIST_WIFI) {
-        const wifi_ap_record_t *ap = &wifi_results[index];
-        snprintf(line, sizeof(line), "%4d %.12s", ap->rssi,
-                 ap->ssid[0] != '\0' ? (const char *)ap->ssid : "(hidden)");
-    } else {
-        const ble_device_t *device = &ble_results[index];
-        if (device->name[0] != '\0') {
-            snprintf(line, sizeof(line), "%4d %.12s", device->rssi, device->name);
-        } else {
-            snprintf(line, sizeof(line), "%4d %02x%02x%02x%02x%02x%02x", device->rssi,
-                     device->addr[5], device->addr[4], device->addr[3],
-                     device->addr[2], device->addr[1], device->addr[0]);
-            color = CYD_COLOR_GRAY;
-        }
-    }
-    if (highlighted) {
-        ESP_ERROR_CHECK(cyd_text_row(row, CYD_COLOR_BLACK, CYD_COLOR_WHITE, line));
-    } else {
-        ESP_ERROR_CHECK(cyd_text_row(row, color, CYD_COLOR_BUTTON, line));
-    }
-}
-
-static void draw_list(int list)
-{
-    const list_view_t *view = &list_views[list];
-    draw_list_header(list);
-    for (int i = 0; i < view->rows; ++i) {
-        draw_list_entry(list, view->offset + i, view->header_row + 1 + i, false);
-    }
-}
-
-static void show_results(void)
-{
-    draw_list(LIST_WIFI);
-    draw_list(LIST_BLE);
-    const list_view_t *ble_view = &list_views[LIST_BLE];
-    for (int row = ble_view->header_row + 1 + ble_view->rows; row < CYD_TEXT_ROWS; ++row) {
-        ESP_ERROR_CHECK(cyd_text_row(row, CYD_COLOR_WHITE, CYD_COLOR_BLACK, ""));
-    }
-}
-
-/* Pages a list by its visible height, stopping with the last page full. */
-static void scroll_list(int list, int direction)
-{
-    list_view_t *view = &list_views[list];
-    int max_offset = list_count(list) - view->rows;
-    int offset = view->offset + direction * view->rows;
-    if (offset > max_offset) {
-        offset = max_offset;
-    }
-    if (offset < 0) {
-        offset = 0;
-    }
-    if (offset != view->offset) {
-        view->offset = offset;
-        draw_list(list);
-    }
-}
-
-static void open_detail(int list, int index, int row)
-{
-    draw_list_entry(list, index, row, true);
-    vTaskDelay(pdMS_TO_TICKS(120));
-    if (list == LIST_WIFI) {
-        show_wifi_detail(&wifi_results[index]);
-    } else {
-        show_ble_detail(&ble_results[index]);
-    }
-    cyd_touch_point_t point;
-    xQueueReset(touch_queue);
-    xQueueReceive(touch_queue, &point, portMAX_DELAY);
-    show_results();
-}
-
-/* Returns true when the tap asks for a new scan. */
-static bool handle_list_tap(const cyd_touch_point_t *point)
-{
-    int row = point->y / CYD_FONT_HEIGHT;
-    int column = point->x / CYD_FONT_WIDTH;
-    for (int list = 0; list < LIST_COUNT; ++list) {
-        const list_view_t *view = &list_views[list];
-        if (row == view->header_row) {
-            if (column < HEADER_TITLE_COLUMNS) {
-                return true;
+    size_t written = 0;
+    while (cursor->position < cursor->length) {
+        unsigned char character = (unsigned char)cursor->data[cursor->position++];
+        if (character == '"') {
+            if (output != NULL && capacity > 0) {
+                output[written] = '\0';
             }
-            if (column >= ARROW_UP_COLUMN && column < ARROW_UP_COLUMN + ARROW_COLUMNS) {
-                scroll_list(list, -1);
-            } else if (column >= ARROW_DOWN_COLUMN) {
-                scroll_list(list, 1);
-            }
+            return true;
+        }
+        if (character < 0x20) {
             return false;
         }
-        if (row > view->header_row && row <= view->header_row + view->rows) {
-            open_detail(list, view->offset + row - view->header_row - 1, row);
-            return false;
+        if (character == '\\') {
+            if (cursor->position >= cursor->length) {
+                return false;
+            }
+            character = (unsigned char)cursor->data[cursor->position++];
+            if (character == 'u') {
+                if (cursor->length - cursor->position < 4) {
+                    return false;
+                }
+                int codepoint = 0;
+                for (int index = 0; index < 4; ++index) {
+                    int nibble = json_hex_value(cursor->data[cursor->position++]);
+                    if (nibble < 0) {
+                        return false;
+                    }
+                    codepoint = (codepoint << 4) | nibble;
+                }
+                character = codepoint <= 0x7F ? (unsigned char)codepoint : '?';
+            } else if (character == '"' || character == '\\' || character == '/') {
+                /* Keep the escaped character as-is. */
+            } else if (character == 'b') {
+                character = '\b';
+            } else if (character == 'f') {
+                character = '\f';
+            } else if (character == 'n') {
+                character = '\n';
+            } else if (character == 'r') {
+                character = '\r';
+            } else if (character == 't') {
+                character = '\t';
+            } else {
+                return false;
+            }
+        }
+        if (output != NULL && capacity > 1 && written < capacity - 1) {
+            output[written++] = (char)character;
         }
     }
     return false;
 }
 
-static void scan_task(void *argument)
+static bool json_skip_value(json_cursor_t *cursor, unsigned int depth)
 {
-    (void)argument;
-    while (true) {
-        show_status(" Scanning Wi-Fi");
-        wifi_scan();
-        show_status(" Scanning BLE");
-        ble_scan();
-        layout_lists();
-        show_results();
-        ESP_LOGI(TAG, "Scan complete; free heap: %u bytes",
-                 (unsigned)esp_get_free_heap_size());
+    if (depth > 16) {
+        return false;
+    }
+    json_skip_whitespace(cursor);
+    if (cursor->position >= cursor->length) {
+        return false;
+    }
+    char first = cursor->data[cursor->position];
+    if (first == '"') {
+        return json_parse_string(cursor, NULL, 0);
+    }
+    if (first == '{') {
+        ++cursor->position;
+        json_skip_whitespace(cursor);
+        if (cursor->position < cursor->length && cursor->data[cursor->position] == '}') {
+            ++cursor->position;
+            return true;
+        }
+        while (cursor->position < cursor->length) {
+            if (!json_parse_string(cursor, NULL, 0)) {
+                return false;
+            }
+            json_skip_whitespace(cursor);
+            if (cursor->position >= cursor->length || cursor->data[cursor->position++] != ':') {
+                return false;
+            }
+            if (!json_skip_value(cursor, depth + 1)) {
+                return false;
+            }
+            json_skip_whitespace(cursor);
+            if (cursor->position >= cursor->length) {
+                return false;
+            }
+            char delimiter = cursor->data[cursor->position++];
+            if (delimiter == '}') {
+                return true;
+            }
+            if (delimiter != ',') {
+                return false;
+            }
+            json_skip_whitespace(cursor);
+        }
+        return false;
+    }
+    if (first == '[') {
+        ++cursor->position;
+        json_skip_whitespace(cursor);
+        if (cursor->position < cursor->length && cursor->data[cursor->position] == ']') {
+            ++cursor->position;
+            return true;
+        }
+        while (cursor->position < cursor->length) {
+            if (!json_skip_value(cursor, depth + 1)) {
+                return false;
+            }
+            json_skip_whitespace(cursor);
+            if (cursor->position >= cursor->length) {
+                return false;
+            }
+            char delimiter = cursor->data[cursor->position++];
+            if (delimiter == ']') {
+                return true;
+            }
+            if (delimiter != ',') {
+                return false;
+            }
+        }
+        return false;
+    }
 
-        /* Drop taps that arrived during the scan, then handle taps until one
-           asks for a rescan. */
-        xQueueReset(touch_queue);
+    size_t start = cursor->position;
+    while (cursor->position < cursor->length) {
+        char character = cursor->data[cursor->position];
+        if (character == ',' || character == ']' || character == '}' ||
+            character == ' ' || character == '\t' ||
+            character == '\r' || character == '\n') {
+            break;
+        }
+        ++cursor->position;
+    }
+    return cursor->position > start;
+}
+
+static bool json_object_field(const char *data, size_t start, size_t end,
+                              const char *field_name, json_value_t *value)
+{
+    json_cursor_t cursor = {.data = data, .length = end, .position = start};
+    json_skip_whitespace(&cursor);
+    if (cursor.position >= end || cursor.data[cursor.position++] != '{') {
+        return false;
+    }
+    json_skip_whitespace(&cursor);
+    if (cursor.position < end && cursor.data[cursor.position] == '}') {
+        return false;
+    }
+    while (cursor.position < end) {
+        char key[48];
+        if (!json_parse_string(&cursor, key, sizeof(key))) {
+            return false;
+        }
+        json_skip_whitespace(&cursor);
+        if (cursor.position >= end || cursor.data[cursor.position++] != ':') {
+            return false;
+        }
+        json_skip_whitespace(&cursor);
+        size_t value_start = cursor.position;
+        if (!json_skip_value(&cursor, 0)) {
+            return false;
+        }
+        size_t value_end = cursor.position;
+        if (strcmp(key, field_name) == 0) {
+            value->start = value_start;
+            value->end = value_end;
+            return true;
+        }
+        json_skip_whitespace(&cursor);
+        if (cursor.position >= end) {
+            return false;
+        }
+        char delimiter = cursor.data[cursor.position++];
+        if (delimiter == '}') {
+            return false;
+        }
+        if (delimiter != ',') {
+            return false;
+        }
+        json_skip_whitespace(&cursor);
+    }
+    return false;
+}
+
+static bool json_value_string(const char *data, json_value_t value,
+                              char *output, size_t capacity)
+{
+    json_cursor_t cursor = {
+        .data = data, .length = value.end, .position = value.start,
+    };
+    return json_parse_string(&cursor, output, capacity) && cursor.position == value.end;
+}
+
+static bool json_value_number(const char *data, json_value_t value, double *number)
+{
+    char buffer[40];
+    size_t length = value.end - value.start;
+    if (length == 0 || length >= sizeof(buffer)) {
+        return false;
+    }
+    memcpy(buffer, data + value.start, length);
+    buffer[length] = '\0';
+    char *end;
+    *number = strtod(buffer, &end);
+    return end != buffer && *end == '\0';
+}
+
+static bool json_object_string(const char *data, size_t start, size_t end,
+                               const char *key, char *output, size_t capacity)
+{
+    json_value_t value;
+    output[0] = '\0';
+    return json_object_field(data, start, end, key, &value) &&
+           json_value_string(data, value, output, capacity);
+}
+
+static esp_err_t fetch_latest_bird(bird_detection_t *bird)
+{
+    const char *url = BIRDNET_BASE_URL "/api/v1/detections/visits";
+    http_response_t response;
+    esp_err_t result = http_get(url, API_JSON_CAPACITY, &response);
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG, "Could not fetch BirdNET visits: %s", esp_err_to_name(result));
+        return result;
+    }
+
+    json_value_t visits;
+    if (!json_object_field((const char *)response.data, 0, response.length,
+                           "visits", &visits) ||
+        visits.start >= visits.end || response.data[visits.start] != '[') {
+        http_response_free(&response);
+        ESP_LOGE(TAG, "BirdNET visits response has no visits array");
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    memset(bird, 0, sizeof(*bird));
+    double best_seconds_ago = 0;
+    json_cursor_t array = {
+        .data = (const char *)response.data,
+        .length = visits.end,
+        .position = visits.start + 1,
+    };
+    bool valid_response = true;
+    while (array.position < array.length) {
+        json_skip_whitespace(&array);
+        if (array.position < array.length && array.data[array.position] == ']') {
+            ++array.position;
+            break;
+        }
+        json_value_t visit = {.start = array.position};
+        if (!json_skip_value(&array, 0)) {
+            valid_response = false;
+            break;
+        }
+        visit.end = array.position;
+
+        json_value_t confidence_value;
+        json_value_t seconds_ago_value;
+        double confidence = 0;
+        double seconds_ago = 0;
+        if (!json_object_field(array.data, visit.start, visit.end,
+                               "best_confidence", &confidence_value) ||
+            !json_object_field(array.data, visit.start, visit.end,
+                               "seconds_ago", &seconds_ago_value) ||
+            !json_value_number(array.data, confidence_value, &confidence) ||
+            !json_value_number(array.data, seconds_ago_value, &seconds_ago) ||
+            confidence < MIN_BIRD_CONFIDENCE) {
+            json_skip_whitespace(&array);
+            if (array.position < array.length && array.data[array.position] == ',') {
+                ++array.position;
+                continue;
+            }
+            if (array.position < array.length && array.data[array.position] == ']') {
+                ++array.position;
+                break;
+            }
+            valid_response = false;
+            break;
+        }
+        if (bird->found && seconds_ago >= best_seconds_ago) {
+            json_skip_whitespace(&array);
+            if (array.position < array.length && array.data[array.position] == ',') {
+                ++array.position;
+                continue;
+            }
+            if (array.position < array.length && array.data[array.position] == ']') {
+                ++array.position;
+                break;
+            }
+            valid_response = false;
+            break;
+        }
+        char species[sizeof(bird->species)];
+        char scientific_name[sizeof(bird->scientific_name)];
+        char date[sizeof(bird->date)];
+        char detected_time[sizeof(bird->detected_time)];
+        if (!json_object_string(array.data, visit.start, visit.end,
+                                "species", species, sizeof(species)) ||
+            !json_object_string(array.data, visit.start, visit.end,
+                                "sci_name", scientific_name, sizeof(scientific_name)) ||
+            !json_object_string(array.data, visit.start, visit.end,
+                                "date", date, sizeof(date)) ||
+            !json_object_string(array.data, visit.start, visit.end,
+                                "last_time", detected_time, sizeof(detected_time)) ||
+            species[0] == '\0' || scientific_name[0] == '\0') {
+            json_skip_whitespace(&array);
+            if (array.position < array.length && array.data[array.position] == ',') {
+                ++array.position;
+                continue;
+            }
+            if (array.position < array.length && array.data[array.position] == ']') {
+                ++array.position;
+                break;
+            }
+            valid_response = false;
+            break;
+        }
+        snprintf(bird->species, sizeof(bird->species), "%s", species);
+        snprintf(bird->scientific_name, sizeof(bird->scientific_name), "%s",
+                 scientific_name);
+        snprintf(bird->date, sizeof(bird->date), "%s", date);
+        snprintf(bird->detected_time, sizeof(bird->detected_time), "%s", detected_time);
+        bird->confidence = confidence;
+        bird->found = true;
+        best_seconds_ago = seconds_ago;
+
+        json_skip_whitespace(&array);
+        if (array.position < array.length && array.data[array.position] == ',') {
+            ++array.position;
+            continue;
+        }
+        if (array.position < array.length && array.data[array.position] == ']') {
+            ++array.position;
+            break;
+        }
+        valid_response = false;
+        break;
+    }
+    json_skip_whitespace(&array);
+    if (array.position != array.length || array.data[array.position - 1] != ']') {
+        valid_response = false;
+    }
+    http_response_free(&response);
+    if (!valid_response) {
+        ESP_LOGE(TAG, "BirdNET visits response contains malformed JSON");
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    if (!bird->found) {
+        ESP_LOGW(TAG, "No visit met the %.0f%% confidence threshold",
+                 MIN_BIRD_CONFIDENCE * 100);
+    } else {
+        ESP_LOGI(TAG, "Latest qualifying visit: %s (%.1f%%), %s %s",
+                 bird->species, bird->confidence * 100,
+                 bird->date, bird->detected_time);
+    }
+    return ESP_OK;
+}
+
+static bool url_encode_path(const char *source, char *destination, size_t capacity)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    size_t output = 0;
+    for (const unsigned char *cursor = (const unsigned char *)source;
+         *cursor != '\0'; ++cursor) {
+        bool safe = (*cursor >= 'a' && *cursor <= 'z') ||
+                    (*cursor >= 'A' && *cursor <= 'Z') ||
+                    (*cursor >= '0' && *cursor <= '9') ||
+                    *cursor == '-' || *cursor == '_' || *cursor == '.';
+        size_t needed = safe ? 1 : 3;
+        if (output + needed >= capacity) {
+            return false;
+        }
+        if (safe) {
+            destination[output++] = (char)*cursor;
+        } else {
+            destination[output++] = '%';
+            destination[output++] = hex[*cursor >> 4];
+            destination[output++] = hex[*cursor & 0x0F];
+        }
+    }
+    destination[output] = '\0';
+    return true;
+}
+
+static esp_err_t fetch_bird_image(const char *scientific_name, size_t *jpeg_length,
+                                  char *image_url,
+                                  size_t image_url_capacity,
+                                  esp_http_client_handle_t *image_client)
+{
+    char encoded_name[288];
+    char metadata_url[384];
+    if (!url_encode_path(scientific_name, encoded_name, sizeof(encoded_name)) ||
+        snprintf(metadata_url, sizeof(metadata_url),
+                 BIRDNET_BASE_URL "/api/v1/image/%s", encoded_name) >=
+            (int)sizeof(metadata_url)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    http_response_t metadata;
+    esp_err_t result = http_get(metadata_url, API_JSON_CAPACITY, &metadata);
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG, "Could not fetch image metadata: %s", esp_err_to_name(result));
+        return result;
+    }
+    json_value_t data_value;
+    bool has_data = json_object_field((const char *)metadata.data, 0,
+                                      metadata.length, "data", &data_value);
+    bool metadata_valid =
+        has_data &&
+        json_object_string((const char *)metadata.data, data_value.start,
+                           data_value.end, "image_url",
+                           image_url, image_url_capacity);
+    http_response_free(&metadata);
+    if (!metadata_valid) {
+        ESP_LOGE(TAG, "Image metadata response is malformed or missing image URL");
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    if (strncmp(image_url, "https://", 8) != 0) {
+        ESP_LOGE(TAG, "Image metadata did not provide an HTTPS image URL");
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    esp_http_client_config_t config = {
+        .url = image_url,
+        .timeout_ms = 15000,
+        .buffer_size = 1024,
+        .buffer_size_tx = 1024,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+    };
+    *image_client = esp_http_client_init(&config);
+    if (*image_client == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    result = esp_http_client_open(*image_client, 0);
+    if (result != ESP_OK) {
+        esp_http_client_cleanup(*image_client);
+        *image_client = NULL;
+        ESP_LOGE(TAG, "Could not open Wikimedia image stream: %s",
+                 esp_err_to_name(result));
+        return result;
+    }
+    int64_t content_length = esp_http_client_fetch_headers(*image_client);
+    int status = esp_http_client_get_status_code(*image_client);
+    if (status != 200 || content_length <= 0 ||
+        content_length > IMAGE_JPEG_CAPACITY) {
+        ESP_LOGE(TAG, "Wikimedia image stream returned HTTP %d and %u bytes",
+                 status, (unsigned)(content_length < 0 ? 0 : content_length));
+        esp_http_client_close(*image_client);
+        esp_http_client_cleanup(*image_client);
+        *image_client = NULL;
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    *jpeg_length = (size_t)content_length;
+    ESP_LOGI(TAG, "Opened %u-byte Wikimedia image stream; free heap: %u bytes",
+             (unsigned)*jpeg_length, (unsigned)esp_get_free_heap_size());
+    return ESP_OK;
+}
+
+static UINT jpeg_input(JDEC *decoder, BYTE *buffer, UINT length)
+{
+    jpeg_context_t *context = decoder->device;
+    jpeg_reader_t *reader = &context->reader;
+    if (reader->offset >= reader->length) {
+        return 0;
+    }
+
+    size_t wanted = length;
+    size_t remaining = reader->length - reader->offset;
+    if (wanted > remaining) {
+        wanted = remaining;
+    }
+    uint8_t discard[64];
+    size_t received = 0;
+    while (received < wanted) {
+        size_t chunk = wanted - received;
+        if (buffer == NULL && chunk > sizeof(discard)) {
+            chunk = sizeof(discard);
+        }
+        char *destination = buffer != NULL
+                                ? (char *)buffer + received
+                                : (char *)discard;
+        int bytes = esp_http_client_read(reader->client, destination, (int)chunk);
+        if (bytes <= 0) {
+            reader->read_error = true;
+            ESP_LOGE(TAG, "Wikimedia image stream ended during JPEG decode");
+            break;
+        }
+        received += (size_t)bytes;
+    }
+    reader->offset += received;
+    return (UINT)received;
+}
+
+static uint16_t jpeg_tile_pixel(int x, int y, void *context)
+{
+    const jpeg_output_t *output = context;
+    size_t index = ((size_t)(y - output->tile_top) * output->tile_width +
+                    (x - output->tile_left)) * 2;
+    return (uint16_t)((output->rgb565[index] << 8) | output->rgb565[index + 1]);
+}
+
+static UINT jpeg_output(JDEC *decoder, void *pixels, JRECT *rectangle)
+{
+    jpeg_context_t *context = decoder->device;
+    jpeg_output_t *output = &context->output;
+    int width = rectangle->right - rectangle->left + 1;
+    int height = rectangle->bottom - rectangle->top + 1;
+    if (width <= 0 || height <= 0 || width > 16 || height > 16) {
+        ESP_LOGE(TAG, "Unexpected JPEG output tile %dx%d", width, height);
+        return 0;
+    }
+
+    const uint8_t *rgb = pixels;
+    int left = ((size_t)rectangle->left * LCD_WIDTH +
+                output->source_width - 1) / output->source_width;
+    int right = ((size_t)(rectangle->right + 1) * LCD_WIDTH +
+                 output->source_width - 1) / output->source_width;
+    int top = ((size_t)rectangle->top * LCD_HEIGHT +
+               output->source_height - 1) / output->source_height;
+    int bottom = ((size_t)(rectangle->bottom + 1) * LCD_HEIGHT +
+                  output->source_height - 1) / output->source_height;
+    int output_width = right - left;
+    int output_height = bottom - top;
+    if (output_width <= 0 || output_height <= 0 ||
+        (size_t)output_width * output_height * 2 > output->buffer_capacity) {
+        ESP_LOGE(TAG, "Resized JPEG tile %dx%d exceeds its output buffer",
+                 output_width, output_height);
+        return 0;
+    }
+    for (int row = 0; row < output_height; ++row) {
+        int source_y = (top + row) * output->source_height / LCD_HEIGHT -
+                       rectangle->top;
+        for (int column = 0; column < output_width; ++column) {
+            int source_x = (left + column) * output->source_width / LCD_WIDTH -
+                           rectangle->left;
+            int source_index = (source_y * width + source_x) * 3;
+            uint8_t red = rgb[source_index];
+            uint8_t green = rgb[source_index + 1];
+            uint8_t blue = rgb[source_index + 2];
+            uint16_t color = (uint16_t)(((red & 0xF8) << 8) |
+                                        ((green & 0xFC) << 3) | (blue >> 3));
+            int target_index = (row * output_width + column) * 2;
+            output->rgb565[target_index] = (uint8_t)(color >> 8);
+            output->rgb565[target_index + 1] = (uint8_t)color;
+        }
+    }
+    /* cyd_draw_pattern sends pixels in the panel's column-major order. */
+    output->tile_left = left;
+    output->tile_top = top;
+    output->tile_width = output_width;
+    if (cyd_draw_pattern(left, top, output_width, output_height, jpeg_tile_pixel,
+                         output) != ESP_OK) {
+        return 0;
+    }
+    return 1;
+}
+
+static esp_err_t draw_jpeg(esp_http_client_handle_t image_client, size_t length)
+{
+    jpeg_context_t context = {
+        .reader = {.length = length, .client = image_client},
+    };
+    JDEC decoder = {0};
+    void *work_buffer = heap_caps_malloc(JPEG_WORKBUF_SIZE, MALLOC_CAP_8BIT);
+    if (work_buffer == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    JRESULT result = jd_prepare(&decoder, jpeg_input, work_buffer,
+                                JPEG_WORKBUF_SIZE, &context);
+    if (result != JDR_OK) {
+        heap_caps_free(work_buffer);
+        ESP_LOGE(TAG, "JPEG prepare failed: %d", result);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    BYTE scale = 0;
+    while (scale < 3 &&
+           ((decoder.width + (1U << scale) - 1) >> scale) > LCD_WIDTH) {
+        ++scale;
+    }
+    int scaled_width = (int)((decoder.width + (1U << scale) - 1) >> scale);
+    int scaled_height = (int)((decoder.height + (1U << scale) - 1) >> scale);
+    if (scaled_width > LCD_WIDTH) {
+        heap_caps_free(work_buffer);
+        ESP_LOGE(TAG, "JPEG image is too wide to fit the display");
+        return ESP_ERR_INVALID_SIZE;
+    }
+    size_t tile_width = ((size_t)16 * LCD_WIDTH + scaled_width - 1) / scaled_width + 1;
+    size_t tile_height = ((size_t)16 * LCD_HEIGHT + scaled_height - 1) / scaled_height + 1;
+    if (tile_width > 64 || tile_height > 64) {
+        heap_caps_free(work_buffer);
+        ESP_LOGE(TAG, "JPEG dimensions are too small for full-screen scaling");
+        return ESP_ERR_INVALID_SIZE;
+    }
+    size_t output_capacity = tile_width * tile_height * 2;
+    uint8_t *rgb565 = heap_caps_malloc(output_capacity, MALLOC_CAP_DMA);
+    if (rgb565 == NULL) {
+        heap_caps_free(work_buffer);
+        return ESP_ERR_NO_MEM;
+    }
+    context.output = (jpeg_output_t){
+        .source_width = (unsigned int)scaled_width,
+        .source_height = (unsigned int)scaled_height,
+        .rgb565 = rgb565,
+        .buffer_capacity = output_capacity,
+    };
+    if (cyd_fill_rect(0, IMAGE_TOP, LCD_WIDTH, IMAGE_HEIGHT, COLOR_BLACK) != ESP_OK) {
+        heap_caps_free(rgb565);
+        heap_caps_free(work_buffer);
+        return ESP_FAIL;
+    }
+    result = jd_decomp(&decoder, jpeg_output, scale);
+    heap_caps_free(rgb565);
+    heap_caps_free(work_buffer);
+    if (result != JDR_OK || context.reader.read_error) {
+        ESP_LOGE(TAG, "JPEG decode failed: %d", result);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    ESP_LOGI(TAG, "Rendered %ux%u bird image at 1:%u scale",
+             (unsigned)decoder.width, (unsigned)decoder.height, 1U << scale);
+    return ESP_OK;
+}
+
+static void refresh_birdnet(void)
+{
+    bird_detection_t bird;
+    esp_err_t result = fetch_latest_bird(&bird);
+    if (result != ESP_OK) {
+        return;
+    }
+
+    if (!bird.found) {
+        displayed_species[0] = '\0';
+        displayed_image_ready = false;
+        ESP_ERROR_CHECK(cyd_fill_rect(0, 0, LCD_WIDTH, LCD_HEIGHT, COLOR_BLACK));
+        return;
+    }
+
+    bool species_changed = strcmp(displayed_species, bird.scientific_name) != 0;
+    bool need_image = species_changed || !displayed_image_ready;
+    char image_url[768];
+    size_t jpeg_length = 0;
+    esp_http_client_handle_t image_client = NULL;
+    esp_err_t image_result = ESP_OK;
+    if (need_image) {
+        image_result = fetch_bird_image(bird.scientific_name, &jpeg_length,
+                                        image_url, sizeof(image_url), &image_client);
+        if (image_result != ESP_OK) {
+            ESP_LOGW(TAG, "Bird image unavailable");
+        }
+    }
+
+    if (species_changed) {
+        displayed_image_ready = false;
+    }
+    if (image_result == ESP_OK && need_image) {
+        image_result = draw_jpeg(image_client, jpeg_length);
+        esp_http_client_close(image_client);
+        esp_http_client_cleanup(image_client);
+        if (image_result == ESP_OK) {
+            displayed_image_ready = true;
+        } else {
+            ESP_LOGW(TAG, "Could not render bird image: %s", esp_err_to_name(image_result));
+        }
+    }
+    if (need_image && image_result != ESP_OK) {
+        ESP_ERROR_CHECK(cyd_fill_rect(0, IMAGE_TOP, LCD_WIDTH, IMAGE_HEIGHT, COLOR_BLACK));
+    }
+    if (!displayed_image_ready) {
+        ESP_LOGW(TAG, "No bird image is displayed");
+    }
+    snprintf(displayed_species, sizeof(displayed_species), "%s", bird.scientific_name);
+}
+
+/* Turns taps from the shared touchscreen driver into refresh requests. */
+static void touch_task(void *argument)
+{
+    QueueHandle_t touch_queue = argument;
+    while (true) {
         cyd_touch_point_t point;
-        do {
-            xQueueReceive(touch_queue, &point, portMAX_DELAY);
-        } while (!handle_list_tap(&point));
+        if (xQueueReceive(touch_queue, &point, portMAX_DELAY) == pdTRUE) {
+            ESP_LOGI(TAG, "Touch at %d,%d; refreshing BirdNET", point.x, point.y);
+            if (app_task_handle != NULL) {
+                xTaskNotifyGive(app_task_handle);
+            }
+        }
     }
 }
 
+static void wifi_event_handler(void *argument, esp_event_base_t event_base,
+                               int32_t event_id, void *event_data)
+{
+    (void)argument;
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        ESP_ERROR_CHECK(esp_wifi_connect());
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        wifi_connected = false;
+        ESP_LOGW(TAG, "Wi-Fi disconnected; retrying");
+        ESP_ERROR_CHECK(esp_wifi_connect());
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t *event = event_data;
+        wifi_connected = true;
+        ESP_LOGI(TAG, "Wi-Fi connected; IP address: " IPSTR, IP2STR(&event->ip_info.ip));
+        if (app_task_handle != NULL) {
+            xTaskNotifyGive(app_task_handle);
+        }
+    }
+}
+
+static void wifi_init(void)
+{
+    ESP_ERROR_CHECK(nvs_flash_init());
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    ESP_ERROR_CHECK(esp_netif_create_default_wifi_sta() != NULL ? ESP_OK : ESP_FAIL);
+
+    wifi_init_config_t init_config = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&init_config));
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
+                                               wifi_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                               wifi_event_handler, NULL));
+
+    wifi_config_t wifi_config = {
+        .sta = {
+            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+        },
+    };
+    ESP_ERROR_CHECK(strlen(WIFI_SSID) <= sizeof(wifi_config.sta.ssid) &&
+                    strlen(WIFI_PASSWORD) < sizeof(wifi_config.sta.password)
+                    ? ESP_OK : ESP_ERR_INVALID_SIZE);
+    memcpy(wifi_config.sta.ssid, WIFI_SSID, strlen(WIFI_SSID));
+    memcpy(wifi_config.sta.password, WIFI_PASSWORD, strlen(WIFI_PASSWORD));
+
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+
+    ESP_ERROR_CHECK(esp_wifi_start());
+}
+
+static void birdnet_task(void *argument)
+{
+    (void)argument;
+    app_task_handle = xTaskGetCurrentTaskHandle();
+    int64_t next_query_time = 0;
+    bool refresh_requested = true;
+    while (true) {
+        int64_t now = esp_timer_get_time();
+        if (wifi_connected &&
+            (refresh_requested || next_query_time == 0 || now >= next_query_time)) {
+            refresh_requested = false;
+            refresh_birdnet();
+            next_query_time = esp_timer_get_time() + QUERY_INTERVAL_US;
+        }
+
+        now = esp_timer_get_time();
+        int64_t remaining_us = next_query_time > now ? next_query_time - now : 1000000;
+        TickType_t wait_ticks = pdMS_TO_TICKS((uint32_t)(remaining_us / 1000));
+        if (wait_ticks == 0 || wait_ticks > pdMS_TO_TICKS(1000)) {
+            wait_ticks = pdMS_TO_TICKS(1000);
+        }
+        if (ulTaskNotifyTake(pdTRUE, wait_ticks) > 0) {
+            refresh_requested = true;
+        }
+    }
+}
 
 void app_main(void)
 {
     ESP_ERROR_CHECK(cyd_display_init());
 
-    esp_err_t nvs_result = nvs_flash_init();
-    if (nvs_result == ESP_ERR_NVS_NO_FREE_PAGES ||
-        nvs_result == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        nvs_result = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(nvs_result);
-    wifi_init();
-    ble_init();
-
+    QueueHandle_t touch_queue;
     ESP_ERROR_CHECK(cyd_touch_start(&touch_queue));
-    BaseType_t scan_task_result =
-        xTaskCreate(scan_task, "scan", 6144, NULL, 5, NULL);
-    ESP_ERROR_CHECK(scan_task_result == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
+    BaseType_t touch_task_result =
+        xTaskCreate(touch_task, "touch", 3072, touch_queue, 5, NULL);
+    ESP_ERROR_CHECK(touch_task_result == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
+    BaseType_t birdnet_task_result =
+        xTaskCreate(birdnet_task, "birdnet", 8192, NULL, 5, &app_task_handle);
+    ESP_ERROR_CHECK(birdnet_task_result == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
+    wifi_init();
 }
