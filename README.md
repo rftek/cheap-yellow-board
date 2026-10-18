@@ -9,6 +9,7 @@ The board runs a **launcher** on every power-on. The launcher picks one of two s
 | `launcher/` | Launcher firmware, custom second-stage bootloader and partition table |
 | `main/` | Wi-Fi and Bluetooth scanner boot image |
 | `apps/screen_check/` | Screen color test boot image |
+| `apps/birdnet/` | BirdNET bird photo viewer boot image (the original app from `main`) |
 | `components/cyd_display/` | Display, 5x7 font, pattern drawing and touchscreen driver shared by all of them |
 
 ## Launcher
@@ -66,11 +67,22 @@ A full-screen display test. Tap the right half of the screen for the next patter
 | Checkerboard | 1-pixel alternation; flicker or crosstalk |
 | Grid | Straight 40-pixel grid lines and a 1-pixel red border on all four edges; clipping or offset |
 
+## BirdNET image
+
+The original viewer from the `main` branch, ported to the shared display component. That port also fixes swapped red and blue and transposed image tiles on this panel. It connects to Wi-Fi and queries a local BirdNET server every two minutes, or immediately after a tap. The latest visit from today with a confidence of at least 80% is shown as a full-screen Wikimedia photo, with no text. If nothing qualifies, the screen clears. A failed refresh keeps the last photo.
+
+Set `BIRDNET_BASE_URL` in `%USERPROFILE%\.cyd_private\wifi_credentials.h` to your server, for example `#define BIRDNET_BASE_URL "http://192.168.1.50"`. It defaults to `http://birdnet.local`. The image uses:
+
+- `GET {BIRDNET_BASE_URL}/api/v1/detections/visits`
+- `GET {BIRDNET_BASE_URL}/api/v1/image/{URL-encoded-scientific-name}`
+
+Wikimedia's 1280-pixel thumbnail is streamed over HTTPS straight into the ESP32 ROM JPEG decoder and scaled down to 320x240, so the full image is never held in RAM.
+
 ## Build and flash
 
 Install the PlatformIO IDE extension or PlatformIO Core. The first build installs the ESP32 platform and ESP-IDF toolchain.
 
-The launcher needs Wi-Fi credentials. Create `%USERPROFILE%\.cyd_private\wifi_credentials.h` from `launcher\main\wifi_credentials.example.h`. Never commit that file.
+The launcher and the BirdNET image need Wi-Fi credentials. Create `%USERPROFILE%\.cyd_private\wifi_credentials.h` from `apps\birdnet\main\wifi_credentials.example.h`, which also has `BIRDNET_BASE_URL`. Never commit that file.
 
 From PowerShell at the repository root:
 
@@ -79,6 +91,7 @@ $pio = "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe"
 & $pio run                                   # scanner
 & $pio run --project-dir launcher            # launcher + bootloader
 & $pio run --project-dir apps\screen_check   # screen check
+& $pio run --project-dir apps\birdnet        # BirdNET viewer
 ```
 
 **Do not use `pio run --target upload` for either project.** It would flash a stock bootloader or put the scanner over the launcher. Flash everything with esptool instead. This erases the board:
