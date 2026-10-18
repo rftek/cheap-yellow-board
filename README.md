@@ -26,5 +26,27 @@ Change `COM11` to the board's assigned serial port. The first build installs the
 
 Before building, create `%USERPROFILE%\.cyd_private\wifi_credentials.h` from `main\wifi_credentials.example.h` and set the local Wi-Fi SSID/password and BirdNET server URL. Never commit that private file. Build products and machine-specific ESP-IDF/VS Code settings are ignored.
 
+## Screen check (color test)
+
+`apps/screen_check` is a separate full-screen display test built on `components/cyd_display`, a shared driver for the display, a 5x7 font, pattern drawing and touch. Tap the right half of the screen for the next pattern and the left half for the previous one. The list wraps around. Each pattern's name shows on the bottom row for 1.5 seconds, then disappears.
+
+| Pattern | What to look for |
+|---|---|
+| Red, green, blue, white, black, cyan, magenta, yellow, 50% gray | Dead or stuck pixels, uneven backlight, tint |
+| Color bars | Correct color order (white, yellow, cyan, green, magenta, red, blue, black); swapped red and blue |
+| RGB ramps | Smooth red, green, blue and gray gradients; banding |
+| Gray steps | 16 distinguishable steps from black to white |
+| Checkerboard | 1-pixel alternation; flicker or crosstalk |
+| Grid | Straight 40-pixel grid lines and a 1-pixel red border on all four edges; clipping or offset |
+
+It needs no Wi-Fi or credentials. Build and flash it on its own; this replaces whatever is on the board:
+
+```powershell
+& $pio run --project-dir apps\screen_check
+& $pio run --project-dir apps\screen_check --target upload --upload-port COM11
+```
+
+The shared driver sends pixels column by column, which is the order this panel fills a drawing window, and leaves the BGR bit off, so colors are correct. The BirdNET viewer above still has its own older display code.
+
 Display pins: MOSI GPIO13, SCLK GPIO14, CS GPIO15, D/C GPIO2, backlight GPIO21.
 Touch pins: MOSI GPIO32, MISO GPIO39, SCLK GPIO25, CS GPIO33, IRQ GPIO36. Touch coordinates use the CYD documentation's XPT2046 calibration range mapped to the tested 320x240 landscape orientation.
