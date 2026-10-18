@@ -14,10 +14,10 @@ The board runs a **launcher** on every power-on. The launcher picks one of two s
 
 On power-on, including the EN button, the custom bootloader always starts the launcher. Any other reset, such as the launcher's own restart or an image crashing, goes straight back to the chosen image.
 
-1. The menu immediately lists the stored images, marking the default with `*`, and counts down for 2 seconds.
-2. If nobody touches the screen, the last-used image boots. The very first time, it is the first stored image.
-3. Any tap stops the countdown. Tap an image to boot it.
-4. Meanwhile the launcher joins Wi-Fi and reads the latest release of `rftek/cheap-yellow-board`. Each `.bin` asset not already stored appears in cyan as `+ name`. Tapping one downloads it into a slot, with progress, and boots it. If Wi-Fi or GitHub doesn't answer, the status row says `offline` and nothing else changes.
+1. The menu immediately lists the stored images, marking the default with `*`, and counts down from 20 seconds.
+2. When the countdown ends, the last-used image boots. The very first time, it is the first stored image.
+3. Tapping anywhere except an image adds another 20 seconds. Tap an image to boot it right away.
+4. Meanwhile the launcher joins Wi-Fi and reads the latest release of `rftek/cheap-yellow-board`. This usually takes about 10 seconds, mostly the TLS handshake. Each `.bin` asset not already stored appears in cyan as `+ name`. Tapping one downloads it into a slot, with progress, and boots it. If Wi-Fi or GitHub doesn't answer, the status row says `offline` (or `no release`) and nothing else changes.
 
 A download replaces an older copy of the same file name if one is stored. Otherwise it fills an empty slot, or overwrites the slot that does not boot by default. An asset counts as already stored when both its name and size match.
 

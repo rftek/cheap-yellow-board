@@ -30,7 +30,8 @@
 #endif
 #define RELEASES_URL "https://api.github.com/repos/" IMAGE_REPO "/releases/latest"
 
-#define MENU_TIMEOUT_MS 2000
+/* Countdown before the default image boots; each tap off an entry adds as much again. */
+#define MENU_TIMEOUT_US (20LL * 1000 * 1000)
 #define WIFI_CONNECT_TIMEOUT_MS 10000
 #define RELEASE_JSON_LIMIT (64 * 1024)
 #define DOWNLOAD_CHUNK_SIZE 4096
@@ -706,9 +707,10 @@ static void activate_entry(int index)
             show_message_and_wait("DOWNLOAD FAILED", image->name, esp_err_to_name(result));
         }
     }
-    /* Still here: booting or downloading failed. */
+    /* Still here: booting or downloading failed. The caller redraws the title. */
     build_entries();
-    draw_menu("SELECT IMAGE");
+    draw_entries();
+    draw_status();
 }
 
 void app_main(void)
@@ -727,39 +729,45 @@ void app_main(void)
     int boot_choice = default_slot();
     bool counting = boot_choice >= 0;
     build_entries();
-    draw_menu(counting ? "AUTO-BOOT 2.0s" : "NO IMAGES");
+    draw_menu(counting ? "" : "NO IMAGES");
     ESP_ERROR_CHECK(xTaskCreate(network_task, "network", 8192, NULL, 5, NULL) == pdPASS
                         ? ESP_OK
                         : ESP_ERR_NO_MEM);
 
-    int64_t deadline = esp_timer_get_time() + (int64_t)MENU_TIMEOUT_MS * 1000;
-    int shown_tenths = -1;
+    int64_t deadline = esp_timer_get_time() + MENU_TIMEOUT_US;
+    int shown_seconds = -1;
     net_state_t shown_state = net_state;
     while (true) {
         cyd_touch_point_t point;
         if (xQueueReceive(touch_queue, &point, pdMS_TO_TICKS(50)) == pdTRUE) {
-            /* Any tap cancels the countdown so there is time to choose. */
-            if (counting) {
-                counting = false;
-                draw_title("SELECT IMAGE");
-            }
             int row = point.y / CYD_FONT_HEIGHT - MENU_FIRST_ROW;
             if (row >= 0 && row < entry_count) {
                 activate_entry(row);
+                /* Still here: booting or downloading failed. Start over. */
+                boot_choice = default_slot();
+                counting = boot_choice >= 0;
+                deadline = esp_timer_get_time() + MENU_TIMEOUT_US;
+                shown_seconds = -1;
+                if (!counting) {
+                    draw_title("NO IMAGES");
+                }
+            } else {
+                /* Any other tap buys more time to choose. */
+                deadline += MENU_TIMEOUT_US;
             }
         }
 
         if (counting) {
             int64_t remaining = deadline - esp_timer_get_time();
+            int seconds = (int)((remaining + 999999) / 1000000);
             if (remaining <= 0) {
                 boot_slot(boot_choice);
                 counting = false;
                 draw_title("SELECT IMAGE");
-            } else if (remaining / 100000 != shown_tenths) {
+            } else if (seconds != shown_seconds) {
                 char title[32];
-                shown_tenths = (int)(remaining / 100000);
-                snprintf(title, sizeof(title), "AUTO-BOOT %d.%ds", shown_tenths / 10,
-                         shown_tenths % 10);
+                shown_seconds = seconds;
+                snprintf(title, sizeof(title), "AUTO-BOOT %ds", seconds);
                 draw_title(title);
             }
         }
