@@ -1,0 +1,29 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "PlatformIO: Build",
+            "type": "shell",
+            "command": "pio",
+            "args": ["run"],
+            "options": { "cwd": "${workspaceFolder}" },
+            "problemMatcher": []
+        },
+        {
+            "label": "PlatformIO: Upload",
+            "type": "shell",
+            "command": "pio",
+            "args": ["run", "--target", "upload"],
+            "options": { "cwd": "${workspaceFolder}" },
+            "problemMatcher": []
+        },
+        {
+            "label": "PlatformIO: Monitor",
+            "type": "shell",
+            "command": "pio",
+            "args": ["device", "monitor"],
+            "options": { "cwd": "${workspaceFolder}" },
+            "problemMatcher": []
+        }
+    ]
+}
