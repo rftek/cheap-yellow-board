@@ -18,15 +18,16 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "nvs.h"
 #include "nvs_flash.h"
-#include "wifi_credentials.h"
 
 #define LCD_WIDTH CYD_LCD_WIDTH
 #define LCD_HEIGHT CYD_LCD_HEIGHT
 #define QUERY_INTERVAL_US (120LL * 1000 * 1000)
-#ifndef BIRDNET_BASE_URL
-#define BIRDNET_BASE_URL "http://birdnet.local"
-#endif
+/* Settings the launcher (bootloader branch) stores in NVS for boot images,
+   so no credentials are compiled into this published binary. */
+#define CONFIG_NAMESPACE "cyd_config"
+#define DEFAULT_BIRDNET_BASE_URL "http://birdnet.local"
 #define API_JSON_CAPACITY (16 * 1024)
 #define IMAGE_JPEG_CAPACITY (320 * 1024)
 #define JPEG_WORKBUF_SIZE 3100
@@ -38,6 +39,9 @@
 
 static const char *TAG = "birdnet_cyd";
 
+static char wifi_ssid[33];
+static char wifi_password[65];
+static char birdnet_base_url[128];
 static volatile bool wifi_connected;
 static TaskHandle_t app_task_handle;
 static bool displayed_image_ready;
@@ -434,7 +438,8 @@ static bool json_object_string(const char *data, size_t start, size_t end,
 
 static esp_err_t fetch_latest_bird(bird_detection_t *bird)
 {
-    const char *url = BIRDNET_BASE_URL "/api/v1/detections/visits";
+    char url[sizeof(birdnet_base_url) + 32];
+    snprintf(url, sizeof(url), "%s/api/v1/detections/visits", birdnet_base_url);
     http_response_t response;
     esp_err_t result = http_get(url, API_JSON_CAPACITY, &response);
     if (result != ESP_OK) {
@@ -606,10 +611,10 @@ static esp_err_t fetch_bird_image(const char *scientific_name, size_t *jpeg_leng
                                   esp_http_client_handle_t *image_client)
 {
     char encoded_name[288];
-    char metadata_url[384];
+    char metadata_url[sizeof(birdnet_base_url) + sizeof(encoded_name) + 16];
     if (!url_encode_path(scientific_name, encoded_name, sizeof(encoded_name)) ||
         snprintf(metadata_url, sizeof(metadata_url),
-                 BIRDNET_BASE_URL "/api/v1/image/%s", encoded_name) >=
+                 "%s/api/v1/image/%s", birdnet_base_url, encoded_name) >=
             (int)sizeof(metadata_url)) {
         return ESP_ERR_INVALID_SIZE;
     }
@@ -925,9 +930,38 @@ static void wifi_event_handler(void *argument, esp_event_base_t event_base,
     }
 }
 
+/* Reads Wi-Fi and BirdNET settings from NVS; returns false when there are no
+   Wi-Fi settings yet. */
+static bool load_config(void)
+{
+    snprintf(birdnet_base_url, sizeof(birdnet_base_url), "%s", DEFAULT_BIRDNET_BASE_URL);
+    nvs_handle_t nvs;
+    if (nvs_flash_init() != ESP_OK || nvs_open(CONFIG_NAMESPACE, NVS_READONLY, &nvs) != ESP_OK) {
+        return false;
+    }
+    size_t size = sizeof(wifi_ssid);
+    bool have_wifi = nvs_get_str(nvs, "wifi_ssid", wifi_ssid, &size) == ESP_OK &&
+                     wifi_ssid[0] != '\0';
+    size = sizeof(wifi_password);
+    if (nvs_get_str(nvs, "wifi_pass", wifi_password, &size) != ESP_OK) {
+        wifi_password[0] = '\0';
+    }
+    size = sizeof(birdnet_base_url);
+    if (nvs_get_str(nvs, "birdnet_url", birdnet_base_url, &size) != ESP_OK ||
+        birdnet_base_url[0] == '\0') {
+        snprintf(birdnet_base_url, sizeof(birdnet_base_url), "%s", DEFAULT_BIRDNET_BASE_URL);
+    }
+    nvs_close(nvs);
+    size_t length = strlen(birdnet_base_url);
+    while (length > 0 && birdnet_base_url[length - 1] == '/') {
+        birdnet_base_url[--length] = '\0';
+    }
+    ESP_LOGI(TAG, "BirdNET server: %s", birdnet_base_url);
+    return have_wifi;
+}
+
 static void wifi_init(void)
 {
-    ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     ESP_ERROR_CHECK(esp_netif_create_default_wifi_sta() != NULL ? ESP_OK : ESP_FAIL);
@@ -944,11 +978,9 @@ static void wifi_init(void)
             .threshold.authmode = WIFI_AUTH_WPA2_PSK,
         },
     };
-    ESP_ERROR_CHECK(strlen(WIFI_SSID) <= sizeof(wifi_config.sta.ssid) &&
-                    strlen(WIFI_PASSWORD) < sizeof(wifi_config.sta.password)
-                    ? ESP_OK : ESP_ERR_INVALID_SIZE);
-    memcpy(wifi_config.sta.ssid, WIFI_SSID, strlen(WIFI_SSID));
-    memcpy(wifi_config.sta.password, WIFI_PASSWORD, strlen(WIFI_PASSWORD));
+    memcpy(wifi_config.sta.ssid, wifi_ssid, strnlen(wifi_ssid, sizeof(wifi_config.sta.ssid)));
+    memcpy(wifi_config.sta.password, wifi_password,
+           strnlen(wifi_password, sizeof(wifi_config.sta.password) - 1));
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
@@ -986,6 +1018,13 @@ static void birdnet_task(void *argument)
 void app_main(void)
 {
     ESP_ERROR_CHECK(cyd_display_init());
+    if (!load_config()) {
+        ESP_LOGE(TAG, "No Wi-Fi settings in NVS; start the launcher once to store them");
+        ESP_ERROR_CHECK(cyd_text_row(3, CYD_COLOR_YELLOW, CYD_COLOR_BLACK, "NO WI-FI SETTINGS"));
+        ESP_ERROR_CHECK(cyd_text_row(5, CYD_COLOR_WHITE, CYD_COLOR_BLACK, "Press EN to run"));
+        ESP_ERROR_CHECK(cyd_text_row(6, CYD_COLOR_WHITE, CYD_COLOR_BLACK, "the launcher once"));
+        return;
+    }
 
     QueueHandle_t touch_queue;
     ESP_ERROR_CHECK(cyd_touch_start(&touch_queue));

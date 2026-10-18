@@ -17,7 +17,14 @@ The viewer connects to Wi-Fi and queries a local BirdNET server every two minute
 
 This is the original viewer from `main`, ported to the shared display component (`components/cyd_display`). That port fixes swapped red and blue and transposed image tiles on this panel.
 
-Set `BIRDNET_BASE_URL` in `%USERPROFILE%\.cyd_private\wifi_credentials.h` to your server, for example `#define BIRDNET_BASE_URL "http://192.168.1.50"`. It defaults to `http://birdnet.local`. The viewer uses:
+The viewer has no credentials compiled in, so its binary is safe to publish. It reads its settings at startup from the board's NVS, namespace `cyd_config`. The launcher on the `bootloader` branch writes them there from its private `wifi_credentials.h`:
+
+| Key | Contents |
+|---|---|
+| `wifi_ssid`, `wifi_pass` | Wi-Fi network |
+| `birdnet_url` | BirdNET server, for example `http://192.168.1.50`; defaults to `http://birdnet.local` |
+
+Without Wi-Fi settings, the screen says so. Press EN to run the launcher once, then boot the viewer again. The viewer uses:
 
 - `GET {BIRDNET_BASE_URL}/api/v1/detections/visits`
 - `GET {BIRDNET_BASE_URL}/api/v1/image/{URL-encoded-scientific-name}`
@@ -28,8 +35,6 @@ Wikimedia's 1280-pixel thumbnail is streamed over HTTPS straight into the ESP32 
 
 Install the PlatformIO IDE extension or PlatformIO Core. The first build installs the ESP32 platform and ESP-IDF toolchain. The project path must be short: builds fail on Windows when source paths pass 260 characters.
 
-Create `%USERPROFILE%\.cyd_private\wifi_credentials.h` from `main\wifi_credentials.example.h` with your Wi-Fi SSID, password and BirdNET URL. Never commit that file.
-
 ```powershell
 $pio = "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe"
 & $pio run
@@ -37,8 +42,8 @@ $pio = "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe"
 
 The app binary is `%USERPROFILE%\.platformio\cyd-birdnet-build\esp32dev\firmware.bin`, about 1.0 MB. Use it in one of two ways:
 
-- **As a launcher image** (board runs the `bootloader` branch): attach it to a GitHub release as `birdnet.bin`, or write it to a slot over USB, as described in the `bootloader` README.
-- **On its own:** `& $pio run --target upload --upload-port COM11`. This replaces everything on the board, including the launcher.
+- **As a launcher image** (board runs the `bootloader` branch): every push to this branch runs `.github/workflows/build.yml`, which builds the app and publishes it as `firmware.bin` on the release tagged `birdnet_viewer`. The launcher lists the branch and downloads that file. You can also write it to a slot over USB, as described in the `bootloader` README.
+- **On its own:** `& $pio run --target upload --upload-port COM11`. This replaces everything on the board, including the launcher and the settings it stored. The viewer then has no Wi-Fi settings.
 
 Monitor with `& $pio device monitor --port COM11 --baud 115200`. Ctrl+] exits.
 
