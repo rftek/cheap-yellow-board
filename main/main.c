@@ -1,652 +1,721 @@
-#include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "cyd_display.h"
+#include "esp_crt_bundle.h"
 #include "esp_event.h"
+#include "esp_http_client.h"
 #include "esp_log.h"
-#include "esp_mac.h"
+#include "esp_netif.h"
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
+#include "esp_system.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
-#include "host/ble_hs.h"
-#include "host/util/util.h"
-#include "nimble/nimble_port.h"
-#include "nimble/nimble_port_freertos.h"
+#include "nvs.h"
 #include "nvs_flash.h"
+#include "wifi_credentials.h"
 
-#define MAX_WIFI_RESULTS 24
-#define MAX_BLE_RESULTS 32
-#define BLE_SCAN_DURATION_MS 6000
+/* Boot images are the .bin assets of this repository's latest release. */
+#ifndef IMAGE_REPO
+#define IMAGE_REPO "rftek/cheap-yellow-board"
+#endif
+#define RELEASES_URL "https://api.github.com/repos/" IMAGE_REPO "/releases/latest"
 
-#define BLE_SYNCED_BIT BIT0
-#define BLE_SCAN_DONE_BIT BIT1
+/* Countdown before the default image boots; each tap off an entry adds as much again. */
+#define MENU_TIMEOUT_US (20LL * 1000 * 1000)
+#define WIFI_CONNECT_TIMEOUT_MS 10000
+#define RELEASE_JSON_LIMIT (64 * 1024)
+#define DOWNLOAD_CHUNK_SIZE 4096
+#define MAX_REDIRECTS 5
 
-/* List header layout: title (tap to rescan), then up and down arrow buttons. */
-#define HEADER_TITLE_COLUMNS 10
-#define ARROW_UP_COLUMN 10
-#define ARROW_DOWN_COLUMN 14
-#define ARROW_COLUMNS 3
+#define SLOT_COUNT 2
+#define MAX_REMOTE_IMAGES 8
+#define MENU_FIRST_ROW 1
+#define MENU_ROWS (CYD_TEXT_ROWS - 2)
+#define STATUS_ROW (CYD_TEXT_ROWS - 1)
 
-static const char *TAG = "cyd_scanner";
+#define WIFI_CONNECTED_BIT BIT0
+
+static const char *TAG = "cyd_launcher";
+
+typedef struct {
+    const esp_partition_t *partition;
+    bool valid;
+    char name[48];
+    uint32_t size; /* release asset size; 0 when flashed some other way */
+} slot_t;
+
+typedef struct {
+    char name[48];
+    char url[256];
+    uint32_t size;
+} remote_image_t;
+
+typedef enum { ENTRY_SLOT, ENTRY_REMOTE } entry_kind_t;
+
+typedef struct {
+    entry_kind_t kind;
+    int index;
+} entry_t;
+
+typedef enum {
+    NET_CONNECTING,
+    NET_FETCHING,
+    NET_READY,
+    NET_NO_RELEASE,
+    NET_OFFLINE,
+} net_state_t;
+
+typedef struct {
+    char *data;
+    size_t length;
+    size_t capacity;
+} http_buffer_t;
+
 static QueueHandle_t touch_queue;
-static EventGroupHandle_t ble_events;
-static uint8_t ble_own_addr_type;
+static EventGroupHandle_t wifi_events;
+static volatile bool wifi_give_up;
+static slot_t slots[SLOT_COUNT];
+static remote_image_t remote_images[MAX_REMOTE_IMAGES];
+static int remote_count;
+/* Written by the network task; remote_images is complete once NET_READY is set. */
+static volatile net_state_t net_state = NET_CONNECTING;
+static entry_t entries[MENU_ROWS];
+static int entry_count;
 
-typedef struct {
-    uint8_t addr[6];
-    uint8_t addr_type;
-    uint8_t adv_type; /* advertising PDU type, excluding scan responses */
-    int8_t rssi;
-    int8_t tx_power;
-    bool has_tx_power;
-    bool has_company;
-    bool has_service;
-    uint16_t company_id;
-    uint16_t service_uuid16;
-    char name[32];
-} ble_device_t;
+/* ---- Stored images ---- */
 
-enum { LIST_WIFI, LIST_BLE, LIST_COUNT };
-
-typedef struct {
-    int header_row;
-    int rows;   /* visible entry rows below the header */
-    int offset; /* index of the first visible entry */
-} list_view_t;
-
-/* A screen of text rows; the last row is reserved for a footer. */
-typedef struct {
-    char text[CYD_TEXT_ROWS][CYD_TEXT_COLUMNS + 1];
-    uint16_t color[CYD_TEXT_ROWS];
-    int count;
-} page_t;
-
-static wifi_ap_record_t wifi_results[MAX_WIFI_RESULTS];
-static uint16_t wifi_result_count;
-static uint16_t wifi_total_count;
-static ble_device_t ble_results[MAX_BLE_RESULTS];
-static int ble_result_count;
-static bool ble_results_full;
-static list_view_t list_views[LIST_COUNT];
-
-static const char *wifi_auth_name(wifi_auth_mode_t mode)
+static void slot_key(char *key, size_t size, const char *field, int slot)
 {
-    switch (mode) {
-    case WIFI_AUTH_OPEN:
-        return "OPEN";
-    case WIFI_AUTH_WEP:
-        return "WEP";
-    case WIFI_AUTH_WPA_PSK:
-        return "WPA-PSK";
-    case WIFI_AUTH_WPA2_PSK:
-        return "WPA2-PSK";
-    case WIFI_AUTH_WPA_WPA2_PSK:
-        return "WPA/WPA2-PSK";
-    case WIFI_AUTH_WPA2_ENTERPRISE:
-        return "WPA2-ENT";
-    case WIFI_AUTH_WPA3_PSK:
-        return "WPA3-SAE";
-    case WIFI_AUTH_WPA2_WPA3_PSK:
-        return "WPA2/WPA3";
-    case WIFI_AUTH_OWE:
-        return "OWE";
-    default:
-        return "OTHER";
+    snprintf(key, size, "%s%d", field, slot);
+}
+
+static void load_slots(void)
+{
+    nvs_handle_t nvs;
+    bool have_nvs = nvs_open("launcher", NVS_READONLY, &nvs) == ESP_OK;
+    for (int i = 0; i < SLOT_COUNT; ++i) {
+        slot_t *slot = &slots[i];
+        memset(slot, 0, sizeof(*slot));
+        slot->partition = esp_partition_find_first(
+            ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0 + i, NULL);
+        esp_app_desc_t description;
+        slot->valid = slot->partition != NULL &&
+                      esp_ota_get_partition_description(slot->partition, &description) ==
+                          ESP_OK;
+        if (!slot->valid) {
+            continue;
+        }
+        char key[16];
+        size_t name_size = sizeof(slot->name);
+        slot_key(key, sizeof(key), "name", i);
+        if (!have_nvs || nvs_get_str(nvs, key, slot->name, &name_size) != ESP_OK) {
+            /* Flashed over USB rather than downloaded: use the project name. */
+            snprintf(slot->name, sizeof(slot->name), "%s", description.project_name);
+        }
+        slot_key(key, sizeof(key), "size", i);
+        if (have_nvs) {
+            nvs_get_u32(nvs, key, &slot->size);
+        }
+        ESP_LOGI(TAG, "Slot %c: %s (%u bytes)", 'A' + i, slot->name, (unsigned)slot->size);
+    }
+    if (have_nvs) {
+        nvs_close(nvs);
     }
 }
 
-static const char *wifi_cipher_name(wifi_cipher_type_t cipher)
+static void save_slot(int slot, const char *name, uint32_t size)
 {
-    switch (cipher) {
-    case WIFI_CIPHER_TYPE_NONE:
-        return "NONE";
-    case WIFI_CIPHER_TYPE_WEP40:
-    case WIFI_CIPHER_TYPE_WEP104:
-        return "WEP";
-    case WIFI_CIPHER_TYPE_TKIP:
-        return "TKIP";
-    case WIFI_CIPHER_TYPE_CCMP:
-        return "CCMP";
-    case WIFI_CIPHER_TYPE_TKIP_CCMP:
-        return "TKIP+CCMP";
-    case WIFI_CIPHER_TYPE_GCMP:
-        return "GCMP";
-    case WIFI_CIPHER_TYPE_GCMP256:
-        return "GCMP-256";
-    default:
-        return "OTHER";
-    }
-}
-
-static void wifi_phy_text(const wifi_ap_record_t *ap, char *text, size_t size)
-{
-    snprintf(text, size, "%s%s%s%s%s", ap->phy_11b ? "b" : "", ap->phy_11g ? "g" : "",
-             ap->phy_11n ? "n" : "", ap->phy_11ax ? "/ax" : "", ap->phy_lr ? " LR" : "");
-}
-
-static void wifi_init(void)
-{
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    wifi_init_config_t init_config = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&init_config));
-    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_start());
-}
-
-static void wifi_scan(void)
-{
-    wifi_result_count = 0;
-    wifi_total_count = 0;
-    esp_err_t result = esp_wifi_scan_start(NULL, true);
-    if (result != ESP_OK) {
-        ESP_LOGE(TAG, "Wi-Fi scan failed: %s", esp_err_to_name(result));
+    nvs_handle_t nvs;
+    if (nvs_open("launcher", NVS_READWRITE, &nvs) != ESP_OK) {
         return;
     }
-    esp_wifi_scan_get_ap_num(&wifi_total_count);
-    wifi_result_count = MAX_WIFI_RESULTS;
-    result = esp_wifi_scan_get_ap_records(&wifi_result_count, wifi_results);
-    if (result != ESP_OK) {
-        ESP_LOGE(TAG, "Could not read Wi-Fi scan results: %s", esp_err_to_name(result));
-        wifi_result_count = 0;
-        return;
+    char key[16];
+    slot_key(key, sizeof(key), "name", slot);
+    if (name != NULL) {
+        nvs_set_str(nvs, key, name);
+    } else {
+        nvs_erase_key(nvs, key);
     }
-    ESP_LOGI(TAG, "Wi-Fi: %u networks", wifi_total_count);
-    for (int i = 0; i < wifi_result_count; ++i) {
-        const wifi_ap_record_t *ap = &wifi_results[i];
-        ESP_LOGI(TAG, "  %4d dBm ch%-2u %-4s " MACSTR " %s", ap->rssi, ap->primary,
-                 wifi_auth_name(ap->authmode), MAC2STR(ap->bssid),
-                 ap->ssid[0] != '\0' ? (const char *)ap->ssid : "(hidden)");
-    }
+    slot_key(key, sizeof(key), "size", slot);
+    nvs_set_u32(nvs, key, size);
+    nvs_commit(nvs);
+    nvs_close(nvs);
 }
 
-static int ble_find_or_add(const uint8_t *addr)
+/* The image that boots when nobody chooses: the last one chosen, else the
+   first stored one. */
+static int default_slot(void)
 {
-    for (int i = 0; i < ble_result_count; ++i) {
-        if (memcmp(ble_results[i].addr, addr, 6) == 0) {
+    const esp_partition_t *boot = esp_ota_get_boot_partition();
+    for (int i = 0; i < SLOT_COUNT; ++i) {
+        if (slots[i].valid && boot != NULL && boot->address == slots[i].partition->address) {
             return i;
         }
     }
-    if (ble_result_count >= MAX_BLE_RESULTS) {
-        ble_results_full = true;
-        return -1;
-    }
-    ble_device_t *device = &ble_results[ble_result_count];
-    memset(device, 0, sizeof(*device));
-    memcpy(device->addr, addr, 6);
-    device->adv_type = 0xFF;
-    return ble_result_count++;
-}
-
-static int ble_gap_event(struct ble_gap_event *event, void *argument)
-{
-    (void)argument;
-    if (event->type == BLE_GAP_EVENT_DISC) {
-        int index = ble_find_or_add(event->disc.addr.val);
-        if (index < 0) {
-            return 0;
-        }
-        ble_device_t *device = &ble_results[index];
-        device->rssi = event->disc.rssi;
-        device->addr_type = event->disc.addr.type;
-        if (event->disc.event_type != BLE_HCI_ADV_RPT_EVTYPE_SCAN_RSP) {
-            device->adv_type = event->disc.event_type;
-        }
-
-        /* Advertisements and scan responses carry different fields; keep the
-           first value seen for each. */
-        struct ble_hs_adv_fields fields;
-        if (ble_hs_adv_parse_fields(&fields, event->disc.data,
-                                    event->disc.length_data) != 0) {
-            return 0;
-        }
-        if (device->name[0] == '\0' && fields.name != NULL && fields.name_len > 0) {
-            size_t length = fields.name_len < sizeof(device->name) - 1
-                                ? fields.name_len
-                                : sizeof(device->name) - 1;
-            memcpy(device->name, fields.name, length);
-            device->name[length] = '\0';
-        }
-        if (!device->has_tx_power && fields.tx_pwr_lvl_is_present) {
-            device->tx_power = fields.tx_pwr_lvl;
-            device->has_tx_power = true;
-        }
-        if (!device->has_company && fields.mfg_data != NULL && fields.mfg_data_len >= 2) {
-            device->company_id = (uint16_t)(fields.mfg_data[0] | (fields.mfg_data[1] << 8));
-            device->has_company = true;
-        }
-        if (!device->has_service && fields.uuids16 != NULL && fields.num_uuids16 > 0) {
-            device->service_uuid16 = fields.uuids16[0].value;
-            device->has_service = true;
-        }
-    } else if (event->type == BLE_GAP_EVENT_DISC_COMPLETE) {
-        xEventGroupSetBits(ble_events, BLE_SCAN_DONE_BIT);
-    }
-    return 0;
-}
-
-static void ble_on_sync(void)
-{
-    if (ble_hs_id_infer_auto(0, &ble_own_addr_type) != 0) {
-        ESP_LOGE(TAG, "Could not determine BLE address type");
-        return;
-    }
-    xEventGroupSetBits(ble_events, BLE_SYNCED_BIT);
-}
-
-static void ble_host_task(void *argument)
-{
-    (void)argument;
-    nimble_port_run();
-    nimble_port_freertos_deinit();
-}
-
-static void ble_init(void)
-{
-    ble_events = xEventGroupCreate();
-    ESP_ERROR_CHECK(ble_events != NULL ? ESP_OK : ESP_ERR_NO_MEM);
-    ESP_ERROR_CHECK(nimble_port_init());
-    ble_hs_cfg.sync_cb = ble_on_sync;
-    nimble_port_freertos_init(ble_host_task);
-}
-
-/* Named devices first, then strongest signal first. */
-static int ble_compare(const void *left, const void *right)
-{
-    const ble_device_t *a = left;
-    const ble_device_t *b = right;
-    bool a_named = a->name[0] != '\0';
-    bool b_named = b->name[0] != '\0';
-    if (a_named != b_named) {
-        return a_named ? -1 : 1;
-    }
-    return b->rssi - a->rssi;
-}
-
-static void ble_scan(void)
-{
-    ble_result_count = 0;
-    ble_results_full = false;
-    if ((xEventGroupWaitBits(ble_events, BLE_SYNCED_BIT, pdFALSE, pdTRUE,
-                             pdMS_TO_TICKS(5000)) & BLE_SYNCED_BIT) == 0) {
-        ESP_LOGE(TAG, "BLE host did not start");
-        return;
-    }
-    /* Active scan without controller duplicate filtering so scan responses,
-       which usually carry the device name, are not dropped. */
-    struct ble_gap_disc_params params = {
-        .passive = 0,
-        .filter_duplicates = 0,
-    };
-    xEventGroupClearBits(ble_events, BLE_SCAN_DONE_BIT);
-    int rc = ble_gap_disc(ble_own_addr_type, BLE_SCAN_DURATION_MS, &params,
-                          ble_gap_event, NULL);
-    if (rc != 0) {
-        ESP_LOGE(TAG, "BLE scan failed to start: %d", rc);
-        return;
-    }
-    xEventGroupWaitBits(ble_events, BLE_SCAN_DONE_BIT, pdTRUE, pdTRUE,
-                        pdMS_TO_TICKS(BLE_SCAN_DURATION_MS + 2000));
-    qsort(ble_results, ble_result_count, sizeof(ble_results[0]), ble_compare);
-
-    ESP_LOGI(TAG, "BLE: %d%s devices", ble_result_count, ble_results_full ? "+" : "");
-    for (int i = 0; i < ble_result_count; ++i) {
-        const ble_device_t *device = &ble_results[i];
-        /* NimBLE stores addresses little-endian; print most significant byte first. */
-        ESP_LOGI(TAG, "  %4d dBm %02x:%02x:%02x:%02x:%02x:%02x %s", device->rssi,
-                 device->addr[5], device->addr[4], device->addr[3],
-                 device->addr[2], device->addr[1], device->addr[0], device->name);
-    }
-}
-
-static void show_status(const char *message)
-{
-    ESP_ERROR_CHECK(cyd_fill_rect(0, 0, CYD_LCD_WIDTH, CYD_LCD_HEIGHT, CYD_COLOR_BLACK));
-    ESP_ERROR_CHECK(cyd_text_row(CYD_TEXT_ROWS / 2, CYD_COLOR_YELLOW, CYD_COLOR_BLACK, message));
-}
-
-static void page_add(page_t *page, uint16_t color, const char *format, ...)
-{
-    if (page->count >= CYD_TEXT_ROWS - 1) {
-        return;
-    }
-    va_list arguments;
-    va_start(arguments, format);
-    vsnprintf(page->text[page->count], sizeof(page->text[0]), format, arguments);
-    va_end(arguments);
-    page->color[page->count++] = color;
-}
-
-/* Adds text split across up to max_rows full-width rows. */
-static void page_add_wrapped(page_t *page, uint16_t color, const char *text, int max_rows)
-{
-    size_t length = strlen(text);
-    for (int row = 0; row < max_rows && (row == 0 || length > 0); ++row) {
-        page_add(page, color, "%.*s", CYD_TEXT_COLUMNS, text);
-        size_t step = length < CYD_TEXT_COLUMNS ? length : CYD_TEXT_COLUMNS;
-        text += step;
-        length -= step;
-    }
-}
-
-static void page_show(const page_t *page, const char *footer)
-{
-    for (int row = 0; row < CYD_TEXT_ROWS; ++row) {
-        if (row < page->count) {
-            ESP_ERROR_CHECK(cyd_text_row(row, page->color[row], CYD_COLOR_BLACK, page->text[row]));
-        } else if (row == CYD_TEXT_ROWS - 1) {
-            ESP_ERROR_CHECK(cyd_text_row(row, CYD_COLOR_GRAY, CYD_COLOR_BLACK, footer));
-        } else {
-            ESP_ERROR_CHECK(cyd_text_row(row, CYD_COLOR_WHITE, CYD_COLOR_BLACK, ""));
+    for (int i = 0; i < SLOT_COUNT; ++i) {
+        if (slots[i].valid) {
+            return i;
         }
     }
+    return -1;
 }
 
-static void show_wifi_detail(const wifi_ap_record_t *ap)
+/* ---- Screen ---- */
+
+static void draw_title(const char *text)
 {
-    page_t page = {0};
-    char phy[24];
-    wifi_phy_text(ap, phy, sizeof(phy));
-    page_add(&page, CYD_COLOR_YELLOW, "WI-FI NETWORK");
-    page_add_wrapped(&page, CYD_COLOR_WHITE,
-                     ap->ssid[0] != '\0' ? (const char *)ap->ssid : "(hidden)", 2);
-    page_add(&page, CYD_COLOR_WHITE, "RSSI %d dBm", ap->rssi);
-    page_add(&page, CYD_COLOR_WHITE, "CHANNEL %u", ap->primary);
-    page_add(&page, CYD_COLOR_WHITE, "AUTH %s", wifi_auth_name(ap->authmode));
-    page_add(&page, CYD_COLOR_WHITE, "CIPHER %s", wifi_cipher_name(ap->pairwise_cipher));
-    page_add(&page, CYD_COLOR_WHITE, MACSTR, MAC2STR(ap->bssid));
-    page_add(&page, CYD_COLOR_WHITE, "802.11%s%s", phy, ap->wps ? " WPS" : "");
-    page_show(&page, "tap to go back");
+    ESP_ERROR_CHECK(cyd_text_row(0, CYD_COLOR_YELLOW, CYD_COLOR_BLACK, text));
 }
 
-static const char *ble_company_name(uint16_t company_id)
+static void draw_status(void)
 {
-    switch (company_id) {
-    case 0x0006:
-        return "Microsoft";
-    case 0x004C:
-        return "Apple";
-    case 0x0059:
-        return "Nordic";
-    case 0x0075:
-        return "Samsung";
-    case 0x0087:
-        return "Garmin";
-    case 0x00E0:
-        return "Google";
-    case 0x012D:
-        return "Sony";
-    case 0x0171:
-        return "Amazon";
-    case 0x02E5:
-        return "Espressif";
-    default:
-        return NULL;
-    }
-}
-
-static const char *ble_address_kind(const ble_device_t *device)
-{
-    if (device->addr_type == BLE_ADDR_PUBLIC) {
-        return "PUBLIC ADDRESS";
-    }
-    /* Random address subtype is in the two most significant bits. */
-    switch (device->addr[5] >> 6) {
-    case 3:
-        return "STATIC RANDOM";
-    case 1:
-        return "PRIVATE (RPA)";
-    case 0:
-        return "PRIVATE (NRPA)";
-    default:
-        return "RANDOM ADDRESS";
-    }
-}
-
-static const char *ble_advertising_kind(uint8_t adv_type)
-{
-    switch (adv_type) {
-    case BLE_HCI_ADV_RPT_EVTYPE_ADV_IND:
-        return "CONNECTABLE";
-    case BLE_HCI_ADV_RPT_EVTYPE_DIR_IND:
-        return "DIRECTED";
-    case BLE_HCI_ADV_RPT_EVTYPE_SCAN_IND:
-        return "SCANNABLE";
-    case BLE_HCI_ADV_RPT_EVTYPE_NONCONN_IND:
-        return "NON-CONNECTABLE";
-    default:
-        return "ADV TYPE ?";
-    }
-}
-
-static void show_ble_detail(const ble_device_t *device)
-{
-    page_t page = {0};
-    page_add(&page, CYD_COLOR_CYAN, "BLE DEVICE");
-    if (device->name[0] != '\0') {
-        page_add_wrapped(&page, CYD_COLOR_WHITE, device->name, 2);
-    } else {
-        page_add(&page, CYD_COLOR_GRAY, "(no name)");
-    }
-    page_add(&page, CYD_COLOR_WHITE, "RSSI %d dBm", device->rssi);
-    page_add(&page, CYD_COLOR_WHITE, "%02x:%02x:%02x:%02x:%02x:%02x",
-             device->addr[5], device->addr[4], device->addr[3],
-             device->addr[2], device->addr[1], device->addr[0]);
-    page_add(&page, CYD_COLOR_WHITE, "%s", ble_address_kind(device));
-    page_add(&page, CYD_COLOR_WHITE, "%s", ble_advertising_kind(device->adv_type));
-    if (device->has_tx_power) {
-        page_add(&page, CYD_COLOR_WHITE, "TX POWER %d dBm", device->tx_power);
-    }
-    if (device->has_company) {
-        const char *company = ble_company_name(device->company_id);
-        if (company != NULL) {
-            page_add(&page, CYD_COLOR_WHITE, "MFR %s", company);
-        } else {
-            page_add(&page, CYD_COLOR_WHITE, "MFR 0x%04X", device->company_id);
-        }
-    }
-    if (device->has_service) {
-        page_add(&page, CYD_COLOR_WHITE, "SERVICE 0x%04X", device->service_uuid16);
-    }
-    page_show(&page, "tap to go back");
-}
-
-static int list_count(int list)
-{
-    return list == LIST_WIFI ? wifi_result_count : ble_result_count;
-}
-
-/* Splits the rows below the two headers between the lists: each gets up to
-   half, and rows one list cannot fill go to the other. */
-static void layout_lists(void)
-{
-    int list_rows = CYD_TEXT_ROWS - 2;
-    int ble_wanted = ble_result_count < list_rows / 2 ? ble_result_count : list_rows / 2;
-    int wifi_rows = wifi_result_count < list_rows - ble_wanted
-                        ? wifi_result_count
-                        : list_rows - ble_wanted;
-    int ble_rows = ble_result_count < list_rows - wifi_rows
-                       ? ble_result_count
-                       : list_rows - wifi_rows;
-    list_views[LIST_WIFI] = (list_view_t){.header_row = 0, .rows = wifi_rows};
-    list_views[LIST_BLE] = (list_view_t){.header_row = 1 + wifi_rows, .rows = ble_rows};
-}
-
-static void draw_list_header(int list)
-{
-    const list_view_t *view = &list_views[list];
-    char text[CYD_TEXT_COLUMNS + 1];
-    char title[24];
-    uint16_t foreground[CYD_TEXT_COLUMNS];
-    uint16_t background[CYD_TEXT_COLUMNS];
-    uint16_t title_color = list == LIST_WIFI ? CYD_COLOR_YELLOW : CYD_COLOR_CYAN;
-    bool can_scroll_up = view->offset > 0;
-    bool can_scroll_down = view->offset + view->rows < list_count(list);
-
-    if (list == LIST_WIFI) {
-        snprintf(title, sizeof(title), "WI-FI %u", wifi_total_count);
-    } else {
-        snprintf(title, sizeof(title), "BLE %d%s", ble_result_count,
-                 ble_results_full ? "+" : "");
-    }
-    memset(text, ' ', CYD_TEXT_COLUMNS);
-    text[CYD_TEXT_COLUMNS] = '\0';
-    memcpy(text, title, strnlen(title, HEADER_TITLE_COLUMNS - 1));
-    for (int i = 0; i < CYD_TEXT_COLUMNS; ++i) {
-        foreground[i] = title_color;
-        background[i] = CYD_COLOR_BLACK;
-    }
-    for (int i = 0; i < ARROW_COLUMNS; ++i) {
-        background[ARROW_UP_COLUMN + i] = CYD_COLOR_BUTTON;
-        foreground[ARROW_UP_COLUMN + i] = can_scroll_up ? CYD_COLOR_WHITE : CYD_COLOR_BUTTON_DISABLED;
-        background[ARROW_DOWN_COLUMN + i] = CYD_COLOR_BUTTON;
-        foreground[ARROW_DOWN_COLUMN + i] =
-            can_scroll_down ? CYD_COLOR_WHITE : CYD_COLOR_BUTTON_DISABLED;
-    }
-    text[ARROW_UP_COLUMN + 1] = CYD_GLYPH_UP;
-    text[ARROW_DOWN_COLUMN + 1] = CYD_GLYPH_DOWN;
-    ESP_ERROR_CHECK(cyd_draw_cells(view->header_row, text, foreground, background));
-}
-
-static void draw_list_entry(int list, int index, int row, bool highlighted)
-{
-    /* 17 columns: "-dBm" plus a 12-character SSID or name. */
     char line[CYD_TEXT_COLUMNS + 1];
-    uint16_t color = CYD_COLOR_WHITE;
-    if (list == LIST_WIFI) {
-        const wifi_ap_record_t *ap = &wifi_results[index];
-        snprintf(line, sizeof(line), "%4d %.12s", ap->rssi,
-                 ap->ssid[0] != '\0' ? (const char *)ap->ssid : "(hidden)");
-    } else {
-        const ble_device_t *device = &ble_results[index];
-        if (device->name[0] != '\0') {
-            snprintf(line, sizeof(line), "%4d %.12s", device->rssi, device->name);
-        } else {
-            snprintf(line, sizeof(line), "%4d %02x%02x%02x%02x%02x%02x", device->rssi,
-                     device->addr[5], device->addr[4], device->addr[3],
-                     device->addr[2], device->addr[1], device->addr[0]);
-            color = CYD_COLOR_GRAY;
-        }
+    switch (net_state) {
+    case NET_CONNECTING:
+        snprintf(line, sizeof(line), "Wi-Fi...");
+        break;
+    case NET_FETCHING:
+        snprintf(line, sizeof(line), "GitHub...");
+        break;
+    case NET_READY:
+        snprintf(line, sizeof(line), "%d online", remote_count);
+        break;
+    case NET_NO_RELEASE:
+        snprintf(line, sizeof(line), "no release");
+        break;
+    default:
+        snprintf(line, sizeof(line), "offline");
+        break;
     }
-    if (highlighted) {
-        ESP_ERROR_CHECK(cyd_text_row(row, CYD_COLOR_BLACK, CYD_COLOR_WHITE, line));
-    } else {
-        ESP_ERROR_CHECK(cyd_text_row(row, color, CYD_COLOR_BUTTON, line));
-    }
+    ESP_ERROR_CHECK(cyd_text_row(STATUS_ROW, CYD_COLOR_GRAY, CYD_COLOR_BLACK, line));
 }
 
-static void draw_list(int list)
+static bool remote_is_stored(const remote_image_t *image)
 {
-    const list_view_t *view = &list_views[list];
-    draw_list_header(list);
-    for (int i = 0; i < view->rows; ++i) {
-        draw_list_entry(list, view->offset + i, view->header_row + 1 + i, false);
-    }
-}
-
-static void show_results(void)
-{
-    draw_list(LIST_WIFI);
-    draw_list(LIST_BLE);
-    const list_view_t *ble_view = &list_views[LIST_BLE];
-    for (int row = ble_view->header_row + 1 + ble_view->rows; row < CYD_TEXT_ROWS; ++row) {
-        ESP_ERROR_CHECK(cyd_text_row(row, CYD_COLOR_WHITE, CYD_COLOR_BLACK, ""));
-    }
-}
-
-/* Pages a list by its visible height, stopping with the last page full. */
-static void scroll_list(int list, int direction)
-{
-    list_view_t *view = &list_views[list];
-    int max_offset = list_count(list) - view->rows;
-    int offset = view->offset + direction * view->rows;
-    if (offset > max_offset) {
-        offset = max_offset;
-    }
-    if (offset < 0) {
-        offset = 0;
-    }
-    if (offset != view->offset) {
-        view->offset = offset;
-        draw_list(list);
-    }
-}
-
-static void open_detail(int list, int index, int row)
-{
-    draw_list_entry(list, index, row, true);
-    vTaskDelay(pdMS_TO_TICKS(120));
-    if (list == LIST_WIFI) {
-        show_wifi_detail(&wifi_results[index]);
-    } else {
-        show_ble_detail(&ble_results[index]);
-    }
-    cyd_touch_point_t point;
-    xQueueReset(touch_queue);
-    xQueueReceive(touch_queue, &point, portMAX_DELAY);
-    show_results();
-}
-
-/* Returns true when the tap asks for a new scan. */
-static bool handle_list_tap(const cyd_touch_point_t *point)
-{
-    int row = point->y / CYD_FONT_HEIGHT;
-    int column = point->x / CYD_FONT_WIDTH;
-    for (int list = 0; list < LIST_COUNT; ++list) {
-        const list_view_t *view = &list_views[list];
-        if (row == view->header_row) {
-            if (column < HEADER_TITLE_COLUMNS) {
-                return true;
-            }
-            if (column >= ARROW_UP_COLUMN && column < ARROW_UP_COLUMN + ARROW_COLUMNS) {
-                scroll_list(list, -1);
-            } else if (column >= ARROW_DOWN_COLUMN) {
-                scroll_list(list, 1);
-            }
-            return false;
-        }
-        if (row > view->header_row && row <= view->header_row + view->rows) {
-            open_detail(list, view->offset + row - view->header_row - 1, row);
-            return false;
+    for (int i = 0; i < SLOT_COUNT; ++i) {
+        if (slots[i].valid && strcmp(slots[i].name, image->name) == 0 &&
+            slots[i].size == image->size) {
+            return true;
         }
     }
     return false;
 }
 
-static void scan_task(void *argument)
+/* Stored images first, then release assets that are not already stored. */
+static void build_entries(void)
 {
-    (void)argument;
-    while (true) {
-        show_status(" Scanning Wi-Fi");
-        wifi_scan();
-        show_status(" Scanning BLE");
-        ble_scan();
-        layout_lists();
-        show_results();
-        ESP_LOGI(TAG, "Scan complete; free heap: %u bytes",
-                 (unsigned)esp_get_free_heap_size());
-
-        /* Drop taps that arrived during the scan, then handle taps until one
-           asks for a rescan. */
-        xQueueReset(touch_queue);
-        cyd_touch_point_t point;
-        do {
-            xQueueReceive(touch_queue, &point, portMAX_DELAY);
-        } while (!handle_list_tap(&point));
+    entry_count = 0;
+    for (int i = 0; i < SLOT_COUNT && entry_count < MENU_ROWS; ++i) {
+        if (slots[i].valid) {
+            entries[entry_count++] = (entry_t){.kind = ENTRY_SLOT, .index = i};
+        }
+    }
+    if (net_state != NET_READY) {
+        return;
+    }
+    for (int i = 0; i < remote_count && entry_count < MENU_ROWS; ++i) {
+        if (!remote_is_stored(&remote_images[i])) {
+            entries[entry_count++] = (entry_t){.kind = ENTRY_REMOTE, .index = i};
+        }
     }
 }
 
+static void draw_entry(int index, bool highlighted)
+{
+    char line[CYD_TEXT_COLUMNS + 1];
+    uint16_t color = CYD_COLOR_WHITE;
+    const entry_t *entry = &entries[index];
+    if (entry->kind == ENTRY_SLOT) {
+        /* "A*name": slot letter, '*' on the image that boots by default. */
+        snprintf(line, sizeof(line), "%c%c%.15s", 'A' + entry->index,
+                 entry->index == default_slot() ? '*' : ' ', slots[entry->index].name);
+    } else {
+        snprintf(line, sizeof(line), "+ %.15s", remote_images[entry->index].name);
+        color = CYD_COLOR_CYAN;
+    }
+    if (highlighted) {
+        ESP_ERROR_CHECK(cyd_text_row(MENU_FIRST_ROW + index, CYD_COLOR_BLACK, CYD_COLOR_WHITE,
+                                     line));
+    } else {
+        ESP_ERROR_CHECK(cyd_text_row(MENU_FIRST_ROW + index, color, CYD_COLOR_BUTTON, line));
+    }
+}
+
+static void draw_entries(void)
+{
+    for (int i = 0; i < MENU_ROWS; ++i) {
+        if (i < entry_count) {
+            draw_entry(i, false);
+        } else {
+            ESP_ERROR_CHECK(cyd_text_row(MENU_FIRST_ROW + i, CYD_COLOR_WHITE, CYD_COLOR_BLACK,
+                                         ""));
+        }
+    }
+}
+
+static void draw_menu(const char *title)
+{
+    draw_title(title);
+    draw_entries();
+    draw_status();
+}
+
+/* Full-screen message; returns after the next tap. */
+static void show_message_and_wait(const char *title, const char *line1, const char *line2)
+{
+    for (int row = 0; row < CYD_TEXT_ROWS; ++row) {
+        const char *text = row == 0 ? title
+                           : row == 2 ? line1
+                           : row == 3 ? line2
+                           : row == STATUS_ROW ? "tap to continue"
+                                               : "";
+        uint16_t color = row == 0 ? CYD_COLOR_RED
+                         : row == STATUS_ROW ? CYD_COLOR_GRAY
+                                             : CYD_COLOR_WHITE;
+        ESP_ERROR_CHECK(cyd_text_row(row, color, CYD_COLOR_BLACK, text != NULL ? text : ""));
+    }
+    cyd_touch_point_t point;
+    xQueueReset(touch_queue);
+    xQueueReceive(touch_queue, &point, portMAX_DELAY);
+}
+
+/* ---- Booting ---- */
+
+static void boot_slot(int slot)
+{
+    const esp_partition_t *partition = slots[slot].partition;
+    const esp_partition_t *current = esp_ota_get_boot_partition();
+    /* Skip the otadata write when the choice is unchanged. */
+    esp_err_t result = current != NULL && current->address == partition->address
+                           ? ESP_OK
+                           : esp_ota_set_boot_partition(partition);
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG, "Slot %c is not bootable: %s", 'A' + slot, esp_err_to_name(result));
+        show_message_and_wait("BOOT FAILED", slots[slot].name, esp_err_to_name(result));
+        return;
+    }
+    ESP_LOGI(TAG, "Booting slot %c: %s", 'A' + slot, slots[slot].name);
+    esp_restart();
+}
+
+/* ---- Network ---- */
+
+static void wifi_event_handler(void *argument, esp_event_base_t event_base, int32_t event_id,
+                               void *event_data)
+{
+    (void)argument;
+    (void)event_data;
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        esp_wifi_connect();
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        xEventGroupClearBits(wifi_events, WIFI_CONNECTED_BIT);
+        if (!wifi_give_up) {
+            esp_wifi_connect();
+        }
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        xEventGroupSetBits(wifi_events, WIFI_CONNECTED_BIT);
+    }
+}
+
+static bool wifi_connect(void)
+{
+    wifi_events = xEventGroupCreate();
+    if (wifi_events == NULL || esp_netif_init() != ESP_OK ||
+        esp_event_loop_create_default() != ESP_OK ||
+        esp_netif_create_default_wifi_sta() == NULL) {
+        return false;
+    }
+    wifi_init_config_t init_config = WIFI_INIT_CONFIG_DEFAULT();
+    if (esp_wifi_init(&init_config) != ESP_OK) {
+        return false;
+    }
+    esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL);
+    esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, NULL);
+
+    wifi_config_t wifi_config = {0};
+    snprintf((char *)wifi_config.sta.ssid, sizeof(wifi_config.sta.ssid), "%s", WIFI_SSID);
+    snprintf((char *)wifi_config.sta.password, sizeof(wifi_config.sta.password), "%s",
+             WIFI_PASSWORD);
+    esp_wifi_set_storage(WIFI_STORAGE_RAM);
+    if (esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK ||
+        esp_wifi_set_config(WIFI_IF_STA, &wifi_config) != ESP_OK ||
+        esp_wifi_start() != ESP_OK) {
+        return false;
+    }
+    EventBits_t bits = xEventGroupWaitBits(wifi_events, WIFI_CONNECTED_BIT, pdFALSE, pdTRUE,
+                                           pdMS_TO_TICKS(WIFI_CONNECT_TIMEOUT_MS));
+    if ((bits & WIFI_CONNECTED_BIT) == 0) {
+        wifi_give_up = true;
+        esp_wifi_stop();
+        return false;
+    }
+    return true;
+}
+
+static esp_err_t http_buffer_handler(esp_http_client_event_t *event)
+{
+    if (event->event_id != HTTP_EVENT_ON_DATA || event->data_len <= 0) {
+        return ESP_OK;
+    }
+    http_buffer_t *buffer = event->user_data;
+    size_t needed = buffer->length + (size_t)event->data_len + 1;
+    if (needed > RELEASE_JSON_LIMIT) {
+        ESP_LOGE(TAG, "Release JSON exceeds %d bytes", RELEASE_JSON_LIMIT);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    if (needed > buffer->capacity) {
+        size_t capacity = buffer->capacity * 2 > needed ? buffer->capacity * 2 : needed;
+        char *data = realloc(buffer->data, capacity);
+        if (data == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+        buffer->data = data;
+        buffer->capacity = capacity;
+    }
+    memcpy(buffer->data + buffer->length, event->data, event->data_len);
+    buffer->length += event->data_len;
+    buffer->data[buffer->length] = '\0';
+    return ESP_OK;
+}
+
+static const char *skip_whitespace(const char *text)
+{
+    while (*text == ' ' || *text == '\t' || *text == '\r' || *text == '\n') {
+        ++text;
+    }
+    return text;
+}
+
+/* Finds "key": in [from, limit) and returns its value, or NULL. */
+static const char *json_value(const char *from, const char *limit, const char *key)
+{
+    char pattern[40];
+    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+    size_t pattern_length = strlen(pattern);
+    for (const char *found = strstr(from, pattern); found != NULL && found < limit;
+         found = strstr(found + 1, pattern)) {
+        const char *value = skip_whitespace(found + pattern_length);
+        if (*value == ':') {
+            return skip_whitespace(value + 1);
+        }
+    }
+    return NULL;
+}
+
+/* Like json_value, but the last match before limit. */
+static const char *json_last_value(const char *from, const char *limit, const char *key)
+{
+    const char *last = NULL;
+    for (const char *value = json_value(from, limit, key); value != NULL;
+         value = json_value(value, limit, key)) {
+        last = value;
+    }
+    return last;
+}
+
+static bool json_copy_string(const char *value, char *output, size_t size)
+{
+    if (value == NULL || *value != '"') {
+        return false;
+    }
+    size_t length = 0;
+    for (++value; *value != '\0' && *value != '"'; ++value) {
+        if (*value == '\\' && value[1] != '\0') {
+            ++value;
+        }
+        if (length + 1 < size) {
+            output[length++] = *value;
+        }
+    }
+    output[length] = '\0';
+    return *value == '"';
+}
+
+/* Collects the .bin assets of a GitHub release. Each asset object ends with
+   its browser_download_url; its name and size come earlier in the object. */
+static void parse_release_assets(const char *json)
+{
+    const char *assets = json_value(json, json + strlen(json), "assets");
+    if (assets == NULL || *assets != '[') {
+        return;
+    }
+    const char *end = json_value(assets, json + strlen(json), "tarball_url");
+    if (end == NULL) {
+        end = json + strlen(json);
+    }
+    const char *object_start = assets;
+    remote_count = 0;
+    for (const char *url = json_value(assets, end, "browser_download_url");
+         url != NULL && remote_count < MAX_REMOTE_IMAGES;
+         url = json_value(url, end, "browser_download_url")) {
+        remote_image_t *image = &remote_images[remote_count];
+        const char *size = json_last_value(object_start, url, "size");
+        if (json_copy_string(json_last_value(object_start, url, "name"), image->name,
+                             sizeof(image->name)) &&
+            json_copy_string(url, image->url, sizeof(image->url))) {
+            size_t name_length = strlen(image->name);
+            image->size = size != NULL ? (uint32_t)strtoul(size, NULL, 10) : 0;
+            if (name_length > 4 && strcasecmp(image->name + name_length - 4, ".bin") == 0) {
+                ESP_LOGI(TAG, "Release asset: %s (%u bytes)", image->name,
+                         (unsigned)image->size);
+                ++remote_count;
+            }
+        }
+        object_start = url;
+    }
+}
+
+static net_state_t fetch_release(void)
+{
+    http_buffer_t buffer = {0};
+    esp_http_client_config_t config = {
+        .url = RELEASES_URL,
+        .timeout_ms = 10000,
+        .buffer_size = 2048,
+        .buffer_size_tx = 1024,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .event_handler = http_buffer_handler,
+        .user_data = &buffer,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (client == NULL) {
+        return NET_OFFLINE;
+    }
+    esp_http_client_set_header(client, "Accept", "application/vnd.github+json");
+    esp_err_t result = esp_http_client_perform(client);
+    int status = esp_http_client_get_status_code(client);
+    esp_http_client_cleanup(client);
+
+    net_state_t state = NET_OFFLINE;
+    if (result != ESP_OK) {
+        ESP_LOGW(TAG, "Release request failed: %s", esp_err_to_name(result));
+    } else if (status != 200 || buffer.data == NULL) {
+        ESP_LOGW(TAG, "Release request returned HTTP %d", status);
+        state = NET_NO_RELEASE;
+    } else {
+        parse_release_assets(buffer.data);
+        state = NET_READY;
+    }
+    free(buffer.data);
+    return state;
+}
+
+static void network_task(void *argument)
+{
+    (void)argument;
+    if (!wifi_connect()) {
+        ESP_LOGW(TAG, "Wi-Fi did not connect; keeping stored images only");
+        net_state = NET_OFFLINE;
+    } else {
+        net_state = NET_FETCHING;
+        net_state = fetch_release();
+    }
+    vTaskDelete(NULL);
+}
+
+/* ---- Downloading ---- */
+
+/* Replaces an older copy of the same image, else fills an empty slot, else
+   overwrites the slot that does not boot by default. */
+static int target_slot_for(const remote_image_t *image)
+{
+    for (int i = 0; i < SLOT_COUNT; ++i) {
+        if (slots[i].valid && strcmp(slots[i].name, image->name) == 0) {
+            return i;
+        }
+    }
+    for (int i = 0; i < SLOT_COUNT; ++i) {
+        if (!slots[i].valid) {
+            return i;
+        }
+    }
+    return default_slot() == 0 ? 1 : 0;
+}
+
+static void draw_download_progress(const char *phase, size_t received, size_t total)
+{
+    char line[CYD_TEXT_COLUMNS + 1];
+    if (total > 0) {
+        snprintf(line, sizeof(line), "%s %u/%uK", phase, (unsigned)(received / 1024),
+                 (unsigned)(total / 1024));
+    } else {
+        snprintf(line, sizeof(line), "%s %uK", phase, (unsigned)(received / 1024));
+    }
+    ESP_ERROR_CHECK(cyd_text_row(4, CYD_COLOR_WHITE, CYD_COLOR_BLACK, line));
+}
+
+/* Opens url, following redirects (GitHub serves assets from another host).
+   Returns the content length, or -1 on failure. */
+static int64_t http_open_following_redirects(esp_http_client_handle_t client)
+{
+    for (int redirects = 0; redirects <= MAX_REDIRECTS; ++redirects) {
+        if (esp_http_client_open(client, 0) != ESP_OK) {
+            return -1;
+        }
+        int64_t length = esp_http_client_fetch_headers(client);
+        int status = esp_http_client_get_status_code(client);
+        if (status == 200) {
+            return length;
+        }
+        if (status < 300 || status >= 400) {
+            ESP_LOGE(TAG, "Download returned HTTP %d", status);
+            return -1;
+        }
+        esp_http_client_flush_response(client, NULL);
+        if (esp_http_client_set_redirection(client) != ESP_OK) {
+            return -1;
+        }
+    }
+    ESP_LOGE(TAG, "Too many redirects");
+    return -1;
+}
+
+static esp_err_t download_image(const remote_image_t *image, int slot_index)
+{
+    slot_t *slot = &slots[slot_index];
+    char line[CYD_TEXT_COLUMNS + 1];
+    for (int row = 0; row < CYD_TEXT_ROWS; ++row) {
+        ESP_ERROR_CHECK(cyd_text_row(row, CYD_COLOR_WHITE, CYD_COLOR_BLACK, ""));
+    }
+    ESP_ERROR_CHECK(cyd_text_row(0, CYD_COLOR_CYAN, CYD_COLOR_BLACK, "DOWNLOADING"));
+    snprintf(line, sizeof(line), "%.17s", image->name);
+    ESP_ERROR_CHECK(cyd_text_row(2, CYD_COLOR_WHITE, CYD_COLOR_BLACK, line));
+    snprintf(line, sizeof(line), "into slot %c", 'A' + slot_index);
+    ESP_ERROR_CHECK(cyd_text_row(3, CYD_COLOR_GRAY, CYD_COLOR_BLACK, line));
+    draw_download_progress("connect", 0, 0);
+
+    esp_http_client_config_t config = {
+        .url = image->url,
+        .timeout_ms = 15000,
+        .buffer_size = 4096,
+        .buffer_size_tx = 2048,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (client == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    char *chunk = NULL;
+    esp_ota_handle_t ota = 0;
+    bool ota_started = false;
+    size_t received = 0;
+    esp_err_t result = ESP_FAIL;
+
+    int64_t length = http_open_following_redirects(client);
+    if (length < 0) {
+        goto cleanup;
+    }
+    if (length > (int64_t)slot->partition->size) {
+        ESP_LOGE(TAG, "Image is %lld bytes; slot holds %u", length,
+                 (unsigned)slot->partition->size);
+        result = ESP_ERR_INVALID_SIZE;
+        goto cleanup;
+    }
+    chunk = malloc(DOWNLOAD_CHUNK_SIZE);
+    if (chunk == NULL) {
+        result = ESP_ERR_NO_MEM;
+        goto cleanup;
+    }
+
+    /* The slot's old contents are gone from here on. */
+    slot->valid = false;
+    save_slot(slot_index, NULL, 0);
+    draw_download_progress("erase", 0, (size_t)length);
+    result = esp_ota_begin(slot->partition, length > 0 ? (size_t)length : OTA_SIZE_UNKNOWN,
+                           &ota);
+    if (result != ESP_OK) {
+        goto cleanup;
+    }
+    ota_started = true;
+
+    size_t next_progress = 0;
+    while (true) {
+        int bytes = esp_http_client_read(client, chunk, DOWNLOAD_CHUNK_SIZE);
+        if (bytes < 0) {
+            result = ESP_FAIL;
+            goto cleanup;
+        }
+        if (bytes == 0) {
+            break;
+        }
+        result = esp_ota_write(ota, chunk, bytes);
+        if (result != ESP_OK) {
+            goto cleanup;
+        }
+        received += (size_t)bytes;
+        if (received >= next_progress) {
+            draw_download_progress("got", received, (size_t)length);
+            next_progress = received + 32 * 1024;
+        }
+    }
+    if (length > 0 && received != (size_t)length) {
+        ESP_LOGE(TAG, "Download ended at %u of %lld bytes", (unsigned)received, length);
+        result = ESP_ERR_INVALID_SIZE;
+        goto cleanup;
+    }
+    draw_download_progress("verify", received, (size_t)length);
+    ota_started = false;
+    result = esp_ota_end(ota);
+    if (result == ESP_OK) {
+        snprintf(slot->name, sizeof(slot->name), "%s", image->name);
+        slot->size = image->size;
+        slot->valid = true;
+        save_slot(slot_index, image->name, image->size);
+        ESP_LOGI(TAG, "Stored %s in slot %c (%u bytes)", image->name, 'A' + slot_index,
+                 (unsigned)received);
+    }
+
+cleanup:
+    if (ota_started) {
+        esp_ota_abort(ota);
+    }
+    free(chunk);
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG, "Download of %s failed: %s", image->name, esp_err_to_name(result));
+    }
+    return result;
+}
+
+/* ---- Menu ---- */
+
+static void activate_entry(int index)
+{
+    entry_t entry = entries[index];
+    draw_entry(index, true);
+    vTaskDelay(pdMS_TO_TICKS(120));
+    if (entry.kind == ENTRY_SLOT) {
+        boot_slot(entry.index);
+    } else {
+        const remote_image_t *image = &remote_images[entry.index];
+        int slot = target_slot_for(image);
+        esp_err_t result = download_image(image, slot);
+        if (result == ESP_OK) {
+            boot_slot(slot);
+        } else {
+            show_message_and_wait("DOWNLOAD FAILED", image->name, esp_err_to_name(result));
+        }
+    }
+    /* Still here: booting or downloading failed. The caller redraws the title. */
+    build_entries();
+    draw_entries();
+    draw_status();
+}
 
 void app_main(void)
 {
     ESP_ERROR_CHECK(cyd_display_init());
-
     esp_err_t nvs_result = nvs_flash_init();
     if (nvs_result == ESP_ERR_NVS_NO_FREE_PAGES ||
         nvs_result == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -654,11 +723,66 @@ void app_main(void)
         nvs_result = nvs_flash_init();
     }
     ESP_ERROR_CHECK(nvs_result);
-    wifi_init();
-    ble_init();
-
+    load_slots();
     ESP_ERROR_CHECK(cyd_touch_start(&touch_queue));
-    BaseType_t scan_task_result =
-        xTaskCreate(scan_task, "scan", 6144, NULL, 5, NULL);
-    ESP_ERROR_CHECK(scan_task_result == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
+
+    int boot_choice = default_slot();
+    bool counting = boot_choice >= 0;
+    build_entries();
+    draw_menu(counting ? "" : "NO IMAGES");
+    ESP_ERROR_CHECK(xTaskCreate(network_task, "network", 8192, NULL, 5, NULL) == pdPASS
+                        ? ESP_OK
+                        : ESP_ERR_NO_MEM);
+
+    int64_t deadline = esp_timer_get_time() + MENU_TIMEOUT_US;
+    int shown_seconds = -1;
+    net_state_t shown_state = net_state;
+    while (true) {
+        cyd_touch_point_t point;
+        if (xQueueReceive(touch_queue, &point, pdMS_TO_TICKS(50)) == pdTRUE) {
+            int row = point.y / CYD_FONT_HEIGHT - MENU_FIRST_ROW;
+            if (row >= 0 && row < entry_count) {
+                activate_entry(row);
+                /* Still here: booting or downloading failed. Start over. */
+                boot_choice = default_slot();
+                counting = boot_choice >= 0;
+                deadline = esp_timer_get_time() + MENU_TIMEOUT_US;
+                shown_seconds = -1;
+                if (!counting) {
+                    draw_title("NO IMAGES");
+                }
+            } else {
+                /* Any other tap buys more time to choose. */
+                deadline += MENU_TIMEOUT_US;
+            }
+        }
+
+        if (counting) {
+            int64_t remaining = deadline - esp_timer_get_time();
+            int seconds = (int)((remaining + 999999) / 1000000);
+            if (remaining <= 0) {
+                boot_slot(boot_choice);
+                counting = false;
+                draw_title("SELECT IMAGE");
+            } else if (seconds != shown_seconds) {
+                char title[32];
+                shown_seconds = seconds;
+                snprintf(title, sizeof(title), "AUTO-BOOT %ds", seconds);
+                draw_title(title);
+            }
+        }
+
+        net_state_t state = net_state;
+        if (state != shown_state) {
+            shown_state = state;
+            if (state == NET_READY) {
+                build_entries();
+                draw_entries();
+                if (!counting && entry_count > 0) {
+                    draw_title("SELECT IMAGE");
+                }
+            }
+            draw_status();
+        }
+    }
 }
