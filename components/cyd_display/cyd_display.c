@@ -587,12 +587,24 @@ static void touchscreen_task(void *argument)
     }
 }
 
+esp_err_t cyd_touch_init(void)
+{
+    load_calibration();
+    return touch_bus_init();
+}
+
+bool cyd_touch_read(cyd_touch_point_t *point)
+{
+    /* Check again after reading: a finger lifting mid-read gives garbage. */
+    return gpio_get_level(TOUCH_PIN_IRQ) == 0 && touch_read_point(point) == ESP_OK &&
+           gpio_get_level(TOUCH_PIN_IRQ) == 0;
+}
+
 esp_err_t cyd_touch_start(QueueHandle_t *queue)
 {
     touch_queue = xQueueCreate(4, sizeof(cyd_touch_point_t));
     ESP_RETURN_ON_FALSE(touch_queue != NULL, ESP_ERR_NO_MEM, TAG, "create touch queue");
-    load_calibration();
-    ESP_RETURN_ON_ERROR(touch_bus_init(), TAG, "initialize touchscreen");
+    ESP_RETURN_ON_ERROR(cyd_touch_init(), TAG, "initialize touchscreen");
     ESP_RETURN_ON_FALSE(xTaskCreate(touchscreen_task, "touchscreen", 3072, NULL, 5, NULL) ==
                             pdPASS,
                         ESP_ERR_NO_MEM, TAG, "create touchscreen task");

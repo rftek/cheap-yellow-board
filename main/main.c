@@ -1,322 +1,276 @@
-#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 
 #include "cyd_display.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/queue.h"
 #include "freertos/task.h"
+#include "lvgl.h"
 
-/* Targets sit this far in from the corners: the very edge of a resistive
-   panel is its least linear part, and a finger cannot center on it. */
-#define TARGET_INSET 20
-#define TARGET_ARM 10
-#define GRID_SPACING 40
-#define CORNER_COUNT 4
-/* A fit whose worst corner is further off than this means a mistapped
-   corner, not a skewed panel. */
-#define MAX_FIT_ERROR_PX 25.0f
+/* LVGL renders into a strip of DRAW_BUFFER_ROWS rows at a time. */
+#define DRAW_BUFFER_ROWS 24
+#define UPDATE_PERIOD_MS 33
 
-#define COLOR_GREEN 0x07E0
-#define COLOR_GRID 0x4208
+#define DIAL_SIZE 176
+#define TICK_RING_SIZE 160
+#define BUTTON_WIDTH 96
+#define BUTTON_HEIGHT 44
+#define BUTTON_GAP 8
 
-static const char *TAG = "touch_cal";
-static QueueHandle_t touch_queue;
+static const char *TAG = "stopwatch";
 
-typedef struct {
-    int16_t x;
-    int16_t y;
-    const char *name;
-} target_t;
+/* ---- LVGL display and touch glue ---- */
 
-static const target_t corners[CORNER_COUNT] = {
-    {TARGET_INSET, TARGET_INSET, "UPPER LEFT"},
-    {CYD_LCD_WIDTH - 1 - TARGET_INSET, TARGET_INSET, "UPPER RIGHT"},
-    {CYD_LCD_WIDTH - 1 - TARGET_INSET, CYD_LCD_HEIGHT - 1 - TARGET_INSET, "LOWER RIGHT"},
-    {TARGET_INSET, CYD_LCD_HEIGHT - 1 - TARGET_INSET, "LOWER LEFT"},
-};
-static const target_t center = {CYD_LCD_WIDTH / 2, CYD_LCD_HEIGHT / 2, "CENTER"};
+static uint16_t draw_buffer[CYD_LCD_WIDTH * DRAW_BUFFER_ROWS];
 
 typedef struct {
-    int first_column;
-    int columns;
-    const char *label;
-} button_t;
+    const uint16_t *pixels;
+    int left;
+    int top;
+    int width;
+} flush_area_t;
 
-enum { BUTTON_LEFT, BUTTON_RIGHT, BUTTON_COUNT };
-
-/* ---- Drawing ---- */
-
-/* A dark grid with a 3-pixel-thick red cross on the target, if any. */
-static uint16_t grid_pixel(int x, int y, void *context)
+static uint16_t flush_pixel(int x, int y, void *context)
 {
-    const target_t *target = context;
-    if (target != NULL) {
-        int dx = abs(x - target->x);
-        int dy = abs(y - target->y);
-        if ((dx <= TARGET_ARM && dy <= 1) || (dy <= TARGET_ARM && dx <= 1)) {
-            return CYD_COLOR_RED;
-        }
+    const flush_area_t *area = context;
+    return area->pixels[(y - area->top) * area->width + (x - area->left)];
+}
+
+/* LVGL renders row-major RGB565; cyd_draw_pattern reorders the pixels for
+   the panel, which fills windows column by column. */
+static void flush(lv_display_t *display, const lv_area_t *area, uint8_t *pixels)
+{
+    flush_area_t flush_area = {
+        .pixels = (const uint16_t *)pixels,
+        .left = area->x1,
+        .top = area->y1,
+        .width = lv_area_get_width(area),
+    };
+    esp_err_t result = cyd_draw_pattern(area->x1, area->y1, lv_area_get_width(area),
+                                        lv_area_get_height(area), flush_pixel, &flush_area);
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG, "Display flush failed: %s", esp_err_to_name(result));
     }
-    if (x % GRID_SPACING == 0 || y % GRID_SPACING == 0 || x == CYD_LCD_WIDTH - 1 ||
-        y == CYD_LCD_HEIGHT - 1) {
-        return COLOR_GRID;
-    }
-    return CYD_COLOR_BLACK;
+    lv_display_flush_ready(display);
 }
 
-static void draw_grid(const target_t *target)
+static void read_touch(lv_indev_t *indev, lv_indev_data_t *data)
 {
-    ESP_ERROR_CHECK(cyd_draw_pattern(0, 0, CYD_LCD_WIDTH, CYD_LCD_HEIGHT, grid_pixel,
-                                     (void *)target));
-}
-
-/* Two prompt lines, placed clear of the target. */
-static void draw_prompt(const target_t *target, const char *line1, const char *line2)
-{
-    int row = target->y > CYD_LCD_HEIGHT / 3 && target->y < CYD_LCD_HEIGHT * 2 / 3 ? 1 : 4;
-    ESP_ERROR_CHECK(cyd_text_row(row, CYD_COLOR_WHITE, CYD_COLOR_BLACK, line1));
-    ESP_ERROR_CHECK(cyd_text_row(row + 1, CYD_COLOR_YELLOW, CYD_COLOR_BLACK, line2));
-}
-
-/* A 5x5 dot, clipped to the screen. */
-static void draw_marker(int x, int y, uint16_t color)
-{
-    int left = x - 2 < 0 ? 0 : x - 2;
-    int top = y - 2 < 0 ? 0 : y - 2;
-    int right = x + 2 >= CYD_LCD_WIDTH ? CYD_LCD_WIDTH - 1 : x + 2;
-    int bottom = y + 2 >= CYD_LCD_HEIGHT ? CYD_LCD_HEIGHT - 1 : y + 2;
-    ESP_ERROR_CHECK(cyd_fill_rect(left, top, right - left + 1, bottom - top + 1, color));
-}
-
-static void draw_buttons(int row, const button_t buttons[BUTTON_COUNT])
-{
-    char text[CYD_TEXT_COLUMNS + 1];
-    uint16_t foreground[CYD_TEXT_COLUMNS];
-    uint16_t background[CYD_TEXT_COLUMNS];
-    memset(text, ' ', CYD_TEXT_COLUMNS);
-    text[CYD_TEXT_COLUMNS] = '\0';
-    for (int i = 0; i < CYD_TEXT_COLUMNS; ++i) {
-        foreground[i] = CYD_COLOR_WHITE;
-        background[i] = CYD_COLOR_BLACK;
-    }
-    for (int b = 0; b < BUTTON_COUNT; ++b) {
-        const button_t *button = &buttons[b];
-        int length = (int)strlen(button->label);
-        memcpy(text + button->first_column + (button->columns - length) / 2, button->label,
-               length);
-        for (int i = 0; i < button->columns; ++i) {
-            background[button->first_column + i] = CYD_COLOR_BUTTON;
-        }
-    }
-    ESP_ERROR_CHECK(cyd_draw_cells(row, text, foreground, background));
-}
-
-static bool button_hit(const button_t *button, const cyd_touch_point_t *point)
-{
-    int column = point->x / CYD_FONT_WIDTH;
-    return point->y / CYD_FONT_HEIGHT == CYD_TEXT_ROWS - 1 && column >= button->first_column &&
-           column < button->first_column + button->columns;
-}
-
-static cyd_touch_point_t wait_tap(void)
-{
+    (void)indev;
     cyd_touch_point_t point;
-    xQueueReset(touch_queue);
-    xQueueReceive(touch_queue, &point, portMAX_DELAY);
-    return point;
-}
-
-static void show_intro(void)
-{
-    static const char *const lines[CYD_TEXT_ROWS] = {
-        "TOUCH CALIBRATION", "", "Tap each red +", "as exactly as you", "can, ideally with",
-        "a stylus or nail.", "", "4 corners, then", "a center check.", "tap to start",
-    };
-    for (int row = 0; row < CYD_TEXT_ROWS; ++row) {
-        uint16_t color = row == 0 ? CYD_COLOR_YELLOW
-                         : row == CYD_TEXT_ROWS - 1 ? CYD_COLOR_GRAY
-                                                    : CYD_COLOR_WHITE;
-        ESP_ERROR_CHECK(cyd_text_row(row, color, CYD_COLOR_BLACK, lines[row]));
+    if (cyd_touch_read(&point)) {
+        data->point.x = point.x;
+        data->point.y = point.y;
+        data->state = LV_INDEV_STATE_PRESSED;
+    } else {
+        data->state = LV_INDEV_STATE_RELEASED;
     }
 }
 
-/* ---- Fitting ---- */
-
-static double determinant3(const double m[3][3])
+static uint32_t milliseconds(void)
 {
-    return m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) -
-           m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
-           m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    return (uint32_t)(esp_timer_get_time() / 1000);
 }
 
-/* Solves m * solution = rhs by Cramer's rule. */
-static bool solve3(const double m[3][3], const double rhs[3], double solution[3])
+static void lvgl_init(void)
 {
-    double det = determinant3(m);
-    if (fabs(det) < 1e-9) {
-        return false;
-    }
-    for (int column = 0; column < 3; ++column) {
-        double replaced[3][3];
-        memcpy(replaced, m, sizeof(replaced));
-        for (int row = 0; row < 3; ++row) {
-            replaced[row][column] = rhs[row];
-        }
-        solution[column] = determinant3(replaced) / det;
-    }
-    return true;
+    lv_init();
+    lv_tick_set_cb(milliseconds);
+    lv_display_t *display = lv_display_create(CYD_LCD_WIDTH, CYD_LCD_HEIGHT);
+    lv_display_set_flush_cb(display, flush);
+    lv_display_set_buffers(display, draw_buffer, NULL, sizeof(draw_buffer),
+                           LV_DISPLAY_RENDER_MODE_PARTIAL);
+    lv_indev_t *indev = lv_indev_create();
+    lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
+    lv_indev_set_read_cb(indev, read_touch);
 }
 
-/* Least-squares affine fit of the targets to the raw readings, with the
-   distance of the worst corner from its target after fitting. */
-static bool fit_calibration(const cyd_touch_point_t taps[CORNER_COUNT],
-                            cyd_touch_calibration_t *calibration, float *worst_error)
+/* ---- Stopwatch ---- */
+
+static bool running;
+static int64_t started_us;     /* when the current run began */
+static int64_t accumulated_us; /* time from earlier runs */
+
+static lv_obj_t *time_label;
+static lv_obj_t *state_label;
+static lv_obj_t *second_arc;
+static lv_obj_t *start_button;
+static lv_obj_t *stop_button;
+
+static int64_t elapsed_us(void)
 {
-    double normal[3][3] = {{0}};
-    double rhs_x[3] = {0};
-    double rhs_y[3] = {0};
-    for (int i = 0; i < CORNER_COUNT; ++i) {
-        double row[3] = {taps[i].raw_x, taps[i].raw_y, 1.0};
-        for (int a = 0; a < 3; ++a) {
-            for (int b = 0; b < 3; ++b) {
-                normal[a][b] += row[a] * row[b];
-            }
-            rhs_x[a] += row[a] * corners[i].x;
-            rhs_y[a] += row[a] * corners[i].y;
-        }
-    }
-    double x[3];
-    double y[3];
-    if (!solve3(normal, rhs_x, x) || !solve3(normal, rhs_y, y)) {
-        return false;
-    }
-    *calibration = (cyd_touch_calibration_t){
-        .xa = (float)x[0], .xb = (float)x[1], .xc = (float)x[2],
-        .ya = (float)y[0], .yb = (float)y[1], .yc = (float)y[2],
-    };
-    *worst_error = 0;
-    for (int i = 0; i < CORNER_COUNT; ++i) {
-        int16_t fx;
-        int16_t fy;
-        cyd_touch_map(calibration, taps[i].raw_x, taps[i].raw_y, &fx, &fy);
-        float error = hypotf(fx - corners[i].x, fy - corners[i].y);
-        if (error > *worst_error) {
-            *worst_error = error;
-        }
-    }
-    return true;
+    return running ? accumulated_us + esp_timer_get_time() - started_us : accumulated_us;
 }
 
-/* ---- Steps ---- */
-
-/* Collects the four corner taps; returns false if they do not fit together. */
-static bool calibrate(cyd_touch_calibration_t *calibration)
+static void show_time(void)
 {
-    cyd_touch_point_t taps[CORNER_COUNT];
-    for (int i = 0; i < CORNER_COUNT; ++i) {
-        draw_grid(&corners[i]);
-        draw_prompt(&corners[i], "TAP THE + AT", corners[i].name);
-        taps[i] = wait_tap();
-        /* Yellow: where the calibration in use put the tap. */
-        draw_marker(taps[i].x, taps[i].y, CYD_COLOR_YELLOW);
-        ESP_LOGI(TAG, "%s: raw %u,%u (mapped %d,%d; target %d,%d)", corners[i].name,
-                 taps[i].raw_x, taps[i].raw_y, taps[i].x, taps[i].y, corners[i].x, corners[i].y);
-        vTaskDelay(pdMS_TO_TICKS(300));
+    char text[16];
+    int64_t centiseconds = elapsed_us() / 10000;
+    unsigned minutes = (unsigned)(centiseconds / 6000);
+    unsigned seconds = (unsigned)(centiseconds / 100 % 60);
+    if (minutes < 100) {
+        snprintf(text, sizeof(text), "%02u:%02u.%02u", minutes, seconds,
+                 (unsigned)(centiseconds % 100));
+    } else {
+        snprintf(text, sizeof(text), "%u:%02u:%02u", minutes / 60, minutes % 60, seconds);
     }
-    float worst_error = 0;
-    if (!fit_calibration(taps, calibration, &worst_error) || worst_error > MAX_FIT_ERROR_PX) {
-        ESP_LOGW(TAG, "Corners do not fit together (worst %.1f px)", worst_error);
-        return false;
-    }
-    ESP_LOGI(TAG, "Fit: x = %.5f*rx + %.5f*ry + %.1f, y = %.5f*rx + %.5f*ry + %.1f "
-                  "(worst corner %.1f px)",
-             calibration->xa, calibration->xb, calibration->xc, calibration->ya,
-             calibration->yb, calibration->yc, worst_error);
-    return true;
+    lv_label_set_text(time_label, text);
+    /* The arc sweeps once a minute, in tenths of a second. */
+    lv_arc_set_value(second_arc, (int32_t)(centiseconds % 6000 / 10));
 }
 
-/* Taps the center to compare the calibration in use with the new one;
-   returns true to save. */
-static bool verify(const cyd_touch_calibration_t *calibration)
+static void set_enabled(lv_obj_t *button, bool enabled)
 {
-    static const button_t buttons[BUTTON_COUNT] = {{0, 8, "RETRY"}, {9, 8, "SAVE"}};
-    draw_grid(&center);
-    draw_prompt(&center, "NOW TAP THE +", "IN THE CENTER");
-    cyd_touch_point_t tap = wait_tap();
-    int16_t x;
-    int16_t y;
-    cyd_touch_map(calibration, tap.raw_x, tap.raw_y, &x, &y);
-    float before = hypotf(tap.x - center.x, tap.y - center.y);
-    float after = hypotf(x - center.x, y - center.y);
-    ESP_LOGI(TAG, "Center: before %.1f px, after %.1f px", before, after);
-
-    char line[CYD_TEXT_COLUMNS + 1];
-    draw_marker(tap.x, tap.y, CYD_COLOR_YELLOW);
-    draw_marker(x, y, COLOR_GREEN);
-    snprintf(line, sizeof(line), "BEFORE %3d px", (int)(before + 0.5f));
-    ESP_ERROR_CHECK(cyd_text_row(6, CYD_COLOR_YELLOW, CYD_COLOR_BLACK, line));
-    snprintf(line, sizeof(line), "AFTER  %3d px", (int)(after + 0.5f));
-    ESP_ERROR_CHECK(cyd_text_row(7, COLOR_GREEN, CYD_COLOR_BLACK, line));
-    draw_buttons(CYD_TEXT_ROWS - 1, buttons);
-    while (true) {
-        tap = wait_tap();
-        if (button_hit(&buttons[BUTTON_RIGHT], &tap)) {
-            return true;
-        }
-        if (button_hit(&buttons[BUTTON_LEFT], &tap)) {
-            return false;
-        }
+    if (enabled) {
+        lv_obj_remove_state(button, LV_STATE_DISABLED);
+    } else {
+        lv_obj_add_state(button, LV_STATE_DISABLED);
     }
 }
 
-/* Draws a dot wherever the screen is tapped, with the new calibration. */
-static void test_mode(void)
+static void show_state(void)
 {
-    static const button_t buttons[BUTTON_COUNT] = {{0, 8, "AGAIN"}, {9, 8, "CLEAR"}};
-    draw_grid(NULL);
-    ESP_ERROR_CHECK(cyd_text_row(0, COLOR_GREEN, CYD_COLOR_BLACK, "SAVED: TAP TO TRY"));
-    draw_buttons(CYD_TEXT_ROWS - 1, buttons);
-    while (true) {
-        cyd_touch_point_t tap = wait_tap();
-        if (button_hit(&buttons[BUTTON_LEFT], &tap)) {
-            return;
-        }
-        if (button_hit(&buttons[BUTTON_RIGHT], &tap)) {
-            draw_grid(NULL);
-            draw_buttons(CYD_TEXT_ROWS - 1, buttons);
-            continue;
-        }
-        draw_marker(tap.x, tap.y, COLOR_GREEN);
+    set_enabled(start_button, !running);
+    set_enabled(stop_button, running);
+    lv_label_set_text(state_label, running ? "RUNNING" : elapsed_us() > 0 ? "STOPPED" : "READY");
+    show_time();
+}
+
+static void start_clicked(lv_event_t *event)
+{
+    (void)event;
+    if (!running) {
+        started_us = esp_timer_get_time();
+        running = true;
+        show_state();
     }
+}
+
+static void stop_clicked(lv_event_t *event)
+{
+    (void)event;
+    if (running) {
+        accumulated_us += esp_timer_get_time() - started_us;
+        running = false;
+        show_state();
+    }
+}
+
+/* Stops the watch and sets it back to zero. */
+static void clear_clicked(lv_event_t *event)
+{
+    (void)event;
+    running = false;
+    accumulated_us = 0;
+    show_state();
+}
+
+static void tick(lv_timer_t *timer)
+{
+    (void)timer;
+    if (running) {
+        show_time();
+    }
+}
+
+static lv_obj_t *make_button(lv_obj_t *parent, const char *text, lv_palette_t palette,
+                             int x_offset, lv_event_cb_t callback)
+{
+    lv_obj_t *button = lv_button_create(parent);
+    lv_obj_set_size(button, BUTTON_WIDTH, BUTTON_HEIGHT);
+    lv_obj_align(button, LV_ALIGN_BOTTOM_MID, x_offset, -6);
+    lv_obj_set_style_bg_color(button, lv_palette_main(palette), 0);
+    lv_obj_set_style_bg_color(button, lv_palette_darken(palette, 4), LV_STATE_DISABLED);
+    lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *label = lv_label_create(button);
+    lv_label_set_text(label, text);
+    lv_obj_set_style_text_font(label, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(label, lv_color_white(), 0);
+    lv_obj_set_style_text_color(label, lv_palette_main(LV_PALETTE_GREY), LV_STATE_DISABLED);
+    lv_obj_center(label);
+    return button;
+}
+
+static void build_face(void)
+{
+    lv_obj_t *screen = lv_screen_active();
+    lv_obj_set_style_bg_color(screen, lv_color_black(), 0);
+
+    /* Seconds arc around the outside of the dial. */
+    second_arc = lv_arc_create(screen);
+    lv_obj_set_size(second_arc, DIAL_SIZE, DIAL_SIZE);
+    lv_obj_align(second_arc, LV_ALIGN_TOP_MID, 0, 4);
+    lv_arc_set_rotation(second_arc, 270);
+    lv_arc_set_bg_angles(second_arc, 0, 360);
+    lv_arc_set_range(second_arc, 0, 599);
+    lv_arc_set_value(second_arc, 0);
+    lv_obj_remove_style(second_arc, NULL, LV_PART_KNOB);
+    lv_obj_set_clickable(second_arc, false);
+    lv_obj_set_style_arc_width(second_arc, 6, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(second_arc, 6, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(second_arc, lv_color_hex(0x303030), LV_PART_MAIN);
+    lv_obj_set_style_arc_color(second_arc, lv_palette_main(LV_PALETTE_ORANGE),
+                               LV_PART_INDICATOR);
+
+    /* Minute-face tick marks inside the arc: long every 5 seconds. */
+    lv_obj_t *ticks = lv_scale_create(screen);
+    lv_obj_set_size(ticks, TICK_RING_SIZE, TICK_RING_SIZE);
+    lv_obj_align_to(ticks, second_arc, LV_ALIGN_CENTER, 0, 0);
+    lv_scale_set_mode(ticks, LV_SCALE_MODE_ROUND_INNER);
+    lv_scale_set_range(ticks, 0, 60);
+    lv_scale_set_angle_range(ticks, 360);
+    lv_scale_set_rotation(ticks, 270);
+    lv_scale_set_total_tick_count(ticks, 61);
+    lv_scale_set_major_tick_every(ticks, 5);
+    lv_scale_set_label_show(ticks, false);
+    lv_obj_set_style_arc_width(ticks, 0, LV_PART_MAIN);
+    lv_obj_set_style_length(ticks, 10, LV_PART_INDICATOR);
+    lv_obj_set_style_length(ticks, 5, LV_PART_ITEMS);
+    lv_obj_set_style_line_width(ticks, 3, LV_PART_INDICATOR);
+    lv_obj_set_style_line_width(ticks, 1, LV_PART_ITEMS);
+    lv_obj_set_style_line_color(ticks, lv_color_white(), LV_PART_INDICATOR);
+    lv_obj_set_style_line_color(ticks, lv_color_hex(0x808080), LV_PART_ITEMS);
+
+    time_label = lv_label_create(screen);
+    lv_obj_set_style_text_font(time_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(time_label, lv_color_white(), 0);
+    lv_obj_align_to(time_label, second_arc, LV_ALIGN_CENTER, 0, -6);
+
+    state_label = lv_label_create(screen);
+    lv_obj_set_style_text_font(state_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(state_label, lv_palette_main(LV_PALETTE_GREY), 0);
+    lv_obj_align_to(state_label, second_arc, LV_ALIGN_CENTER, 0, 24);
+
+    start_button = make_button(screen, "START", LV_PALETTE_GREEN,
+                               -(BUTTON_WIDTH + BUTTON_GAP), start_clicked);
+    stop_button = make_button(screen, "STOP", LV_PALETTE_RED, 0, stop_clicked);
+    make_button(screen, "CLEAR", LV_PALETTE_GREY, BUTTON_WIDTH + BUTTON_GAP, clear_clicked);
+
+    /* Keep the time centered as its width changes. */
+    lv_obj_set_width(time_label, DIAL_SIZE - 24);
+    lv_obj_set_style_text_align(time_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align_to(time_label, second_arc, LV_ALIGN_CENTER, 0, -6);
+    lv_obj_set_width(state_label, DIAL_SIZE - 24);
+    lv_obj_set_style_text_align(state_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align_to(state_label, second_arc, LV_ALIGN_CENTER, 0, 24);
+
+    show_state();
+    lv_timer_create(tick, UPDATE_PERIOD_MS, NULL);
 }
 
 void app_main(void)
 {
     ESP_ERROR_CHECK(cyd_display_init());
-    ESP_ERROR_CHECK(cyd_touch_start(&touch_queue));
+    ESP_ERROR_CHECK(cyd_touch_init());
+    lvgl_init();
+    build_face();
+    ESP_LOGI(TAG, "Stopwatch ready; free heap: %u bytes", (unsigned)esp_get_free_heap_size());
     while (true) {
-        show_intro();
-        wait_tap();
-        cyd_touch_calibration_t calibration;
-        if (!calibrate(&calibration)) {
-            ESP_ERROR_CHECK(cyd_text_row(4, CYD_COLOR_RED, CYD_COLOR_BLACK, "CORNERS DON'T"));
-            ESP_ERROR_CHECK(cyd_text_row(5, CYD_COLOR_RED, CYD_COLOR_BLACK, "MATCH: TAP, RETRY"));
-            wait_tap();
-            continue;
-        }
-        if (!verify(&calibration)) {
-            continue;
-        }
-        if (cyd_touch_save_calibration(&calibration) != ESP_OK) {
-            ESP_LOGE(TAG, "Could not save the calibration");
-            continue;
-        }
-        ESP_LOGI(TAG, "Calibration saved for every image");
-        test_mode();
+        uint32_t wait_ms = lv_timer_handler();
+        TickType_t wait = pdMS_TO_TICKS(wait_ms < 10 ? wait_ms : 10);
+        /* Always yield at least one tick so lower-priority tasks run. */
+        vTaskDelay(wait > 0 ? wait : 1);
     }
 }
