@@ -96,6 +96,14 @@ esp_err_t cyd_text_row(int row, uint16_t foreground, uint16_t background, const 
    saved in NVS, if any. */
 esp_err_t cyd_touch_start(QueueHandle_t *queue);
 
+/* For UI libraries that poll (such as LVGL) instead of taking taps: sets
+   up the touchscreen and loads the saved calibration, without the tap
+   task. Use either this with cyd_touch_read, or cyd_touch_start. */
+esp_err_t cyd_touch_init(void);
+
+/* Returns true while the screen is pressed, with the calibrated position. */
+bool cyd_touch_read(cyd_touch_point_t *point);
+
 /* The built-in calibration, from the CYD documentation's raw ranges. */
 void cyd_touch_default_calibration(cyd_touch_calibration_t *calibration);
 
