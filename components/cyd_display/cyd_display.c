@@ -41,6 +41,9 @@
 #define TOUCH_RAW_Y_MIN 513
 #define TOUCH_RAW_Y_MAX 3600
 #define TOUCH_DEBOUNCE_MS 250
+/* Readings per axis per tap, and how many of the lowest and highest to drop. */
+#define TOUCH_SAMPLES 9
+#define TOUCH_TRIM 2
 
 /* A run of full-height display columns of one text line. */
 #define TEXT_CHUNK_COLUMNS 40
@@ -50,6 +53,7 @@ static spi_device_handle_t lcd_spi;
 static spi_device_handle_t touch_spi;
 static QueueHandle_t touch_queue;
 static int brightness = CYD_BRIGHTNESS_MAX;
+static cyd_touch_calibration_t touch_calibration;
 static uint8_t text_chunk[TEXT_CHUNK_COLUMNS * CYD_FONT_HEIGHT * 2];
 
 /* Classic 5x7 ASCII font, 0x20-0x7E, then the up, down and backspace
@@ -433,34 +437,126 @@ static esp_err_t touch_read_raw(uint8_t command, uint16_t *value)
     return ESP_OK;
 }
 
-static int map_touch_axis(uint16_t value, int raw_start, int raw_end, int pixel_end)
+void cyd_touch_default_calibration(cyd_touch_calibration_t *calibration)
 {
-    int pixel = ((int)value - raw_start) * pixel_end / (raw_end - raw_start);
-    if (pixel < 0) {
+    float x_scale = (float)(CYD_LCD_WIDTH - 1) / (TOUCH_RAW_X_MAX - TOUCH_RAW_X_MIN);
+    float y_scale = (float)(CYD_LCD_HEIGHT - 1) / (TOUCH_RAW_Y_MAX - TOUCH_RAW_Y_MIN);
+    *calibration = (cyd_touch_calibration_t){
+        .xa = x_scale, .xb = 0, .xc = -TOUCH_RAW_X_MIN * x_scale,
+        .ya = 0, .yb = y_scale, .yc = -TOUCH_RAW_Y_MIN * y_scale,
+    };
+}
+
+void cyd_touch_set_calibration(const cyd_touch_calibration_t *calibration)
+{
+    if (calibration != NULL) {
+        touch_calibration = *calibration;
+    } else {
+        cyd_touch_default_calibration(&touch_calibration);
+    }
+}
+
+/* Rejects garbage from an older or corrupted NVS entry. */
+static bool calibration_is_sane(const cyd_touch_calibration_t *calibration)
+{
+    int16_t x;
+    int16_t y;
+    const float values[] = {calibration->xa, calibration->xb, calibration->xc,
+                            calibration->ya, calibration->yb, calibration->yc};
+    for (size_t i = 0; i < sizeof(values) / sizeof(values[0]); ++i) {
+        if (!(values[i] > -1e6f && values[i] < 1e6f)) {
+            return false;
+        }
+    }
+    /* The middle of the raw range must land well inside the screen. */
+    cyd_touch_map(calibration, 2048, 2048, &x, &y);
+    return x > 20 && x < CYD_LCD_WIDTH - 20 && y > 20 && y < CYD_LCD_HEIGHT - 20;
+}
+
+static void load_calibration(void)
+{
+    nvs_handle_t nvs;
+    cyd_touch_calibration_t calibration;
+    size_t size = sizeof(calibration);
+    cyd_touch_default_calibration(&touch_calibration);
+    if (nvs_flash_init() != ESP_OK ||
+        nvs_open(CYD_CONFIG_NAMESPACE, NVS_READONLY, &nvs) != ESP_OK) {
+        return;
+    }
+    if (nvs_get_blob(nvs, CYD_CONFIG_TOUCH_CAL, &calibration, &size) == ESP_OK &&
+        size == sizeof(calibration) && calibration_is_sane(&calibration)) {
+        touch_calibration = calibration;
+        ESP_LOGI(TAG, "Using saved touch calibration");
+    }
+    nvs_close(nvs);
+}
+
+esp_err_t cyd_touch_save_calibration(const cyd_touch_calibration_t *calibration)
+{
+    nvs_handle_t nvs;
+    ESP_RETURN_ON_ERROR(nvs_open(CYD_CONFIG_NAMESPACE, NVS_READWRITE, &nvs), TAG,
+                        "open NVS for touch calibration");
+    esp_err_t result = nvs_set_blob(nvs, CYD_CONFIG_TOUCH_CAL, calibration, sizeof(*calibration));
+    if (result == ESP_OK) {
+        result = nvs_commit(nvs);
+    }
+    nvs_close(nvs);
+    if (result == ESP_OK) {
+        touch_calibration = *calibration;
+    }
+    return result;
+}
+
+static int16_t clamp_coordinate(float value, int limit)
+{
+    if (value < 0) {
         return 0;
     }
-    if (pixel > pixel_end) {
-        return pixel_end;
+    if (value > limit - 1) {
+        return (int16_t)(limit - 1);
     }
-    return pixel;
+    return (int16_t)(value + 0.5f);
+}
+
+void cyd_touch_map(const cyd_touch_calibration_t *calibration, uint16_t raw_x,
+                   uint16_t raw_y, int16_t *x, int16_t *y)
+{
+    const cyd_touch_calibration_t *c = calibration != NULL ? calibration : &touch_calibration;
+    *x = clamp_coordinate(c->xa * raw_x + c->xb * raw_y + c->xc, CYD_LCD_WIDTH);
+    *y = clamp_coordinate(c->ya * raw_x + c->yb * raw_y + c->yc, CYD_LCD_HEIGHT);
+}
+
+/* Mean of the middle readings: one noisy sample (common on resistive
+   panels, especially as the finger lands) cannot drag the result. */
+static uint16_t trimmed_mean(uint16_t *values, int count)
+{
+    for (int i = 1; i < count; ++i) {
+        uint16_t value = values[i];
+        int j = i - 1;
+        while (j >= 0 && values[j] > value) {
+            values[j + 1] = values[j];
+            --j;
+        }
+        values[j + 1] = value;
+    }
+    uint32_t sum = 0;
+    for (int i = TOUCH_TRIM; i < count - TOUCH_TRIM; ++i) {
+        sum += values[i];
+    }
+    return (uint16_t)(sum / (count - 2 * TOUCH_TRIM));
 }
 
 static esp_err_t touch_read_point(cyd_touch_point_t *point)
 {
-    uint32_t raw_x_sum = 0;
-    uint32_t raw_y_sum = 0;
-    for (int sample = 0; sample < 5; ++sample) {
-        uint16_t raw_x;
-        uint16_t raw_y;
-        ESP_RETURN_ON_ERROR(touch_read_raw(0x90, &raw_x), TAG, "read touch X");
-        ESP_RETURN_ON_ERROR(touch_read_raw(0xD0, &raw_y), TAG, "read touch Y");
-        raw_x_sum += raw_x;
-        raw_y_sum += raw_y;
+    uint16_t raw_x[TOUCH_SAMPLES];
+    uint16_t raw_y[TOUCH_SAMPLES];
+    for (int sample = 0; sample < TOUCH_SAMPLES; ++sample) {
+        ESP_RETURN_ON_ERROR(touch_read_raw(0x90, &raw_x[sample]), TAG, "read touch X");
+        ESP_RETURN_ON_ERROR(touch_read_raw(0xD0, &raw_y[sample]), TAG, "read touch Y");
     }
-    point->x = (int16_t)map_touch_axis(raw_x_sum / 5, TOUCH_RAW_X_MIN, TOUCH_RAW_X_MAX,
-                                       CYD_LCD_WIDTH - 1);
-    point->y = (int16_t)map_touch_axis(raw_y_sum / 5, TOUCH_RAW_Y_MIN, TOUCH_RAW_Y_MAX,
-                                       CYD_LCD_HEIGHT - 1);
+    point->raw_x = trimmed_mean(raw_x, TOUCH_SAMPLES);
+    point->raw_y = trimmed_mean(raw_y, TOUCH_SAMPLES);
+    cyd_touch_map(NULL, point->raw_x, point->raw_y, &point->x, &point->y);
     return ESP_OK;
 }
 
@@ -480,7 +576,8 @@ static void touchscreen_task(void *argument)
             if (result != ESP_OK) {
                 ESP_LOGE(TAG, "Touchscreen read failed: %s", esp_err_to_name(result));
             } else if (gpio_get_level(TOUCH_PIN_IRQ) == 0) {
-                ESP_LOGI(TAG, "Tap at %d,%d", point.x, point.y);
+                ESP_LOGI(TAG, "Tap at %d,%d (raw %u,%u)", point.x, point.y, point.raw_x,
+                         point.raw_y);
                 xQueueSend(touch_queue, &point, 0);
                 last_tap = xTaskGetTickCount();
             }
@@ -494,6 +591,7 @@ esp_err_t cyd_touch_start(QueueHandle_t *queue)
 {
     touch_queue = xQueueCreate(4, sizeof(cyd_touch_point_t));
     ESP_RETURN_ON_FALSE(touch_queue != NULL, ESP_ERR_NO_MEM, TAG, "create touch queue");
+    load_calibration();
     ESP_RETURN_ON_ERROR(touch_bus_init(), TAG, "initialize touchscreen");
     ESP_RETURN_ON_FALSE(xTaskCreate(touchscreen_task, "touchscreen", 3072, NULL, 5, NULL) ==
                             pdPASS,
