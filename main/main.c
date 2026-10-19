@@ -148,6 +148,12 @@ static void load_slots(void)
         if (!have_nvs || nvs_get_str(nvs, key, slot->version, &version_size) != ESP_OK) {
             slot->version[0] = '\0';
         }
+        /* Images are named after their branch, so a different project name
+           means the slot was reflashed over USB since the download. */
+        if (strcmp(slot->name, description.project_name) != 0) {
+            snprintf(slot->name, sizeof(slot->name), "%s", description.project_name);
+            slot->version[0] = '\0';
+        }
         ESP_LOGI(TAG, "Slot %c: %s (%s)", 'A' + i, slot->name,
                  slot->version[0] != '\0' ? slot->version : "flashed over USB");
     }
