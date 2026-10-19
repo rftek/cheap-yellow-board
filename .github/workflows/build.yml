@@ -1,0 +1,53 @@
+# Builds this branch's boot image and publishes it as firmware.bin on a
+# release tagged with the branch name, which is where the launcher on the
+# bootloader branch looks for it.
+name: Build boot image
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      PLATFORMIO_BUILD_DIR: ${{ github.workspace }}/build
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+
+      - run: pip install platformio
+
+      - run: pio run
+        env:
+          # build_dir in platformio.ini is under USERPROFILE, which Linux lacks.
+          USERPROFILE: ${{ runner.temp }}
+
+      - name: Publish firmware.bin
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          cp build/esp32dev/firmware.bin firmware.bin
+          notes="Boot image built from ${GITHUB_SHA::7} on branch $TAG."
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --notes "$notes"
+          else
+            gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --notes "$notes"
+          fi
+          gh release upload "$TAG" firmware.bin --clobber
