@@ -34,8 +34,9 @@
 #define IMAGE_ASSET_NAME "firmware.bin"
 
 /* Settings this launcher stores in NVS for the boot images, which are
-   published publicly and so carry no credentials of their own. */
-#define CONFIG_NAMESPACE "cyd_config"
+   published publicly and so carry no credentials of their own. The
+   brightness lives in the same namespace. */
+#define CONFIG_NAMESPACE CYD_CONFIG_NAMESPACE
 
 /* Countdown before the default image boots; each tap off an entry adds as much again. */
 #define MENU_TIMEOUT_US (20LL * 1000 * 1000)
@@ -49,6 +50,14 @@
 #define MENU_FIRST_ROW 1
 #define MENU_ROWS (CYD_TEXT_ROWS - 2)
 #define STATUS_ROW (CYD_TEXT_ROWS - 1)
+
+/* Status row layout: status text, then brightness down and up buttons. */
+#define STATUS_TEXT_COLUMNS 10
+#define BRIGHTNESS_DOWN_COLUMN 10
+#define BRIGHTNESS_UP_COLUMN 14
+#define BRIGHTNESS_BUTTON_COLUMNS 3
+/* How long the new level replaces the status text after a press. */
+#define BRIGHTNESS_SHOWN_US (1500LL * 1000)
 
 #define WIFI_CONNECTED_BIT BIT0
 
@@ -102,6 +111,7 @@ static int remote_count;
 static volatile net_state_t net_state = NET_CONNECTING;
 static entry_t entries[MENU_ROWS];
 static int entry_count;
+static int64_t brightness_shown_until;
 
 /* ---- Stored images ---- */
 
@@ -221,28 +231,75 @@ static void draw_title(const char *text)
     ESP_ERROR_CHECK(cyd_text_row(0, CYD_COLOR_YELLOW, CYD_COLOR_BLACK, text));
 }
 
+/* Network status, or the new brightness just after a press, then the
+   brightness buttons, dimmed at either end of the range. */
 static void draw_status(void)
 {
-    char line[CYD_TEXT_COLUMNS + 1];
-    switch (net_state) {
-    case NET_CONNECTING:
-        snprintf(line, sizeof(line), "Wi-Fi...");
-        break;
-    case NET_FETCHING:
-        snprintf(line, sizeof(line), "GitHub...");
-        break;
-    case NET_READY:
-        snprintf(line, sizeof(line), "%d branch%s online", remote_count,
-                 remote_count == 1 ? "" : "es");
-        break;
-    case NET_GITHUB_ERROR:
-        snprintf(line, sizeof(line), "GitHub error");
-        break;
-    default:
-        snprintf(line, sizeof(line), "offline");
-        break;
+    char status[16];
+    if (esp_timer_get_time() < brightness_shown_until) {
+        snprintf(status, sizeof(status), "%d%% light", cyd_get_brightness());
+    } else {
+        switch (net_state) {
+        case NET_CONNECTING:
+            snprintf(status, sizeof(status), "Wi-Fi...");
+            break;
+        case NET_FETCHING:
+            snprintf(status, sizeof(status), "GitHub...");
+            break;
+        case NET_READY:
+            snprintf(status, sizeof(status), "%d online", remote_count);
+            break;
+        case NET_GITHUB_ERROR:
+            snprintf(status, sizeof(status), "no GitHub");
+            break;
+        default:
+            snprintf(status, sizeof(status), "offline");
+            break;
+        }
     }
-    ESP_ERROR_CHECK(cyd_text_row(STATUS_ROW, CYD_COLOR_GRAY, CYD_COLOR_BLACK, line));
+
+    char text[CYD_TEXT_COLUMNS + 1];
+    uint16_t foreground[CYD_TEXT_COLUMNS];
+    uint16_t background[CYD_TEXT_COLUMNS];
+    memset(text, ' ', CYD_TEXT_COLUMNS);
+    text[CYD_TEXT_COLUMNS] = '\0';
+    memcpy(text, status, strnlen(status, STATUS_TEXT_COLUMNS));
+    for (int i = 0; i < CYD_TEXT_COLUMNS; ++i) {
+        foreground[i] = CYD_COLOR_GRAY;
+        background[i] = CYD_COLOR_BLACK;
+    }
+    bool can_dim = cyd_get_brightness() > CYD_BRIGHTNESS_MIN;
+    bool can_brighten = cyd_get_brightness() < CYD_BRIGHTNESS_MAX;
+    for (int i = 0; i < BRIGHTNESS_BUTTON_COLUMNS; ++i) {
+        background[BRIGHTNESS_DOWN_COLUMN + i] = CYD_COLOR_BUTTON;
+        foreground[BRIGHTNESS_DOWN_COLUMN + i] =
+            can_dim ? CYD_COLOR_WHITE : CYD_COLOR_BUTTON_DISABLED;
+        background[BRIGHTNESS_UP_COLUMN + i] = CYD_COLOR_BUTTON;
+        foreground[BRIGHTNESS_UP_COLUMN + i] =
+            can_brighten ? CYD_COLOR_WHITE : CYD_COLOR_BUTTON_DISABLED;
+    }
+    text[BRIGHTNESS_DOWN_COLUMN + 1] = CYD_GLYPH_DOWN;
+    text[BRIGHTNESS_UP_COLUMN + 1] = CYD_GLYPH_UP;
+    ESP_ERROR_CHECK(cyd_draw_cells(STATUS_ROW, text, foreground, background));
+}
+
+/* Steps the backlight by delta percent and saves it for every image. */
+static void change_brightness(int delta)
+{
+    int before = cyd_get_brightness();
+    ESP_ERROR_CHECK(cyd_set_brightness(before + delta));
+    int after = cyd_get_brightness();
+    if (after != before) {
+        nvs_handle_t nvs;
+        if (nvs_open(CONFIG_NAMESPACE, NVS_READWRITE, &nvs) == ESP_OK) {
+            nvs_set_u8(nvs, CYD_CONFIG_BRIGHTNESS, (uint8_t)after);
+            nvs_commit(nvs);
+            nvs_close(nvs);
+        }
+        ESP_LOGI(TAG, "Brightness %d%%", after);
+    }
+    brightness_shown_until = esp_timer_get_time() + BRIGHTNESS_SHOWN_US;
+    draw_status();
 }
 
 /* True when a slot already holds this exact build of the branch. */
@@ -860,9 +917,24 @@ void app_main(void)
                     draw_title("NO IMAGES");
                 }
             } else {
-                /* Any other tap buys more time to choose. */
+                /* Any other tap, brightness buttons included, buys more time to choose. */
+                int column = point.x / CYD_FONT_WIDTH;
+                if (point.y / CYD_FONT_HEIGHT == STATUS_ROW) {
+                    if (column >= BRIGHTNESS_DOWN_COLUMN &&
+                        column < BRIGHTNESS_DOWN_COLUMN + BRIGHTNESS_BUTTON_COLUMNS) {
+                        change_brightness(-CYD_BRIGHTNESS_STEP);
+                    } else if (column >= BRIGHTNESS_UP_COLUMN) {
+                        change_brightness(CYD_BRIGHTNESS_STEP);
+                    }
+                }
                 deadline += MENU_TIMEOUT_US;
             }
+        }
+
+        /* Put the network status back once the brightness has been shown. */
+        if (brightness_shown_until != 0 && esp_timer_get_time() >= brightness_shown_until) {
+            brightness_shown_until = 0;
+            draw_status();
         }
 
         if (counting) {

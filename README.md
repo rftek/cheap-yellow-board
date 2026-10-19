@@ -20,6 +20,7 @@ On power-on, including the EN button, the custom bootloader (`bootloader_compone
 1. The menu immediately lists the stored images, marking the default with `*`, and counts down from 20 seconds.
 2. When the countdown ends, the last-used image boots. The very first time, it is the first stored image.
 3. Tapping anywhere except an image adds another 20 seconds. Tap an image to boot it right away.
+   - The ▼ and ▲ buttons at the bottom right dim or brighten the backlight in 20% steps, between 20% and 100%. The new level shows briefly on the status row and is saved in NVS (`cyd_config/brightness`). Every image starts at that level, because the shared display driver reads it.
 4. Meanwhile the launcher joins Wi-Fi and lists the branches of `rftek/cheap-yellow-board`, skipping `bootloader` and `main`. For each remaining branch it looks for `firmware.bin` on the release tagged with the branch name. This usually takes about 10 seconds. Each branch whose current build isn't stored appears in cyan as `+ branch`: either a new application or a newer build of a stored one. Tapping one downloads it into a slot, with progress, and boots it. A branch with no published build yet is skipped and logged. If Wi-Fi or GitHub doesn't answer, the status row says `offline` (or `GitHub error`) and nothing else changes.
 
 A download replaces the slot holding the same branch if there is one. Otherwise it fills an empty slot, or overwrites the slot that does not boot by default. Each slot remembers its branch and the asset's `updated_at` time in NVS, so a rebuilt branch shows up again as an update.
@@ -85,5 +86,5 @@ Change `COM11` to the board's serial port. The monitor exits with Ctrl+]. If you
 
 ## Hardware
 
-Display pins: MOSI GPIO13, SCLK GPIO14, CS GPIO15, D/C GPIO2, backlight GPIO21. The panel fills a drawing window column by column, so pixel data is sent column-major.
+Display pins: MOSI GPIO13, SCLK GPIO14, CS GPIO15, D/C GPIO2, backlight GPIO21, PWM-dimmed to the brightness saved by the launcher. The panel fills a drawing window column by column, so pixel data is sent column-major.
 Touch pins: MOSI GPIO32, MISO GPIO39, SCLK GPIO25, CS GPIO33, IRQ GPIO36. Touch coordinates use the CYD documentation's XPT2046 calibration range (`TOUCH_RAW_*` in `components/cyd_display/cyd_display.c`) mapped to the 320x240 landscape orientation.
