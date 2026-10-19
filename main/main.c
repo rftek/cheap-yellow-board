@@ -889,12 +889,309 @@ static void scroll_list(int list, int direction)
     }
 }
 
-static void open_detail(int list, int index, int row)
+/* ---- Buttons ---- */
+
+typedef struct {
+    int first_column;
+    int columns;
+    const char *label;
+    uint16_t foreground;
+} button_t;
+
+/* Draws a row of buttons with centered labels; other cells stay black. */
+static void draw_buttons(int row, const button_t *buttons, int count)
+{
+    char text[CYD_TEXT_COLUMNS + 1];
+    uint16_t foreground[CYD_TEXT_COLUMNS];
+    uint16_t background[CYD_TEXT_COLUMNS];
+    memset(text, ' ', CYD_TEXT_COLUMNS);
+    text[CYD_TEXT_COLUMNS] = '\0';
+    for (int i = 0; i < CYD_TEXT_COLUMNS; ++i) {
+        foreground[i] = CYD_COLOR_WHITE;
+        background[i] = CYD_COLOR_BLACK;
+    }
+    for (int b = 0; b < count; ++b) {
+        const button_t *button = &buttons[b];
+        int length = (int)strnlen(button->label, button->columns);
+        int start = button->first_column + (button->columns - length) / 2;
+        for (int i = 0; i < button->columns; ++i) {
+            foreground[button->first_column + i] = button->foreground;
+            background[button->first_column + i] = CYD_COLOR_BUTTON;
+        }
+        memcpy(text + start, button->label, length);
+    }
+    ESP_ERROR_CHECK(cyd_draw_cells(row, text, foreground, background));
+}
+
+static bool button_hit(const button_t *button, int column)
+{
+    return column >= button->first_column &&
+           column < button->first_column + button->columns;
+}
+
+/* ---- Wi-Fi settings editor ---- */
+
+/* Detail page footer for a Wi-Fi network. */
+static const button_t detail_buttons[] = {
+    {0, 7, "BACK", CYD_COLOR_WHITE},
+    {8, 9, "CONNECT", CYD_COLOR_YELLOW},
+};
+#define DETAIL_CONNECT_BUTTON 1
+
+enum { FIELD_SSID, FIELD_PASSWORD, FIELD_COUNT };
+
+#define FIELD_LABEL_COLUMNS 2
+#define EDITOR_MESSAGE_ROW 2
+#define KEY_FIRST_ROW 3
+#define KEY_ROWS 5
+#define KEY_COLUMNS 2 /* each key is two cells wide, for the resistive panel */
+#define KEYS_PER_ROW (CYD_TEXT_COLUMNS / KEY_COLUMNS)
+#define CONTROL_ROW (KEY_FIRST_ROW + KEY_ROWS)
+#define ACTION_ROW (CONTROL_ROW + 1)
+#define KEY_COLOR_ALTERNATE 0x39E7
+
+/* Letters, digits and the symbols most passwords use; the symbol page has
+   the rest of printable ASCII. */
+static const char *const letter_keys[KEY_ROWS] = {
+    "abcdefgh", "ijklmnop", "qrstuvwx", "yz012345", "6789.-_@",
+};
+static const char *const symbol_keys[KEY_ROWS] = {
+    "!\"#$%&'(", ")*+,-./:", ";<=>?@[\\", "]^_`{|}~", "",
+};
+
+enum { CONTROL_CAPS, CONTROL_SYMBOLS, CONTROL_SPACE, CONTROL_DELETE, CONTROL_COUNT };
+enum { ACTION_CANCEL, ACTION_SAVE, ACTION_COUNT };
+
+typedef struct {
+    char text[FIELD_COUNT][65];
+    int active;
+    bool symbols;
+    bool caps;
+    const char *message;
+} editor_t;
+
+static size_t field_capacity(int field)
+{
+    /* SSIDs are up to 32 bytes; passphrases up to 63, or 64 hex digits. */
+    return field == FIELD_SSID ? 32 : 64;
+}
+
+static char editor_key(const editor_t *editor, int row, int key)
+{
+    const char *keys = (editor->symbols ? symbol_keys : letter_keys)[row];
+    if (key >= (int)strlen(keys)) {
+        return '\0';
+    }
+    char character = keys[key];
+    if (editor->caps && character >= 'a' && character <= 'z') {
+        character = (char)(character - 'a' + 'A');
+    }
+    return character;
+}
+
+/* "N network_" / "P password": the end of the text, so the cursor shows. */
+static void draw_editor_field(const editor_t *editor, int field)
+{
+    char line[CYD_TEXT_COLUMNS + 1];
+    bool active = editor->active == field;
+    int visible = CYD_TEXT_COLUMNS - FIELD_LABEL_COLUMNS - 1;
+    const char *text = editor->text[field];
+    size_t length = strlen(text);
+    /* 14 = CYD_TEXT_COLUMNS - FIELD_LABEL_COLUMNS - 1 (the cursor). */
+    snprintf(line, sizeof(line), "%c %.14s%s", field == FIELD_SSID ? 'N' : 'P',
+             length > (size_t)visible ? text + length - visible : text, active ? "_" : "");
+    ESP_ERROR_CHECK(cyd_text_row(field, active ? CYD_COLOR_BLACK : CYD_COLOR_WHITE,
+                                 active ? CYD_COLOR_WHITE : CYD_COLOR_BUTTON, line));
+}
+
+static void draw_editor_message(const editor_t *editor)
+{
+    const char *message = editor->message;
+    if (message == NULL) {
+        message = editor->active == FIELD_SSID ? "EDIT NETWORK" : "EDIT PASSWORD";
+    }
+    ESP_ERROR_CHECK(cyd_text_row(EDITOR_MESSAGE_ROW,
+                                 editor->message != NULL ? CYD_COLOR_RED : CYD_COLOR_GRAY,
+                                 CYD_COLOR_BLACK, message));
+}
+
+static void draw_keyboard(const editor_t *editor)
+{
+    for (int row = 0; row < KEY_ROWS; ++row) {
+        char text[CYD_TEXT_COLUMNS + 1];
+        uint16_t foreground[CYD_TEXT_COLUMNS];
+        uint16_t background[CYD_TEXT_COLUMNS];
+        memset(text, ' ', CYD_TEXT_COLUMNS);
+        text[CYD_TEXT_COLUMNS] = '\0';
+        for (int column = 0; column < CYD_TEXT_COLUMNS; ++column) {
+            int key = column / KEY_COLUMNS;
+            bool present = key < KEYS_PER_ROW && editor_key(editor, row, key) != '\0';
+            foreground[column] = CYD_COLOR_WHITE;
+            /* Alternate shades in a checkerboard so neighboring keys stand apart. */
+            background[column] = !present          ? CYD_COLOR_BLACK
+                                 : (key + row) % 2 ? KEY_COLOR_ALTERNATE
+                                                   : CYD_COLOR_BUTTON;
+        }
+        for (int key = 0; key < KEYS_PER_ROW; ++key) {
+            char character = editor_key(editor, row, key);
+            if (character != '\0') {
+                text[key * KEY_COLUMNS] = character;
+            }
+        }
+        ESP_ERROR_CHECK(cyd_draw_cells(KEY_FIRST_ROW + row, text, foreground, background));
+    }
+}
+
+static void editor_controls(const editor_t *editor, button_t controls[CONTROL_COUNT])
+{
+    controls[CONTROL_CAPS] = (button_t){0, 3, "Aa", editor->caps ? CYD_COLOR_YELLOW : CYD_COLOR_WHITE};
+    controls[CONTROL_SYMBOLS] = (button_t){4, 3, editor->symbols ? "abc" : "#+=", CYD_COLOR_WHITE};
+    controls[CONTROL_SPACE] = (button_t){8, 5, "SPACE", CYD_COLOR_WHITE};
+    controls[CONTROL_DELETE] = (button_t){14, 3, "DEL", CYD_COLOR_WHITE};
+}
+
+static const button_t editor_actions[ACTION_COUNT] = {
+    {0, 8, "CANCEL", CYD_COLOR_WHITE},
+    {9, 8, "SAVE", CYD_COLOR_YELLOW},
+};
+
+static void draw_editor(const editor_t *editor)
+{
+    button_t controls[CONTROL_COUNT];
+    for (int field = 0; field < FIELD_COUNT; ++field) {
+        draw_editor_field(editor, field);
+    }
+    draw_editor_message(editor);
+    draw_keyboard(editor);
+    editor_controls(editor, controls);
+    draw_buttons(CONTROL_ROW, controls, CONTROL_COUNT);
+    draw_buttons(ACTION_ROW, editor_actions, ACTION_COUNT);
+}
+
+static void editor_type(editor_t *editor, char character)
+{
+    char *text = editor->text[editor->active];
+    size_t length = strlen(text);
+    if (length < field_capacity(editor->active)) {
+        text[length] = character;
+        text[length + 1] = '\0';
+    }
+    editor->message = NULL;
+    draw_editor_field(editor, editor->active);
+    draw_editor_message(editor);
+}
+
+/* Saves the network for every image (NVS cyd_config, read by the launcher
+   and the other images too), then rejoins with it. */
+static void save_wifi_settings(const char *ssid, const char *password)
+{
+    nvs_handle_t nvs;
+    if (nvs_open(CYD_CONFIG_NAMESPACE, NVS_READWRITE, &nvs) == ESP_OK) {
+        nvs_set_str(nvs, "wifi_ssid", ssid);
+        nvs_set_str(nvs, "wifi_pass", password);
+        nvs_commit(nvs);
+        nvs_close(nvs);
+    }
+    snprintf(wifi_ssid, sizeof(wifi_ssid), "%s", ssid);
+    snprintf(wifi_password, sizeof(wifi_password), "%s", password);
+    have_wifi_settings = true;
+    ESP_LOGI(TAG, "Saved Wi-Fi network %s", wifi_ssid);
+
+    wifi_config_t wifi_config = {0};
+    memcpy(wifi_config.sta.ssid, wifi_ssid, strnlen(wifi_ssid, sizeof(wifi_config.sta.ssid)));
+    memcpy(wifi_config.sta.password, wifi_password,
+           strnlen(wifi_password, sizeof(wifi_config.sta.password) - 1));
+    xEventGroupClearBits(wifi_events, WIFI_CONNECTED_BIT);
+    wifi_join_requested = true;
+    esp_wifi_disconnect();
+    esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+    esp_wifi_connect();
+}
+
+/* Edits the network name and password; returns true when they were saved. */
+static bool edit_wifi_settings(const char *ssid)
+{
+    editor_t editor = {.active = FIELD_PASSWORD};
+    snprintf(editor.text[FIELD_SSID], field_capacity(FIELD_SSID) + 1, "%s", ssid);
+    if (have_wifi_settings && strcmp(ssid, wifi_ssid) == 0) {
+        snprintf(editor.text[FIELD_PASSWORD], field_capacity(FIELD_PASSWORD) + 1, "%s",
+                 wifi_password);
+    }
+    draw_editor(&editor);
+    xQueueReset(touch_queue);
+    while (true) {
+        cyd_touch_point_t point;
+        xQueueReceive(touch_queue, &point, portMAX_DELAY);
+        int row = point.y / CYD_FONT_HEIGHT;
+        int column = point.x / CYD_FONT_WIDTH;
+        if (row < FIELD_COUNT) {
+            int previous = editor.active;
+            editor.active = row;
+            editor.message = NULL;
+            draw_editor_field(&editor, previous);
+            draw_editor_field(&editor, editor.active);
+            draw_editor_message(&editor);
+        } else if (row >= KEY_FIRST_ROW && row < KEY_FIRST_ROW + KEY_ROWS) {
+            char character = editor_key(&editor, row - KEY_FIRST_ROW, column / KEY_COLUMNS);
+            if (column / KEY_COLUMNS < KEYS_PER_ROW && character != '\0') {
+                editor_type(&editor, character);
+            }
+        } else if (row == CONTROL_ROW) {
+            button_t controls[CONTROL_COUNT];
+            editor_controls(&editor, controls);
+            if (button_hit(&controls[CONTROL_CAPS], column)) {
+                editor.caps = !editor.caps;
+            } else if (button_hit(&controls[CONTROL_SYMBOLS], column)) {
+                editor.symbols = !editor.symbols;
+            } else if (button_hit(&controls[CONTROL_SPACE], column)) {
+                editor_type(&editor, ' ');
+                continue;
+            } else if (button_hit(&controls[CONTROL_DELETE], column)) {
+                char *text = editor.text[editor.active];
+                size_t length = strlen(text);
+                if (length > 0) {
+                    text[length - 1] = '\0';
+                }
+                editor.message = NULL;
+                draw_editor_field(&editor, editor.active);
+                draw_editor_message(&editor);
+                continue;
+            } else {
+                continue;
+            }
+            draw_keyboard(&editor);
+            editor_controls(&editor, controls);
+            draw_buttons(CONTROL_ROW, controls, CONTROL_COUNT);
+        } else if (row == ACTION_ROW) {
+            if (button_hit(&editor_actions[ACTION_CANCEL], column)) {
+                return false;
+            }
+            if (button_hit(&editor_actions[ACTION_SAVE], column)) {
+                size_t password_length = strlen(editor.text[FIELD_PASSWORD]);
+                if (editor.text[FIELD_SSID][0] == '\0') {
+                    editor.message = "NETWORK IS EMPTY";
+                } else if (password_length > 0 && password_length < 8) {
+                    /* Open networks have no password; WPA needs 8 to 63. */
+                    editor.message = "PASSWORD: 8 TO 63";
+                } else {
+                    save_wifi_settings(editor.text[FIELD_SSID], editor.text[FIELD_PASSWORD]);
+                    return true;
+                }
+                draw_editor_message(&editor);
+            }
+        }
+    }
+}
+
+/* Shows an entry's details until a tap; returns true when the Wi-Fi
+   settings changed and the lists should be rescanned. */
+static bool open_detail(int list, int index, int row)
 {
     draw_list_entry(list, index, row, true);
     vTaskDelay(pdMS_TO_TICKS(120));
     if (list == LIST_WIFI) {
         show_wifi_detail(&wifi_results[index]);
+        draw_buttons(CYD_TEXT_ROWS - 1, detail_buttons, 2);
     } else if (list == LIST_BLE) {
         show_ble_detail(&ble_results[index]);
     } else {
@@ -903,7 +1200,13 @@ static void open_detail(int list, int index, int row)
     cyd_touch_point_t point;
     xQueueReset(touch_queue);
     xQueueReceive(touch_queue, &point, portMAX_DELAY);
+    if (list == LIST_WIFI && point.y / CYD_FONT_HEIGHT == CYD_TEXT_ROWS - 1 &&
+        button_hit(&detail_buttons[DETAIL_CONNECT_BUTTON], point.x / CYD_FONT_WIDTH) &&
+        edit_wifi_settings((const char *)wifi_results[index].ssid)) {
+        return true;
+    }
     show_results();
+    return false;
 }
 
 /* Returns true when the tap asks for a new scan. */
@@ -925,8 +1228,7 @@ static bool handle_list_tap(const cyd_touch_point_t *point)
             return false;
         }
         if (row > view->header_row && row <= view->header_row + view->rows) {
-            open_detail(list, view->offset + row - view->header_row - 1, row);
-            return false;
+            return open_detail(list, view->offset + row - view->header_row - 1, row);
         }
     }
     return false;
