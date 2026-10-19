@@ -10,6 +10,7 @@ Each application lives on its own branch of this repository:
 | `wifi_checker` | This Wi-Fi and Bluetooth LE scanner |
 | `birdnet_viewer` | BirdNET bird photo viewer |
 | `screen_check` | Screen color test |
+| `touchscreen_cal` | Touchscreen calibration |
 
 ## What it does
 
