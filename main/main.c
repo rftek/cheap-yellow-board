@@ -470,6 +470,22 @@ static void wifi_event_handler(void *argument, esp_event_base_t event_base, int3
     }
 }
 
+static void set_wifi_network(const char *ssid, const char *password)
+{
+    wifi_config_t wifi_config = {0};
+    memcpy(wifi_config.sta.ssid, ssid, strnlen(ssid, sizeof(wifi_config.sta.ssid)));
+    memcpy(wifi_config.sta.password, password,
+           strnlen(password, sizeof(wifi_config.sta.password) - 1));
+    esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+}
+
+static bool wifi_wait_connected(void)
+{
+    EventBits_t bits = xEventGroupWaitBits(wifi_events, WIFI_CONNECTED_BIT, pdFALSE, pdTRUE,
+                                           pdMS_TO_TICKS(WIFI_CONNECT_TIMEOUT_MS));
+    return (bits & WIFI_CONNECTED_BIT) != 0;
+}
+
 static bool wifi_connect(void)
 {
     wifi_events = xEventGroupCreate();
@@ -490,24 +506,32 @@ static bool wifi_connect(void)
     char password[65];
     load_config_string("wifi_ssid", WIFI_SSID, ssid, sizeof(ssid));
     load_config_string("wifi_pass", WIFI_PASSWORD, password, sizeof(password));
-    wifi_config_t wifi_config = {0};
-    memcpy(wifi_config.sta.ssid, ssid, strnlen(ssid, sizeof(wifi_config.sta.ssid)));
-    memcpy(wifi_config.sta.password, password,
-           strnlen(password, sizeof(wifi_config.sta.password) - 1));
     esp_wifi_set_storage(WIFI_STORAGE_RAM);
-    if (esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK ||
-        esp_wifi_set_config(WIFI_IF_STA, &wifi_config) != ESP_OK ||
-        esp_wifi_start() != ESP_OK) {
+    if (esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK) {
         return false;
     }
-    EventBits_t bits = xEventGroupWaitBits(wifi_events, WIFI_CONNECTED_BIT, pdFALSE, pdTRUE,
-                                           pdMS_TO_TICKS(WIFI_CONNECT_TIMEOUT_MS));
-    if ((bits & WIFI_CONNECTED_BIT) == 0) {
+    set_wifi_network(ssid, password);
+    if (esp_wifi_start() != ESP_OK) {
+        return false;
+    }
+    bool connected = wifi_wait_connected();
+    /* A mistyped network edited on the device must not cut the launcher off
+       from GitHub, so fall back to this build's own credentials. */
+    if (!connected && (strcmp(ssid, WIFI_SSID) != 0 || strcmp(password, WIFI_PASSWORD) != 0)) {
+        ESP_LOGW(TAG, "Saved Wi-Fi network %s did not connect; trying %s", ssid, WIFI_SSID);
+        wifi_give_up = true;
+        esp_wifi_disconnect();
+        vTaskDelay(pdMS_TO_TICKS(100));
+        set_wifi_network(WIFI_SSID, WIFI_PASSWORD);
+        wifi_give_up = false;
+        esp_wifi_connect();
+        connected = wifi_wait_connected();
+    }
+    if (!connected) {
         wifi_give_up = true;
         esp_wifi_stop();
-        return false;
     }
-    return true;
+    return connected;
 }
 
 static esp_err_t http_buffer_handler(esp_http_client_event_t *event)
