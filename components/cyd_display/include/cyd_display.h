@@ -35,9 +35,22 @@
 #define CYD_GLYPH_BACKSPACE '\x03'
 
 typedef struct {
-    int16_t x;
+    int16_t x; /* display coordinates, calibrated */
     int16_t y;
+    uint16_t raw_x; /* XPT2046 readings, 0-4095 */
+    uint16_t raw_y;
 } cyd_touch_point_t;
+
+/* Affine touch calibration: x = xa*raw_x + xb*raw_y + xc, and likewise for
+   y. Unlike a per-axis scale, it also corrects a panel that is rotated or
+   skewed against the LCD. The touchscreen_cal image saves one in NVS
+   (cyd_config/touch_cal) and every image's driver applies it. */
+typedef struct {
+    float xa, xb, xc;
+    float ya, yb, yc;
+} cyd_touch_calibration_t;
+
+#define CYD_CONFIG_TOUCH_CAL "touch_cal"
 
 /* Backlight level in percent. The launcher saves it in NVS so every image
    starts at the same brightness. */
@@ -79,5 +92,20 @@ esp_err_t cyd_draw_cells(int row, const char *text,
 esp_err_t cyd_text_row(int row, uint16_t foreground, uint16_t background, const char *text);
 
 /* Starts the touchscreen and a task that posts one cyd_touch_point_t per tap,
-   in display coordinates, to the returned queue. */
+   in display coordinates, to the returned queue. It loads the calibration
+   saved in NVS, if any. */
 esp_err_t cyd_touch_start(QueueHandle_t *queue);
+
+/* The built-in calibration, from the CYD documentation's raw ranges. */
+void cyd_touch_default_calibration(cyd_touch_calibration_t *calibration);
+
+/* Uses calibration for later taps; NULL restores the default. Not saved. */
+void cyd_touch_set_calibration(const cyd_touch_calibration_t *calibration);
+
+/* Saves calibration in NVS for every image and uses it now. */
+esp_err_t cyd_touch_save_calibration(const cyd_touch_calibration_t *calibration);
+
+/* Maps raw readings to display coordinates with the given calibration
+   (NULL: the one in use), clamped to the screen. */
+void cyd_touch_map(const cyd_touch_calibration_t *calibration, uint16_t raw_x,
+                   uint16_t raw_y, int16_t *x, int16_t *y);
