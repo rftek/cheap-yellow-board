@@ -32,6 +32,7 @@
 /* Extra glyphs past the ASCII range. */
 #define CYD_GLYPH_UP '\x01'
 #define CYD_GLYPH_DOWN '\x02'
+#define CYD_GLYPH_BACKSPACE '\x03'
 
 typedef struct {
     int16_t x;

@@ -64,6 +64,9 @@ static char wifi_ssid[33];
 static char wifi_password[65];
 static bool have_wifi_settings;
 static volatile bool wifi_join_requested;
+/* Set when the last join timed out; reconnecting then stops so scans work. */
+static bool wifi_join_failed;
+static volatile uint8_t wifi_last_reason;
 /* Valid while WIFI_CONNECTED_BIT is set. */
 static esp_netif_ip_info_t ip_info;
 static esp_netif_dns_info_t dns_info;
@@ -191,8 +194,8 @@ static void wifi_event_handler(void *argument, esp_event_base_t event_base, int3
                                void *event_data)
 {
     (void)argument;
-    (void)event_data;
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        wifi_last_reason = ((const wifi_event_sta_disconnected_t *)event_data)->reason;
         xEventGroupClearBits(wifi_events, WIFI_CONNECTED_BIT);
         if (wifi_join_requested) {
             esp_wifi_connect();
@@ -243,9 +246,15 @@ static bool wifi_join(void)
     EventBits_t bits = xEventGroupWaitBits(wifi_events, WIFI_CONNECTED_BIT, pdFALSE, pdTRUE,
                                            pdMS_TO_TICKS(WIFI_JOIN_TIMEOUT_MS));
     if ((bits & WIFI_CONNECTED_BIT) == 0) {
-        ESP_LOGW(TAG, "Could not join %s", wifi_ssid);
+        /* Retrying forever would block every later scan, so give up until
+           the next rescan or a new password. */
+        wifi_join_requested = false;
+        wifi_join_failed = true;
+        esp_wifi_disconnect();
+        ESP_LOGW(TAG, "Could not join %s (reason %u)", wifi_ssid, wifi_last_reason);
         return false;
     }
+    wifi_join_failed = false;
     wifi_ap_record_t ap;
     esp_netif_get_ip_info(sta_netif, &ip_info);
     esp_netif_get_dns_info(sta_netif, ESP_NETIF_DNS_MAIN, &dns_info);
@@ -255,6 +264,24 @@ static bool wifi_join(void)
     ESP_LOGI(TAG, "Joined %s: IP " IPSTR ", gateway " IPSTR ", DNS " IPSTR, wifi_ssid,
              IP2STR(&ip_info.ip), IP2STR(&ip_info.gw), IP2STR(&dns_info.ip.u_addr.ip4));
     return true;
+}
+
+/* Why the last join failed, in a few words. */
+static const char *wifi_failure_text(void)
+{
+    switch (wifi_last_reason) {
+    case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+    case WIFI_REASON_HANDSHAKE_TIMEOUT:
+    case WIFI_REASON_AUTH_FAIL:
+    case WIFI_REASON_MIC_FAILURE:
+        return "WRONG PASSWORD?";
+    case WIFI_REASON_NO_AP_FOUND:
+        return "NOT IN RANGE";
+    case WIFI_REASON_AUTH_EXPIRE:
+        return "NO ANSWER";
+    default:
+        return "SEE SERIAL LOG";
+    }
 }
 
 static bool wifi_is_joined(void)
@@ -604,7 +631,12 @@ static void show_wifi_detail(const wifi_ap_record_t *ap)
         format_ip(lwip_ntohl(dns_info.ip.u_addr.ip4.addr), ip, sizeof(ip));
         page_add(&page, CYD_COLOR_WHITE, "%s", ip);
     } else {
-        page_add(&page, CYD_COLOR_GRAY, "IP: not joined");
+        if (wifi_join_failed && strcmp((const char *)ap->ssid, wifi_ssid) == 0) {
+            page_add(&page, CYD_COLOR_RED, "JOIN FAILED");
+            page_add(&page, CYD_COLOR_RED, "%s", wifi_failure_text());
+        } else {
+            page_add(&page, CYD_COLOR_GRAY, "IP: not joined");
+        }
     }
     page_add(&page, CYD_COLOR_WHITE, "AUTH %s", wifi_auth_name(ap->authmode));
     page_add(&page, CYD_COLOR_WHITE, "CIPHER %s", wifi_cipher_name(ap->pairwise_cipher));
@@ -795,7 +827,7 @@ static void draw_list_header(int list)
     } else if (!have_wifi_settings) {
         snprintf(title, sizeof(title), "LAN: none");
     } else if (!wifi_is_joined()) {
-        snprintf(title, sizeof(title), "LAN: off");
+        snprintf(title, sizeof(title), wifi_join_failed ? "LAN: fail" : "LAN: off");
     } else {
         snprintf(title, sizeof(title), "LAN %d%s", lan_result_count,
                  lan_results_full ? "+" : "");
@@ -1047,7 +1079,8 @@ static void editor_controls(const editor_t *editor, button_t controls[CONTROL_CO
     controls[CONTROL_CAPS] = (button_t){0, 3, "Aa", editor->caps ? CYD_COLOR_YELLOW : CYD_COLOR_WHITE};
     controls[CONTROL_SYMBOLS] = (button_t){4, 3, editor->symbols ? "abc" : "#+=", CYD_COLOR_WHITE};
     controls[CONTROL_SPACE] = (button_t){8, 5, "SPACE", CYD_COLOR_WHITE};
-    controls[CONTROL_DELETE] = (button_t){14, 3, "DEL", CYD_COLOR_WHITE};
+    static const char backspace_label[] = {CYD_GLYPH_BACKSPACE, '\0'};
+    controls[CONTROL_DELETE] = (button_t){14, 3, backspace_label, CYD_COLOR_WHITE};
 }
 
 static const button_t editor_actions[ACTION_COUNT] = {
@@ -1102,6 +1135,7 @@ static void save_wifi_settings(const char *ssid, const char *password)
     memcpy(wifi_config.sta.password, wifi_password,
            strnlen(wifi_password, sizeof(wifi_config.sta.password) - 1));
     xEventGroupClearBits(wifi_events, WIFI_CONNECTED_BIT);
+    wifi_join_failed = false;
     wifi_join_requested = true;
     esp_wifi_disconnect();
     esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
