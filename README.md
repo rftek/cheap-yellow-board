@@ -11,6 +11,7 @@ Each application lives on its own branch of this repository:
 | `birdnet_viewer` | BirdNET bird photo viewer |
 | `screen_check` | Screen color test |
 | `touchscreen_cal` | This touchscreen calibration |
+| `stopwatch` | LVGL stopwatch |
 
 ## What it does
 
