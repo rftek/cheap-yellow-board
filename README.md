@@ -27,7 +27,7 @@ A download replaces the slot holding the same branch if there is one. Otherwise 
 
 ### Settings for boot images
 
-Boot images are published publicly, so they carry no credentials. On every start the launcher copies its private settings into NVS namespace `cyd_config`, and the images read them there. It only writes a value when it has changed.
+Boot images are published publicly, so they carry no credentials. They read their settings from NVS namespace `cyd_config`. The launcher seeds those settings from its private header, but only on the first start after it's flashed with different credentials; it remembers a hash of them as `seed`. Settings changed on the device, such as with the `wifi_checker` CONNECT screen, therefore survive restarts. The launcher also joins Wi-Fi with the settings in NVS, so an edited network applies to it too.
 
 | Key | From `wifi_credentials.h` |
 |---|---|

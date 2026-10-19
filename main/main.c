@@ -184,32 +184,65 @@ static void save_slot(int slot, const char *name, const char *version)
     nvs_close(nvs);
 }
 
-/* Writes key only when it differs, so unchanged settings cost no flash wear. */
-static void store_config_string(nvs_handle_t nvs, const char *key, const char *value)
+#ifndef BIRDNET_BASE_URL
+#define BIRDNET_BASE_URL ""
+#endif
+
+/* FNV-1a hash of this build's compiled-in settings. */
+static uint32_t compiled_config_hash(void)
 {
-    char current[128];
-    size_t size = sizeof(current);
-    if (nvs_get_str(nvs, key, current, &size) == ESP_OK && strcmp(current, value) == 0) {
-        return;
+    static const char *const values[] = {WIFI_SSID, WIFI_PASSWORD, BIRDNET_BASE_URL};
+    uint32_t hash = 2166136261u;
+    for (size_t i = 0; i < sizeof(values) / sizeof(values[0]); ++i) {
+        for (const char *c = values[i]; ; ++c) {
+            hash = (hash ^ (uint8_t)*c) * 16777619u;
+            if (*c == '\0') {
+                break;
+            }
+        }
     }
-    nvs_set_str(nvs, key, value);
+    return hash;
 }
 
-/* Shares this launcher's private settings with the boot images. */
-static void store_config(void)
+/* Seeds the boot images' settings (NVS cyd_config) from this launcher's
+   private header, but only when that header changed since it last did:
+   settings edited on the device, such as with wifi_checker's CONNECT
+   screen, survive restarts until a launcher with new credentials is
+   flashed. */
+static void seed_config(void)
 {
     nvs_handle_t nvs;
     if (nvs_open(CONFIG_NAMESPACE, NVS_READWRITE, &nvs) != ESP_OK) {
         ESP_LOGE(TAG, "Could not open NVS for settings");
         return;
     }
-    store_config_string(nvs, "wifi_ssid", WIFI_SSID);
-    store_config_string(nvs, "wifi_pass", WIFI_PASSWORD);
-#ifdef BIRDNET_BASE_URL
-    store_config_string(nvs, "birdnet_url", BIRDNET_BASE_URL);
-#endif
-    nvs_commit(nvs);
+    uint32_t hash = compiled_config_hash();
+    uint32_t seeded = 0;
+    if (nvs_get_u32(nvs, "seed", &seeded) != ESP_OK || seeded != hash) {
+        nvs_set_str(nvs, "wifi_ssid", WIFI_SSID);
+        nvs_set_str(nvs, "wifi_pass", WIFI_PASSWORD);
+        if (BIRDNET_BASE_URL[0] != '\0') {
+            nvs_set_str(nvs, "birdnet_url", BIRDNET_BASE_URL);
+        }
+        nvs_set_u32(nvs, "seed", hash);
+        nvs_commit(nvs);
+        ESP_LOGI(TAG, "Stored this launcher's settings for the boot images");
+    }
     nvs_close(nvs);
+}
+
+/* Reads a setting the images share, falling back to this build's value. */
+static void load_config_string(const char *key, const char *fallback, char *value,
+                               size_t size)
+{
+    nvs_handle_t nvs;
+    snprintf(value, size, "%s", fallback);
+    if (nvs_open(CONFIG_NAMESPACE, NVS_READONLY, &nvs) == ESP_OK) {
+        if (nvs_get_str(nvs, key, value, &size) != ESP_OK) {
+            snprintf(value, size, "%s", fallback);
+        }
+        nvs_close(nvs);
+    }
 }
 
 /* The image that boots when nobody chooses: the last one chosen, else the
@@ -452,10 +485,15 @@ static bool wifi_connect(void)
     esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL);
     esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, NULL);
 
+    /* The shared settings, which may have been edited on the device. */
+    char ssid[33];
+    char password[65];
+    load_config_string("wifi_ssid", WIFI_SSID, ssid, sizeof(ssid));
+    load_config_string("wifi_pass", WIFI_PASSWORD, password, sizeof(password));
     wifi_config_t wifi_config = {0};
-    snprintf((char *)wifi_config.sta.ssid, sizeof(wifi_config.sta.ssid), "%s", WIFI_SSID);
-    snprintf((char *)wifi_config.sta.password, sizeof(wifi_config.sta.password), "%s",
-             WIFI_PASSWORD);
+    memcpy(wifi_config.sta.ssid, ssid, strnlen(ssid, sizeof(wifi_config.sta.ssid)));
+    memcpy(wifi_config.sta.password, password,
+           strnlen(password, sizeof(wifi_config.sta.password) - 1));
     esp_wifi_set_storage(WIFI_STORAGE_RAM);
     if (esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK ||
         esp_wifi_set_config(WIFI_IF_STA, &wifi_config) != ESP_OK ||
@@ -893,7 +931,7 @@ void app_main(void)
         nvs_result = nvs_flash_init();
     }
     ESP_ERROR_CHECK(nvs_result);
-    store_config();
+    seed_config();
     load_slots();
     ESP_ERROR_CHECK(cyd_touch_start(&touch_queue));
 
