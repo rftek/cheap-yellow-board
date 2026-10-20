@@ -210,6 +210,31 @@ esp_err_t cyd_draw_pattern(int x, int y, int width, int height,
     return ESP_OK;
 }
 
+esp_err_t cyd_draw_bitmap(int x, int y, int width, int height, const uint16_t *pixels)
+{
+    ESP_RETURN_ON_FALSE(x >= 0 && y >= 0 && width > 0 && height > 0 &&
+                        x + width <= CYD_LCD_WIDTH && y + height <= CYD_LCD_HEIGHT,
+                        ESP_ERR_INVALID_ARG, TAG, "bitmap outside display");
+    ESP_RETURN_ON_ERROR(lcd_set_window(x, y, width, height), TAG, "set bitmap window");
+    /* Column-major and big-endian, a chunk of whole columns at a time. */
+    size_t columns_per_chunk = sizeof(text_chunk) / ((size_t)height * 2);
+    for (int column = 0; column < width; column += columns_per_chunk) {
+        int columns = width - column < (int)columns_per_chunk ? width - column
+                                                              : (int)columns_per_chunk;
+        uint8_t *out = text_chunk;
+        for (int c = 0; c < columns; ++c) {
+            const uint16_t *in = pixels + column + c;
+            for (int row = 0; row < height; ++row, in += width) {
+                *out++ = (uint8_t)(*in >> 8);
+                *out++ = (uint8_t)*in;
+            }
+        }
+        ESP_RETURN_ON_ERROR(lcd_data(text_chunk, (size_t)columns * height * 2), TAG,
+                            "send bitmap chunk");
+    }
+    return ESP_OK;
+}
+
 esp_err_t cyd_draw_cells(int row, const char *text,
                          const uint16_t *foreground, const uint16_t *background)
 {
@@ -377,7 +402,9 @@ esp_err_t cyd_display_init(void)
                         TAG, "initialize display SPI bus");
 
     spi_device_interface_config_t display_device = {
-        .clock_speed_hz = 20 * 1000 * 1000,
+        /* The display uses the ESP32's native HSPI pins, which run this fast
+           without the GPIO matrix; CYD setups commonly drive it at 40-55 MHz. */
+        .clock_speed_hz = 40 * 1000 * 1000,
         .mode = 0,
         .spics_io_num = LCD_PIN_CS,
         .queue_size = 1,

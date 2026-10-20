@@ -12,6 +12,7 @@ Each application lives on its own branch of this repository:
 | `screen_check` | This screen color test |
 | `touchscreen_cal` | Touchscreen calibration |
 | `stopwatch` | LVGL stopwatch |
+| `gear_roll` | LVGL gear demo |
 
 ## What it does
 
