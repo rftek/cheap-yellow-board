@@ -1,30 +1,18 @@
-# ESP32 CYD BirdNET Display
+# ESP32 CYD: How to Build
 
-This PlatformIO/ESP-IDF application targets the 320x240 display and resistive touchscreen on the ESP32 Cheap Yellow Display (CYD), following the [board documentation](https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display).
+Documentation for building, flashing and publishing the applications in this repository for the ESP32 Cheap Yellow Display (CYD). This branch holds only documentation; the code lives on the application branches.
 
-On startup, the application connects to Wi-Fi and queries the local BirdNET server. It then refreshes every two minutes or immediately after a touchscreen tap. The latest visit from today with a confidence of at least 80% is displayed as a full-screen Wikimedia image. The display intentionally contains no text or overlays. If there is no qualifying detection, the screen clears; a failed refresh preserves the last successfully displayed image.
+**Start here: [INSTALL.md](INSTALL.md).** It covers what to install (Git and PlatformIO are required; VS Code is optional), the private Wi-Fi file, building each branch, flashing a new board once, publishing through GitHub Actions, troubleshooting, and the exact tool versions this project was built with.
 
-Configure the BirdNET server with `BIRDNET_BASE_URL` in the local Wi-Fi credentials header. It defaults to `http://birdnet.local`; replace that value with the server's address on your network. The firmware uses:
+| Branch | Application |
+|---|---|
+| `bootloader` | Launcher: a boot menu with two image slots, a custom bootloader and the partition table |
+| `wifi_checker` | Wi-Fi, Bluetooth LE and LAN scanner |
+| `birdnet_viewer` | BirdNET bird photo viewer |
+| `screen_check` | Screen color test |
+| `touchscreen_cal` | Touchscreen calibration |
+| `stopwatch` | LVGL stopwatch |
+| `gear_roll` | LVGL gear demo |
+| `How_to_Build` | This documentation |
 
-- `GET {BIRDNET_BASE_URL}/api/v1/detections/visits`
-- `GET {BIRDNET_BASE_URL}/api/v1/image/{URL-encoded-scientific-name}`
-
-Wikimedia's 1280-pixel thumbnail is streamed over HTTPS directly into the ESP32 ROM JPEG decoder and downscaled to fill the 320x240 display. Streaming avoids keeping the full image in the ESP32's limited RAM; the lower-resolution 500-pixel variant is intentionally not used because it looked blurry when enlarged.
-
-## Command-line build and flash
-
-Install the PlatformIO IDE extension or PlatformIO Core. From PowerShell, at the project root:
-
-```powershell
-$pio = "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe"
-& $pio run
-& $pio run --target upload --upload-port COM11
-& $pio device monitor --port COM11 --baud 115200
-```
-
-Change `COM11` to the board's assigned serial port. The first build installs the ESP32 platform and ESP-IDF toolchain. The monitor exits with Ctrl+].
-
-Before building, create `%USERPROFILE%\.cyd_private\wifi_credentials.h` from `main\wifi_credentials.example.h` and set the local Wi-Fi SSID/password and BirdNET server URL. Never commit that private file. Build products and machine-specific ESP-IDF/VS Code settings are ignored.
-
-Display pins: MOSI GPIO13, SCLK GPIO14, CS GPIO15, D/C GPIO2, backlight GPIO21.
-Touch pins: MOSI GPIO32, MISO GPIO39, SCLK GPIO25, CS GPIO33, IRQ GPIO36. Touch coordinates use the CYD documentation's XPT2046 calibration range mapped to the tested 320x240 landscape orientation.
+Each application branch has its own README describing what the app does and how it is put together.

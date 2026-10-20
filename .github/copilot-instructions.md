@@ -1,8 +1,5 @@
-# ESP32 CYD BirdNET Viewer
+# ESP32 CYD: How to Build
 
-- This is a PlatformIO project using native ESP-IDF C for an ESP32 Cheap Yellow Display.
-- Keep Wi-Fi credentials in `%USERPROFILE%\.cyd_private\wifi_credentials.h`; never commit secrets.
-- Build with `pio run`; flash with `pio run --target upload --upload-port COM11`.
-- The 320x240 ILI9341-compatible TFT and XPT2046 touchscreen pin mapping is defined in `main/main.c`.
-- Preserve the image-only screen, 2-minute/touch refresh behavior, and bounded HTTP/JPEG streaming.
-- Verify firmware changes with a PlatformIO build before flashing.
+- Documentation-only branch for the ESP32 Cheap Yellow Display project. Code lives on the application branches: `bootloader`, `wifi_checker`, `birdnet_viewer`, `screen_check`, `touchscreen_cal`, `stopwatch`, `gear_roll`.
+- `INSTALL.md` is the build-environment and installation guide; keep its tested-versions table and branch table in step with the application branches (platform pin in `platformio.ini`, LVGL in `dependencies.lock`, flash offsets in the `bootloader` partition table).
+- Only state steps that were verified on real hardware or in CI; mark anything untested as such.
