@@ -12,6 +12,7 @@ Each application lives on its own branch of this repository:
 | `screen_check` | Screen color test |
 | `touchscreen_cal` | Touchscreen calibration |
 | `stopwatch` | LVGL stopwatch |
+| `gear_roll` | LVGL gear demo |
 
 Every application branch builds an app binary that runs in either launcher slot. `components/cyd_display` (display, 5x7 font, patterns and touch) is copied on each branch.
 
