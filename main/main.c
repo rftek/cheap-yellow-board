@@ -11,8 +11,9 @@
 #include "freertos/task.h"
 #include "lvgl.h"
 
-/* LVGL renders into a strip of DRAW_BUFFER_ROWS rows at a time. */
-#define DRAW_BUFFER_ROWS 24
+/* LVGL renders into a strip of DRAW_BUFFER_ROWS rows at a time. Every
+   strip re-runs the whole gear drawing, so tall strips matter here. */
+#define DRAW_BUFFER_ROWS 80
 #define FRAME_PERIOD_MS 33
 
 #define MIN_TEETH 8
@@ -34,32 +35,16 @@ static const char *TAG = "gear_roll";
 
 static uint16_t draw_buffer[CYD_LCD_WIDTH * DRAW_BUFFER_ROWS];
 static unsigned frames_drawn;
+static int64_t flush_time_us; /* time spent sending pixels, for the log */
 
-typedef struct {
-    const uint16_t *pixels;
-    int left;
-    int top;
-    int width;
-} flush_area_t;
-
-static uint16_t flush_pixel(int x, int y, void *context)
-{
-    const flush_area_t *area = context;
-    return area->pixels[(y - area->top) * area->width + (x - area->left)];
-}
-
-/* LVGL renders row-major RGB565; cyd_draw_pattern reorders the pixels for
+/* LVGL renders row-major RGB565; cyd_draw_bitmap reorders the pixels for
    the panel, which fills windows column by column. */
 static void flush(lv_display_t *display, const lv_area_t *area, uint8_t *pixels)
 {
-    flush_area_t flush_area = {
-        .pixels = (const uint16_t *)pixels,
-        .left = area->x1,
-        .top = area->y1,
-        .width = lv_area_get_width(area),
-    };
-    esp_err_t result = cyd_draw_pattern(area->x1, area->y1, lv_area_get_width(area),
-                                        lv_area_get_height(area), flush_pixel, &flush_area);
+    int64_t start = esp_timer_get_time();
+    esp_err_t result = cyd_draw_bitmap(area->x1, area->y1, lv_area_get_width(area),
+                                       lv_area_get_height(area), (const uint16_t *)pixels);
+    flush_time_us += esp_timer_get_time() - start;
     if (result != ESP_OK) {
         ESP_LOGE(TAG, "Display flush failed: %s", esp_err_to_name(result));
     }
@@ -258,7 +243,18 @@ static void advance(lv_timer_t *timer)
     gears[0].angle = fmodf(gears[0].angle + pitch_speed / gears[0].pitch_radius * seconds,
                            TWO_PI);
     update_follower_angle();
-    lv_obj_invalidate(gear_layer);
+    /* Spinning in place keeps each gear inside its own box, so only those
+       need redrawing, not the text rows and empty corners. */
+    for (int i = 0; i < 2; ++i) {
+        float reach = gears[i].pitch_radius + module_px + 2;
+        lv_area_t box = {
+            .x1 = (int32_t)(gears[i].center_x - reach),
+            .y1 = (int32_t)(gears[i].center_y - reach),
+            .x2 = (int32_t)(gears[i].center_x + reach),
+            .y2 = (int32_t)(gears[i].center_y + reach),
+        };
+        lv_obj_invalidate_area(gear_layer, &box);
+    }
 }
 
 /* A tap on a gear re-cuts it with a new random number of teeth. */
@@ -288,8 +284,11 @@ static void log_frame_rate(lv_timer_t *timer)
 {
     (void)timer;
     static unsigned last_frames;
-    ESP_LOGI(TAG, "%.1f frames/s", (frames_drawn - last_frames) * 1000.0f / FRAME_RATE_LOG_MS);
+    unsigned frames = frames_drawn - last_frames;
+    ESP_LOGI(TAG, "%.1f frames/s, %lld ms/frame sending pixels",
+             frames * 1000.0f / FRAME_RATE_LOG_MS, frames > 0 ? flush_time_us / 1000 / frames : 0);
     last_frames = frames_drawn;
+    flush_time_us = 0;
 }
 
 static void build_scene(void)

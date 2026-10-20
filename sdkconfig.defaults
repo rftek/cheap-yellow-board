@@ -9,4 +9,6 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 CONFIG_LV_COLOR_DEPTH_16=y
 CONFIG_LV_FONT_MONTSERRAT_14=y
 CONFIG_LV_DRAW_SW_COMPLEX=y
+# Single draw unit on purpose: two (LV_OS_FREERTOS) made this scene slower,
+# since each tooth triangle is a tiny task and dispatch overhead dominates.
 CONFIG_LV_USE_LABEL=y

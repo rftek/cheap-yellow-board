@@ -78,6 +78,10 @@ typedef uint16_t (*cyd_pixel_fn)(int x, int y, void *context);
 esp_err_t cyd_draw_pattern(int x, int y, int width, int height,
                            cyd_pixel_fn pixel, void *context);
 
+/* Draws row-major RGB565 pixels (native byte order, as LVGL renders them),
+   reordered for the panel. Much faster than cyd_draw_pattern for bitmaps. */
+esp_err_t cyd_draw_bitmap(int x, int y, int width, int height, const uint16_t *pixels);
+
 /* Packs 8-bit channels into RGB565. */
 static inline uint16_t cyd_rgb(uint8_t red, uint8_t green, uint8_t blue)
 {
