@@ -19,8 +19,8 @@ Each application lives on its own branch of this repository:
 
 ## Playing
 
-- **Steer with the WASD keys** in the bottom-right corner, laid out like a keyboard's: **W** up, with **A** left, **S** down and **D** right beneath it. The pad is 48 × 24 pixels, and a key lights yellow while you hold it. The keys are small for a resistive panel, so a touch up to 10 pixels outside the pad still goes to the nearest key; touches elsewhere do nothing. Like PAC-MAN, the mouse remembers a turn until the next opening, and it keeps running until it meets a wall.
-- **Cheese** is worth 10 points. Eat all 126 pieces to clear the maze.
+- **Steer with the WASD keys** in the bottom-right corner, laid out like a keyboard's: **W** up, with **A** left, **S** down and **D** right beneath it. Each key is 32 × 24 pixels, so the pad is 96 × 48, and a key lights yellow while you hold it. A touch up to 10 pixels outside the pad still goes to the nearest key, for the resistive panel's aim; touches elsewhere do nothing. Like PAC-MAN, the mouse remembers a turn until the next opening, and it keeps running until it meets a wall.
+- **Cheese** is worth 10 points. Eat all 113 pieces to clear the maze.
 - **Big cheese** (the four round ones in the corners, 50 points) scares the cats for 6 seconds, a second less each level down to 2. Scared cats turn blue, slow down and run at random; they flash white just before they recover. Catch one for 200 points, then 400 and 800 for the next ones on the same big cheese. A caught cat's eyes run back to the basket, and it comes out again shortly after.
 - **The cats** take turns wandering to their own corners (7 seconds) and hunting (20 seconds). The orange cat heads straight for you, the white one for four tiles ahead of you, and the pink one only chases from a distance. One starts outside the basket; the other two follow.
 - **The tunnel** on the middle row runs off both sides of the screen.
@@ -31,7 +31,7 @@ Each application lives on its own branch of this repository:
 
 | | |
 |---|---|
-| Maze | 20 × 14 tiles of 16 pixels (320 × 224), under a 16-pixel score bar. The WASD pad's corner is kept out of it: the tiles under the pad are wall (the bottom corners of row 12, mirrored on the left), and maze drawing leaves those pixels to the pad. |
+| Maze | 20 × 14 tiles of 16 pixels (320 × 224), under a 16-pixel score bar. The WASD pad's corner is kept out of it: the tiles under the pad (rows 11-13 of columns 14-19) are wall, the bottom-right corner is reshaped around them with its big cheese moved up to row 9, and maze drawing leaves the keys' pixels to the pad. |
 | Frame rate | 25 frames per second, with speeds in eighths of a pixel per frame |
 | Drawing | No frame buffer. Each frame redraws only the box around the mouse and each cat, composed in a 2 KB buffer first (maze, then cats, then the mouse) and sent with `cyd_draw_bitmap`, so nothing flickers. |
 | Sprites | 16 × 16, stored as text in `main/main.c`; the mouse is turned for each direction, and each cat is recolored when scared |

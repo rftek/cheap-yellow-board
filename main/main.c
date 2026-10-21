@@ -65,8 +65,9 @@ static const char *TAG = "catmouse";
 /* '#' wall, '.' cheese, 'o' big cheese, '-' the basket's door, ' ' empty.
    Row 7 runs off both sides: leaving one side enters the other. The basket
    (row 7, columns 8-11) is closed; cats leave it by appearing on the tile
-   above its door. The bottom corners of row 12 are wall so the WASD pad
-   covers no corridor (the left one only to keep the maze symmetric). */
+   above its door. The WASD pad covers rows 11-13 of columns 14-19, so
+   those are wall and the bottom-right corner is reshaped around them,
+   with its big cheese moved up to row 9. */
 static const char *const MAZE_LAYOUT[ROWS] = {
     "####################",
     "#o.......##.......o#",
@@ -77,10 +78,10 @@ static const char *const MAZE_LAYOUT[ROWS] = {
     "####.#.##--##.#.####",
     "    .#.#    #.#.    ",
     "####.#.######.#.####",
-    "#........##........#",
-    "#.##.###.##.###.##.#",
-    "#o................o#",
-    "###......##......###",
+    "#........##....o####",
+    "#.##.###.##.########",
+    "#o............######",
+    "###......##...######",
     "####################",
 };
 
@@ -315,15 +316,16 @@ static uint16_t maze_pixel(int x, int y)
    S, with A and D either side of it. The tiles under the pad are wall, and
    the maze drawing leaves the pad's corner to it. */
 
-#define KEY_WIDTH 16
-#define KEY_HEIGHT 12
+#define KEY_WIDTH 32
+#define KEY_HEIGHT 24
+#define KEY_GLYPH_SCALE 4
 #define PAD_WIDTH (3 * KEY_WIDTH)
 #define PAD_HEIGHT (2 * KEY_HEIGHT)
 #define PAD_X (CYD_LCD_WIDTH - PAD_WIDTH) /* screen and maze x are the same */
 #define PAD_Y (CYD_LCD_HEIGHT - PAD_HEIGHT)
 #define PAD_MAZE_Y (PAD_Y - HUD_HEIGHT)
-/* Touches this close outside the pad still go to the nearest key: the keys
-   are small for a resistive panel. */
+/* Touches this close outside the pad still go to the nearest key, for the
+   resistive panel's aim. */
 #define PAD_SLOP 10
 #define COLOR_KEY RGB565(60, 70, 110)
 #define COLOR_KEY_PRESSED RGB565(255, 220, 60)
@@ -343,20 +345,24 @@ static const pad_key_t PAD_KEYS[4] = {
 
 static int pressed_key = -1;
 
-/* A 3x5 glyph's pixel at (x, y), drawn at twice its size (6x10). */
-static bool glyph_pixel(uint16_t glyph, int x, int y)
+/* A 3x5 glyph's pixel at (x, y), drawn scale times its size. */
+static bool glyph_pixel(uint16_t glyph, int scale, int x, int y)
 {
-    if (x < 0 || x >= 6 || y < 0 || y >= 10) {
+    if (x < 0 || x >= 3 * scale || y < 0 || y >= 5 * scale) {
         return false;
     }
-    int bits = glyph >> (3 * (4 - y / 2));
-    return (bits >> (2 - x / 2)) & 1;
+    int bits = glyph >> (3 * (4 - y / scale));
+    return (bits >> (2 - x / scale)) & 1;
 }
 
-/* The pad's pixel at (x, y) within it: each key with a one-pixel gap at
-   its right and bottom, lit while pressed. */
-static uint16_t pad_pixel(int x, int y)
+/* The pad's pixel at (x, y) within it, false off the keys (the corners
+   beside W, which show the wall beneath): each key has a one-pixel gap at
+   its right and bottom, a centered letter, and lights while pressed. */
+static bool pad_pixel(int x, int y, uint16_t *color)
 {
+    /* The letter's offset within the key's visible part. */
+    const int letter_x = (KEY_WIDTH - 1 - 3 * KEY_GLYPH_SCALE) / 2;
+    const int letter_y = (KEY_HEIGHT - 1 - 5 * KEY_GLYPH_SCALE) / 2;
     for (int i = 0; i < 4; ++i) {
         const pad_key_t *key = &PAD_KEYS[i];
         int lx = x - key->x;
@@ -364,16 +370,17 @@ static uint16_t pad_pixel(int x, int y)
         if (lx < 0 || lx >= KEY_WIDTH || ly < 0 || ly >= KEY_HEIGHT) {
             continue;
         }
-        if (lx == KEY_WIDTH - 1 || ly == KEY_HEIGHT - 1) {
-            return COLOR_BLACK;
-        }
         bool pressed = i == pressed_key;
-        if (glyph_pixel(key->glyph, lx - 4, ly - 1)) {
-            return pressed ? COLOR_BLACK : COLOR_WHITE;
+        if (lx == KEY_WIDTH - 1 || ly == KEY_HEIGHT - 1) {
+            *color = COLOR_BLACK;
+        } else if (glyph_pixel(key->glyph, KEY_GLYPH_SCALE, lx - letter_x, ly - letter_y)) {
+            *color = pressed ? COLOR_BLACK : COLOR_WHITE;
+        } else {
+            *color = pressed ? COLOR_KEY_PRESSED : COLOR_KEY;
         }
-        return pressed ? COLOR_KEY_PRESSED : COLOR_KEY;
+        return true;
     }
-    return COLOR_BLACK;
+    return false;
 }
 
 /* ---- Drawing ---- */
@@ -437,7 +444,10 @@ static void draw_region(int x0, int y0, int x1, int y1)
     /* The pad's corner is kept out of the maze. */
     for (int y = y0 > PAD_MAZE_Y ? y0 : PAD_MAZE_Y; y < y1; ++y) {
         for (int x = x0 > PAD_X ? x0 : PAD_X; x < x1; ++x) {
-            region[(y - y0) * width + (x - x0)] = pad_pixel(x - PAD_X, y - PAD_MAZE_Y);
+            uint16_t color;
+            if (pad_pixel(x - PAD_X, y - PAD_MAZE_Y, &color)) {
+                region[(y - y0) * width + (x - x0)] = color;
+            }
         }
     }
     ESP_ERROR_CHECK(cyd_draw_bitmap(x0, HUD_HEIGHT + y0, width, height, region));
@@ -495,7 +505,7 @@ static bool digit_pixel(const char *text, int left, int x, int y)
     if (x < left || index >= (int)strlen(text)) {
         return false;
     }
-    return glyph_pixel(DIGITS[text[index] - '0'], cx, cy);
+    return glyph_pixel(DIGITS[text[index] - '0'], 2, cx, cy);
 }
 
 #define LEVEL_ICON_X 136
