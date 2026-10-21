@@ -46,10 +46,20 @@
 #define MAX_REDIRECTS 5
 
 #define SLOT_COUNT 2
-#define MAX_REMOTE_IMAGES 8
+#define MAX_REMOTE_IMAGES 16
+#define MAX_ENTRIES (SLOT_COUNT + MAX_REMOTE_IMAGES)
+#define BRANCH_NAME_SIZE 48
+/* Title, the visible entries, the scroll row, then the status row. */
 #define MENU_FIRST_ROW 1
-#define MENU_ROWS (CYD_TEXT_ROWS - 2)
+#define MENU_ROWS (CYD_TEXT_ROWS - 3)
+#define SCROLL_ROW (MENU_FIRST_ROW + MENU_ROWS)
 #define STATUS_ROW (CYD_TEXT_ROWS - 1)
+
+/* Scroll row layout: which entries are shown, then up and down buttons. */
+#define SCROLL_TEXT_COLUMNS 10
+#define SCROLL_UP_COLUMN 10
+#define SCROLL_DOWN_COLUMN 14
+#define SCROLL_BUTTON_COLUMNS 3
 
 /* Status row layout: status text, then brightness down and up buttons. */
 #define STATUS_TEXT_COLUMNS 10
@@ -69,12 +79,12 @@ static const char *TAG = "cyd_launcher";
 typedef struct {
     const esp_partition_t *partition;
     bool valid;
-    char name[48];                 /* branch name */
+    char name[BRANCH_NAME_SIZE];   /* branch name */
     char version[VERSION_SIZE];    /* empty when flashed some other way */
 } slot_t;
 
 typedef struct {
-    char name[48]; /* branch name */
+    char name[BRANCH_NAME_SIZE]; /* branch name */
     char url[256];
     char version[VERSION_SIZE];
     uint32_t size;
@@ -109,8 +119,10 @@ static remote_image_t remote_images[MAX_REMOTE_IMAGES];
 static int remote_count;
 /* Written by the network task; remote_images is complete once NET_READY is set. */
 static volatile net_state_t net_state = NET_CONNECTING;
-static entry_t entries[MENU_ROWS];
+static entry_t entries[MAX_ENTRIES];
 static int entry_count;
+/* Index of the entry shown on the first menu row. */
+static int scroll_offset;
 static int64_t brightness_shown_until;
 
 /* ---- Stored images ---- */
@@ -358,21 +370,63 @@ static bool remote_is_stored(const remote_image_t *image)
 static void build_entries(void)
 {
     entry_count = 0;
-    for (int i = 0; i < SLOT_COUNT && entry_count < MENU_ROWS; ++i) {
+    for (int i = 0; i < SLOT_COUNT; ++i) {
         if (slots[i].valid) {
             entries[entry_count++] = (entry_t){.kind = ENTRY_SLOT, .index = i};
         }
     }
-    if (net_state != NET_READY) {
-        return;
-    }
-    for (int i = 0; i < remote_count && entry_count < MENU_ROWS; ++i) {
-        if (!remote_is_stored(&remote_images[i])) {
-            entries[entry_count++] = (entry_t){.kind = ENTRY_REMOTE, .index = i};
+    if (net_state == NET_READY) {
+        for (int i = 0; i < remote_count; ++i) {
+            if (!remote_is_stored(&remote_images[i])) {
+                entries[entry_count++] = (entry_t){.kind = ENTRY_REMOTE, .index = i};
+            }
         }
+    }
+    /* The list may have shrunk under the current page. */
+    int max_offset = entry_count > MENU_ROWS ? entry_count - MENU_ROWS : 0;
+    if (scroll_offset > max_offset) {
+        scroll_offset = max_offset;
     }
 }
 
+/* "3-9/9": the entries shown, then the up and down buttons, dimmed at
+   either end of the list. */
+static void draw_scroll_row(void)
+{
+    char position[36] = ""; /* room for any int, to satisfy -Wformat-truncation */
+    int last_shown = scroll_offset + MENU_ROWS < entry_count ? scroll_offset + MENU_ROWS
+                                                             : entry_count;
+    if (entry_count > 0) {
+        snprintf(position, sizeof(position), "%d-%d/%d", scroll_offset + 1, last_shown,
+                 entry_count);
+    }
+
+    char text[CYD_TEXT_COLUMNS + 1];
+    uint16_t foreground[CYD_TEXT_COLUMNS];
+    uint16_t background[CYD_TEXT_COLUMNS];
+    memset(text, ' ', CYD_TEXT_COLUMNS);
+    text[CYD_TEXT_COLUMNS] = '\0';
+    memcpy(text, position, strnlen(position, SCROLL_TEXT_COLUMNS));
+    for (int i = 0; i < CYD_TEXT_COLUMNS; ++i) {
+        foreground[i] = CYD_COLOR_GRAY;
+        background[i] = CYD_COLOR_BLACK;
+    }
+    bool can_scroll_up = scroll_offset > 0;
+    bool can_scroll_down = last_shown < entry_count;
+    for (int i = 0; i < SCROLL_BUTTON_COLUMNS; ++i) {
+        background[SCROLL_UP_COLUMN + i] = CYD_COLOR_BUTTON;
+        foreground[SCROLL_UP_COLUMN + i] =
+            can_scroll_up ? CYD_COLOR_WHITE : CYD_COLOR_BUTTON_DISABLED;
+        background[SCROLL_DOWN_COLUMN + i] = CYD_COLOR_BUTTON;
+        foreground[SCROLL_DOWN_COLUMN + i] =
+            can_scroll_down ? CYD_COLOR_WHITE : CYD_COLOR_BUTTON_DISABLED;
+    }
+    text[SCROLL_UP_COLUMN + 1] = CYD_GLYPH_UP;
+    text[SCROLL_DOWN_COLUMN + 1] = CYD_GLYPH_DOWN;
+    ESP_ERROR_CHECK(cyd_draw_cells(SCROLL_ROW, text, foreground, background));
+}
+
+/* Draws entries[index], which must be on the current page. */
 static void draw_entry(int index, bool highlighted)
 {
     char line[CYD_TEXT_COLUMNS + 1];
@@ -386,23 +440,41 @@ static void draw_entry(int index, bool highlighted)
         snprintf(line, sizeof(line), "+ %.15s", remote_images[entry->index].name);
         color = CYD_COLOR_CYAN;
     }
+    int row = MENU_FIRST_ROW + index - scroll_offset;
     if (highlighted) {
-        ESP_ERROR_CHECK(cyd_text_row(MENU_FIRST_ROW + index, CYD_COLOR_BLACK, CYD_COLOR_WHITE,
-                                     line));
+        ESP_ERROR_CHECK(cyd_text_row(row, CYD_COLOR_BLACK, CYD_COLOR_WHITE, line));
     } else {
-        ESP_ERROR_CHECK(cyd_text_row(MENU_FIRST_ROW + index, color, CYD_COLOR_BUTTON, line));
+        ESP_ERROR_CHECK(cyd_text_row(row, color, CYD_COLOR_BUTTON, line));
     }
 }
 
 static void draw_entries(void)
 {
     for (int i = 0; i < MENU_ROWS; ++i) {
-        if (i < entry_count) {
-            draw_entry(i, false);
+        if (scroll_offset + i < entry_count) {
+            draw_entry(scroll_offset + i, false);
         } else {
             ESP_ERROR_CHECK(cyd_text_row(MENU_FIRST_ROW + i, CYD_COLOR_WHITE, CYD_COLOR_BLACK,
                                          ""));
         }
+    }
+    draw_scroll_row();
+}
+
+/* Pages the menu by its visible height, stopping with the last page full. */
+static void scroll_menu(int direction)
+{
+    int max_offset = entry_count - MENU_ROWS;
+    int offset = scroll_offset + direction * MENU_ROWS;
+    if (offset > max_offset) {
+        offset = max_offset;
+    }
+    if (offset < 0) {
+        offset = 0;
+    }
+    if (offset != scroll_offset) {
+        scroll_offset = offset;
+        draw_entries();
     }
 }
 
@@ -634,7 +706,7 @@ static bool find_branch_image(const char *json, const char *branch, remote_image
     const char *end = json + strlen(json);
     for (const char *tag = json_value(json, end, "tag_name"); tag != NULL;
          tag = json_value(tag, end, "tag_name")) {
-        char tag_name[48];
+        char tag_name[BRANCH_NAME_SIZE];
         if (!json_copy_string(tag, tag_name, sizeof(tag_name)) || strcmp(tag_name, branch) != 0) {
             continue;
         }
@@ -710,7 +782,8 @@ static net_state_t fetch_branch_images(void)
     esp_http_client_set_header(client, "Accept", "application/vnd.github+json");
 
     net_state_t state = NET_GITHUB_ERROR;
-    char branches[MAX_REMOTE_IMAGES][48];
+    /* Static: the network task's stack also carries the TLS session. */
+    static char branches[MAX_REMOTE_IMAGES][BRANCH_NAME_SIZE];
     int branch_count = 0;
     if (github_get(client, &buffer, BRANCHES_URL) == ESP_OK) {
         const char *end = buffer.data + buffer.length;
@@ -974,9 +1047,11 @@ void app_main(void)
     while (true) {
         cyd_touch_point_t point;
         if (xQueueReceive(touch_queue, &point, pdMS_TO_TICKS(50)) == pdTRUE) {
-            int row = point.y / CYD_FONT_HEIGHT - MENU_FIRST_ROW;
-            if (row >= 0 && row < entry_count) {
-                activate_entry(row);
+            int screen_row = point.y / CYD_FONT_HEIGHT;
+            int index = scroll_offset + screen_row - MENU_FIRST_ROW;
+            if (screen_row >= MENU_FIRST_ROW && screen_row < MENU_FIRST_ROW + MENU_ROWS &&
+                index < entry_count) {
+                activate_entry(index);
                 /* Still here: booting or downloading failed. Start over. */
                 boot_choice = default_slot();
                 counting = boot_choice >= 0;
@@ -986,9 +1061,17 @@ void app_main(void)
                     draw_title("NO IMAGES");
                 }
             } else {
-                /* Any other tap, brightness buttons included, buys more time to choose. */
+                /* Any other tap, scroll and brightness buttons included, buys more
+                   time to choose. */
                 int column = point.x / CYD_FONT_WIDTH;
-                if (point.y / CYD_FONT_HEIGHT == STATUS_ROW) {
+                if (screen_row == SCROLL_ROW) {
+                    if (column >= SCROLL_UP_COLUMN &&
+                        column < SCROLL_UP_COLUMN + SCROLL_BUTTON_COLUMNS) {
+                        scroll_menu(-1);
+                    } else if (column >= SCROLL_DOWN_COLUMN) {
+                        scroll_menu(1);
+                    }
+                } else if (screen_row == STATUS_ROW) {
                     if (column >= BRIGHTNESS_DOWN_COLUMN &&
                         column < BRIGHTNESS_DOWN_COLUMN + BRIGHTNESS_BUTTON_COLUMNS) {
                         change_brightness(-CYD_BRIGHTNESS_STEP);

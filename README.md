@@ -21,11 +21,11 @@ Every application branch builds an app binary that runs in either launcher slot.
 
 On power-on, including the EN button, the custom bootloader (`bootloader_components/main`) always starts the launcher. Any other reset, such as the launcher's own restart or an image crashing, goes straight back to the chosen image.
 
-1. The menu immediately lists the stored images, marking the default with `*`, and counts down from 20 seconds.
+1. The menu immediately lists the stored images, marking the default with `*`, and counts down from 20 seconds. It shows seven entries at a time: the row above the status row says which (such as `1-7/9`), and its ▲ and ▼ buttons page through the rest.
 2. When the countdown ends, the last-used image boots. The very first time, it is the first stored image.
-3. Tapping anywhere except an image adds another 20 seconds. Tap an image to boot it right away.
+3. Tapping anywhere except an image, the scroll buttons included, adds another 20 seconds. Tap an image to boot it right away.
    - The ▼ and ▲ buttons at the bottom right dim or brighten the backlight in 20% steps, between 20% and 100%. The new level shows briefly on the status row and is saved in NVS (`cyd_config/brightness`). Every image starts at that level, because the shared display driver reads it.
-4. Meanwhile the launcher joins Wi-Fi and lists the branches of `rftek/cheap-yellow-board`, skipping `bootloader`, `main` and the `How_to_Build` documentation branch. For each remaining branch it looks for `firmware.bin` on the release tagged with the branch name. This usually takes about 10 seconds. Each branch whose current build isn't stored appears in cyan as `+ branch`: either a new application or a newer build of a stored one. Tapping one downloads it into a slot, with progress, and boots it. A branch with no published build yet is skipped and logged. If Wi-Fi or GitHub doesn't answer, the status row says `offline` (or `GitHub error`) and nothing else changes.
+4. Meanwhile the launcher joins Wi-Fi and lists the branches of `rftek/cheap-yellow-board`, skipping `bootloader`, `main` and the `How_to_Build` documentation branch. For each remaining branch, up to 16, it looks for `firmware.bin` on the release tagged with the branch name. This usually takes about 10 seconds. Each branch whose current build isn't stored appears in cyan as `+ branch`: either a new application or a newer build of a stored one. Tapping one downloads it into a slot, with progress, and boots it. A branch with no published build yet is skipped and logged. If Wi-Fi or GitHub doesn't answer, the status row says `offline` (or `GitHub error`) and nothing else changes.
 
 A download replaces the slot holding the same branch if there is one. Otherwise it fills an empty slot, or overwrites the slot that does not boot by default. Each slot remembers its branch and the asset's `updated_at` time in NVS, so a rebuilt branch shows up again as an update.
 
