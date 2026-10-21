@@ -613,10 +613,11 @@ static bool json_copy_string(const char *value, char *output, size_t size)
     return *value == '"';
 }
 
-/* The launcher itself and the legacy main branch are not boot images. */
+/* Branches that are not boot images: the launcher itself, the legacy main
+   branch and the documentation. */
 static bool branch_is_excluded(const char *branch)
 {
-    static const char *const excluded[] = {"bootloader", "main"};
+    static const char *const excluded[] = {"bootloader", "main", "How_to_Build"};
     for (size_t i = 0; i < sizeof(excluded) / sizeof(excluded[0]); ++i) {
         if (strcmp(branch, excluded[i]) == 0) {
             return true;
