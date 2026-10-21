@@ -88,6 +88,7 @@ The branches:
 | `touchscreen_cal` | Touchscreen calibration | Yes |
 | `stopwatch` | LVGL stopwatch | Yes |
 | `gear_roll` | LVGL gear demo | Yes |
+| `Datalogger` | CH1 voltage logger (GPIO35) | Yes |
 | `How_to_Build` | This documentation | No |
 | `main` | The original BirdNET viewer, superseded by `birdnet_viewer` | No |
 

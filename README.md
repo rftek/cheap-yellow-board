@@ -13,6 +13,7 @@ Documentation for building, flashing and publishing the applications in this rep
 | `touchscreen_cal` | Touchscreen calibration |
 | `stopwatch` | LVGL stopwatch |
 | `gear_roll` | LVGL gear demo |
+| `Datalogger` | Voltage logger on GPIO35 |
 | `How_to_Build` | This documentation |
 
 Each application branch has its own README describing what the app does and how it is put together.
