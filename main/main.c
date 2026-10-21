@@ -1,3 +1,4 @@
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -49,25 +50,34 @@
 #define MAX_REMOTE_IMAGES 16
 #define MAX_ENTRIES (SLOT_COUNT + MAX_REMOTE_IMAGES)
 #define BRANCH_NAME_SIZE 48
-/* Title, the visible entries, the scroll row, then the status row. */
+/* The menu fills the columns left of the brightness slider: the title, the
+   visible entries, the scroll row, then the info row. */
+#define MENU_COLUMNS (CYD_TEXT_COLUMNS - BRIGHTNESS_COLUMNS)
 #define MENU_FIRST_ROW 1
 #define MENU_ROWS (CYD_TEXT_ROWS - 3)
 #define SCROLL_ROW (MENU_FIRST_ROW + MENU_ROWS)
-#define STATUS_ROW (CYD_TEXT_ROWS - 1)
+#define INFO_ROW (CYD_TEXT_ROWS - 1)
 
 /* Scroll row layout: which entries are shown, then up and down buttons. */
-#define SCROLL_TEXT_COLUMNS 10
-#define SCROLL_UP_COLUMN 10
-#define SCROLL_DOWN_COLUMN 14
+#define SCROLL_TEXT_COLUMNS 7
+#define SCROLL_UP_COLUMN 7
+#define SCROLL_DOWN_COLUMN 11
 #define SCROLL_BUTTON_COLUMNS 3
 
-/* Status row layout: status text, then brightness down and up buttons. */
-#define STATUS_TEXT_COLUMNS 10
-#define BRIGHTNESS_DOWN_COLUMN 10
-#define BRIGHTNESS_UP_COLUMN 14
-#define BRIGHTNESS_BUTTON_COLUMNS 3
-/* How long the new level replaces the status text after a press. */
-#define BRIGHTNESS_SHOWN_US (1500LL * 1000)
+/* The brightness slider down the right edge: a + button, one bar segment
+   per level with the brightest at the top, a - button and the level. */
+#define BRIGHTNESS_COLUMNS 3
+#define BRIGHTNESS_COLUMN (CYD_TEXT_COLUMNS - BRIGHTNESS_COLUMNS)
+#define BRIGHTNESS_LEVELS ((CYD_BRIGHTNESS_MAX - CYD_BRIGHTNESS_MIN) / CYD_BRIGHTNESS_STEP + 1)
+#define BRIGHTNESS_UP_ROW 1
+#define BRIGHTNESS_BAR_ROW (BRIGHTNESS_UP_ROW + 1)
+#define BRIGHTNESS_DOWN_ROW (BRIGHTNESS_BAR_ROW + BRIGHTNESS_LEVELS)
+#define BRIGHTNESS_LABEL_ROW (BRIGHTNESS_DOWN_ROW + 1)
+
+/* The info row cycles through the network activity, the address, the
+   signal and the free RAM; new activity shows at once. */
+#define INFO_PAGE_US (2500LL * 1000)
+#define ACTIVITY_SIZE (MENU_COLUMNS + 1)
 
 #define WIFI_CONNECTED_BIT BIT0
 
@@ -123,7 +133,20 @@ static entry_t entries[MAX_ENTRIES];
 static int entry_count;
 /* Index of the entry shown on the first menu row. */
 static int scroll_offset;
-static int64_t brightness_shown_until;
+static char title_text[MENU_COLUMNS + 1];
+
+typedef enum { INFO_ACTIVITY, INFO_ADDRESS, INFO_SIGNAL, INFO_RAM, INFO_PAGE_COUNT } info_page_t;
+
+/* What the network is doing, in words, from the network task and the
+   Wi-Fi event handler. */
+static portMUX_TYPE activity_lock = portMUX_INITIALIZER_UNLOCKED;
+static char activity[ACTIVITY_SIZE] = "starting";
+static volatile uint32_t activity_changes;
+static volatile bool wifi_connected;
+static volatile uint16_t wifi_disconnect_reason;
+static esp_ip4_addr_t wifi_address;
+static info_page_t info_page;
+static int64_t info_page_until;
 
 /* ---- Stored images ---- */
 
@@ -277,80 +300,133 @@ static int default_slot(void)
 
 /* ---- Screen ---- */
 
-static void draw_title(const char *text)
+/* The level a bar segment of the brightness slider stands for. */
+static int brightness_bar_level(int row)
 {
-    ESP_ERROR_CHECK(cyd_text_row(0, CYD_COLOR_YELLOW, CYD_COLOR_BLACK, text));
+    return CYD_BRIGHTNESS_MAX - (row - BRIGHTNESS_BAR_ROW) * CYD_BRIGHTNESS_STEP;
 }
 
-/* Network status, or the new brightness just after a press, then the
-   brightness buttons, dimmed at either end of the range. */
-static void draw_status(void)
+/* Fills in this row's cells of the brightness slider: the + and - buttons
+   dimmed at either end of the range, the bar lit up to the current level,
+   and the level below them. */
+static void brightness_cells(int row, char *text, uint16_t *foreground, uint16_t *background)
 {
-    char status[16];
-    if (esp_timer_get_time() < brightness_shown_until) {
-        snprintf(status, sizeof(status), "%d%% light", cyd_get_brightness());
-    } else {
-        switch (net_state) {
-        case NET_CONNECTING:
-            snprintf(status, sizeof(status), "Wi-Fi...");
-            break;
-        case NET_FETCHING:
-            snprintf(status, sizeof(status), "GitHub...");
-            break;
-        case NET_READY:
-            snprintf(status, sizeof(status), "%d online", remote_count);
-            break;
-        case NET_GITHUB_ERROR:
-            snprintf(status, sizeof(status), "no GitHub");
-            break;
-        default:
-            snprintf(status, sizeof(status), "offline");
-            break;
-        }
+    int level = cyd_get_brightness();
+    for (int i = BRIGHTNESS_COLUMN; i < CYD_TEXT_COLUMNS; ++i) {
+        text[i] = ' ';
+        foreground[i] = CYD_COLOR_GRAY;
+        background[i] = CYD_COLOR_BLACK;
     }
+    if (row == BRIGHTNESS_UP_ROW || row == BRIGHTNESS_DOWN_ROW) {
+        bool up = row == BRIGHTNESS_UP_ROW;
+        bool enabled = up ? level < CYD_BRIGHTNESS_MAX : level > CYD_BRIGHTNESS_MIN;
+        for (int i = BRIGHTNESS_COLUMN; i < CYD_TEXT_COLUMNS; ++i) {
+            foreground[i] = enabled ? CYD_COLOR_WHITE : CYD_COLOR_BUTTON_DISABLED;
+            background[i] = CYD_COLOR_BUTTON;
+        }
+        text[BRIGHTNESS_COLUMN + 1] = up ? '+' : '-';
+    } else if (row >= BRIGHTNESS_BAR_ROW && row < BRIGHTNESS_DOWN_ROW) {
+        uint16_t color = brightness_bar_level(row) <= level ? CYD_COLOR_YELLOW : CYD_COLOR_BUTTON;
+        for (int i = BRIGHTNESS_COLUMN; i < CYD_TEXT_COLUMNS; ++i) {
+            background[i] = color;
+        }
+    } else if (row == BRIGHTNESS_LABEL_ROW) {
+        /* "100%" loses its '%' to fit. */
+        char label[16];
+        snprintf(label, sizeof(label), "%d%%", level);
+        memcpy(text + BRIGHTNESS_COLUMN, label, strnlen(label, BRIGHTNESS_COLUMNS));
+    }
+}
 
+/* Draws MENU_COLUMNS cells of menu, then the row's part of the slider. */
+static void draw_menu_cells(int row, const char *menu_text, const uint16_t *menu_foreground,
+                            const uint16_t *menu_background)
+{
     char text[CYD_TEXT_COLUMNS + 1];
     uint16_t foreground[CYD_TEXT_COLUMNS];
     uint16_t background[CYD_TEXT_COLUMNS];
     memset(text, ' ', CYD_TEXT_COLUMNS);
     text[CYD_TEXT_COLUMNS] = '\0';
-    memcpy(text, status, strnlen(status, STATUS_TEXT_COLUMNS));
-    for (int i = 0; i < CYD_TEXT_COLUMNS; ++i) {
-        foreground[i] = CYD_COLOR_GRAY;
-        background[i] = CYD_COLOR_BLACK;
-    }
-    bool can_dim = cyd_get_brightness() > CYD_BRIGHTNESS_MIN;
-    bool can_brighten = cyd_get_brightness() < CYD_BRIGHTNESS_MAX;
-    for (int i = 0; i < BRIGHTNESS_BUTTON_COLUMNS; ++i) {
-        background[BRIGHTNESS_DOWN_COLUMN + i] = CYD_COLOR_BUTTON;
-        foreground[BRIGHTNESS_DOWN_COLUMN + i] =
-            can_dim ? CYD_COLOR_WHITE : CYD_COLOR_BUTTON_DISABLED;
-        background[BRIGHTNESS_UP_COLUMN + i] = CYD_COLOR_BUTTON;
-        foreground[BRIGHTNESS_UP_COLUMN + i] =
-            can_brighten ? CYD_COLOR_WHITE : CYD_COLOR_BUTTON_DISABLED;
-    }
-    text[BRIGHTNESS_DOWN_COLUMN + 1] = CYD_GLYPH_DOWN;
-    text[BRIGHTNESS_UP_COLUMN + 1] = CYD_GLYPH_UP;
-    ESP_ERROR_CHECK(cyd_draw_cells(STATUS_ROW, text, foreground, background));
+    memcpy(text, menu_text, strnlen(menu_text, MENU_COLUMNS));
+    memcpy(foreground, menu_foreground, MENU_COLUMNS * sizeof(foreground[0]));
+    memcpy(background, menu_background, MENU_COLUMNS * sizeof(background[0]));
+    brightness_cells(row, text, foreground, background);
+    ESP_ERROR_CHECK(cyd_draw_cells(row, text, foreground, background));
 }
 
-/* Steps the backlight by delta percent and saves it for every image. */
-static void change_brightness(int delta)
+/* Like cyd_text_row, but only across the menu columns. */
+static void draw_menu_row(int row, uint16_t foreground, uint16_t background, const char *text)
 {
-    int before = cyd_get_brightness();
-    ESP_ERROR_CHECK(cyd_set_brightness(before + delta));
-    int after = cyd_get_brightness();
-    if (after != before) {
-        nvs_handle_t nvs;
-        if (nvs_open(CONFIG_NAMESPACE, NVS_READWRITE, &nvs) == ESP_OK) {
-            nvs_set_u8(nvs, CYD_CONFIG_BRIGHTNESS, (uint8_t)after);
-            nvs_commit(nvs);
-            nvs_close(nvs);
-        }
-        ESP_LOGI(TAG, "Brightness %d%%", after);
+    uint16_t foregrounds[MENU_COLUMNS];
+    uint16_t backgrounds[MENU_COLUMNS];
+    for (int i = 0; i < MENU_COLUMNS; ++i) {
+        foregrounds[i] = foreground;
+        backgrounds[i] = background;
     }
-    brightness_shown_until = esp_timer_get_time() + BRIGHTNESS_SHOWN_US;
-    draw_status();
+    draw_menu_cells(row, text, foregrounds, backgrounds);
+}
+
+static void draw_title(const char *text)
+{
+    if (text != title_text) {
+        snprintf(title_text, sizeof(title_text), "%s", text);
+    }
+    draw_menu_row(0, CYD_COLOR_YELLOW, CYD_COLOR_BLACK, title_text);
+}
+
+static void set_activity(const char *format, ...) __attribute__((format(printf, 1, 2)));
+
+static void set_activity(const char *format, ...)
+{
+    char text[ACTIVITY_SIZE];
+    va_list arguments;
+    va_start(arguments, format);
+    vsnprintf(text, sizeof(text), format, arguments);
+    va_end(arguments);
+    portENTER_CRITICAL(&activity_lock);
+    memcpy(activity, text, sizeof(activity));
+    ++activity_changes;
+    portEXIT_CRITICAL(&activity_lock);
+}
+
+/* One page of information: what the network is doing, the address and
+   signal once joined, or the free RAM. */
+static void draw_info(void)
+{
+    char text[48] = ""; /* room for a whole SSID, to satisfy -Wformat-truncation */
+    switch (info_page) {
+    case INFO_ACTIVITY:
+        portENTER_CRITICAL(&activity_lock);
+        memcpy(text, activity, sizeof(activity));
+        portEXIT_CRITICAL(&activity_lock);
+        break;
+    case INFO_ADDRESS:
+        snprintf(text, sizeof(text), IPSTR, IP2STR(&wifi_address));
+        break;
+    case INFO_SIGNAL: {
+        wifi_ap_record_t ap;
+        if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+            snprintf(text, sizeof(text), "%ddBm %.*s", ap.rssi, (int)sizeof(ap.ssid),
+                     (const char *)ap.ssid);
+        }
+        break;
+    }
+    default:
+        snprintf(text, sizeof(text), "RAM %uK free", (unsigned)(esp_get_free_heap_size() / 1024));
+        break;
+    }
+    draw_menu_row(INFO_ROW, CYD_COLOR_GRAY, CYD_COLOR_BLACK, text);
+}
+
+/* Moves to the next info page, skipping the address and signal until
+   Wi-Fi has joined. */
+static void next_info_page(void)
+{
+    do {
+        info_page = (info_page + 1) % INFO_PAGE_COUNT;
+    } while (!wifi_connected && (info_page == INFO_ADDRESS || info_page == INFO_SIGNAL));
+    info_page_until = esp_timer_get_time() + INFO_PAGE_US;
+    draw_info();
 }
 
 /* True when a slot already holds this exact build of the branch. */
@@ -399,15 +475,18 @@ static void draw_scroll_row(void)
     if (entry_count > 0) {
         snprintf(position, sizeof(position), "%d-%d/%d", scroll_offset + 1, last_shown,
                  entry_count);
+        if (strlen(position) > SCROLL_TEXT_COLUMNS) {
+            snprintf(position, sizeof(position), "%d-%d", scroll_offset + 1, last_shown);
+        }
     }
 
-    char text[CYD_TEXT_COLUMNS + 1];
-    uint16_t foreground[CYD_TEXT_COLUMNS];
-    uint16_t background[CYD_TEXT_COLUMNS];
-    memset(text, ' ', CYD_TEXT_COLUMNS);
-    text[CYD_TEXT_COLUMNS] = '\0';
+    char text[MENU_COLUMNS + 1];
+    uint16_t foreground[MENU_COLUMNS];
+    uint16_t background[MENU_COLUMNS];
+    memset(text, ' ', MENU_COLUMNS);
+    text[MENU_COLUMNS] = '\0';
     memcpy(text, position, strnlen(position, SCROLL_TEXT_COLUMNS));
-    for (int i = 0; i < CYD_TEXT_COLUMNS; ++i) {
+    for (int i = 0; i < MENU_COLUMNS; ++i) {
         foreground[i] = CYD_COLOR_GRAY;
         background[i] = CYD_COLOR_BLACK;
     }
@@ -423,7 +502,7 @@ static void draw_scroll_row(void)
     }
     text[SCROLL_UP_COLUMN + 1] = CYD_GLYPH_UP;
     text[SCROLL_DOWN_COLUMN + 1] = CYD_GLYPH_DOWN;
-    ESP_ERROR_CHECK(cyd_draw_cells(SCROLL_ROW, text, foreground, background));
+    draw_menu_cells(SCROLL_ROW, text, foreground, background);
 }
 
 /* Draws entries[index], which must be on the current page. */
@@ -434,17 +513,17 @@ static void draw_entry(int index, bool highlighted)
     const entry_t *entry = &entries[index];
     if (entry->kind == ENTRY_SLOT) {
         /* "A*name": slot letter, '*' on the image that boots by default. */
-        snprintf(line, sizeof(line), "%c%c%.15s", 'A' + entry->index,
+        snprintf(line, sizeof(line), "%c%c%.12s", 'A' + entry->index,
                  entry->index == default_slot() ? '*' : ' ', slots[entry->index].name);
     } else {
-        snprintf(line, sizeof(line), "+ %.15s", remote_images[entry->index].name);
+        snprintf(line, sizeof(line), "+ %.12s", remote_images[entry->index].name);
         color = CYD_COLOR_CYAN;
     }
     int row = MENU_FIRST_ROW + index - scroll_offset;
     if (highlighted) {
-        ESP_ERROR_CHECK(cyd_text_row(row, CYD_COLOR_BLACK, CYD_COLOR_WHITE, line));
+        draw_menu_row(row, CYD_COLOR_BLACK, CYD_COLOR_WHITE, line);
     } else {
-        ESP_ERROR_CHECK(cyd_text_row(row, color, CYD_COLOR_BUTTON, line));
+        draw_menu_row(row, color, CYD_COLOR_BUTTON, line);
     }
 }
 
@@ -454,8 +533,7 @@ static void draw_entries(void)
         if (scroll_offset + i < entry_count) {
             draw_entry(scroll_offset + i, false);
         } else {
-            ESP_ERROR_CHECK(cyd_text_row(MENU_FIRST_ROW + i, CYD_COLOR_WHITE, CYD_COLOR_BLACK,
-                                         ""));
+            draw_menu_row(MENU_FIRST_ROW + i, CYD_COLOR_WHITE, CYD_COLOR_BLACK, "");
         }
     }
     draw_scroll_row();
@@ -482,7 +560,40 @@ static void draw_menu(const char *title)
 {
     draw_title(title);
     draw_entries();
-    draw_status();
+    draw_info();
+}
+
+/* Sets the backlight, saves it for every image and redraws the slider,
+   which runs down every row. */
+static void set_brightness(int level)
+{
+    int before = cyd_get_brightness();
+    ESP_ERROR_CHECK(cyd_set_brightness(level));
+    int after = cyd_get_brightness();
+    if (after == before) {
+        return;
+    }
+    nvs_handle_t nvs;
+    if (nvs_open(CONFIG_NAMESPACE, NVS_READWRITE, &nvs) == ESP_OK) {
+        nvs_set_u8(nvs, CYD_CONFIG_BRIGHTNESS, (uint8_t)after);
+        nvs_commit(nvs);
+        nvs_close(nvs);
+    }
+    ESP_LOGI(TAG, "Brightness %d%%", after);
+    draw_menu(title_text);
+}
+
+/* + and - step the level; a bar segment sets its own level. */
+static void brightness_tap(int row)
+{
+    int level = cyd_get_brightness();
+    if (row == BRIGHTNESS_UP_ROW) {
+        set_brightness(level + CYD_BRIGHTNESS_STEP);
+    } else if (row == BRIGHTNESS_DOWN_ROW) {
+        set_brightness(level - CYD_BRIGHTNESS_STEP);
+    } else if (row >= BRIGHTNESS_BAR_ROW && row < BRIGHTNESS_DOWN_ROW) {
+        set_brightness(brightness_bar_level(row));
+    }
 }
 
 /* Full-screen message; returns after the next tap. */
@@ -492,10 +603,10 @@ static void show_message_and_wait(const char *title, const char *line1, const ch
         const char *text = row == 0 ? title
                            : row == 2 ? line1
                            : row == 3 ? line2
-                           : row == STATUS_ROW ? "tap to continue"
+                           : row == CYD_TEXT_ROWS - 1 ? "tap to continue"
                                                : "";
         uint16_t color = row == 0 ? CYD_COLOR_RED
-                         : row == STATUS_ROW ? CYD_COLOR_GRAY
+                         : row == CYD_TEXT_ROWS - 1 ? CYD_COLOR_GRAY
                                              : CYD_COLOR_WHITE;
         ESP_ERROR_CHECK(cyd_text_row(row, color, CYD_COLOR_BLACK, text != NULL ? text : ""));
     }
@@ -525,19 +636,52 @@ static void boot_slot(int slot)
 
 /* ---- Network ---- */
 
+/* Says why Wi-Fi did not join, as far as the driver knows. */
+static void report_wifi_failure(void)
+{
+    switch (wifi_disconnect_reason) {
+    case 0:
+        set_activity("Wi-Fi timeout");
+        break;
+    case WIFI_REASON_NO_AP_FOUND:
+        set_activity("no AP found");
+        break;
+    case WIFI_REASON_AUTH_EXPIRE:
+    case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+    case WIFI_REASON_AUTH_FAIL:
+    case WIFI_REASON_HANDSHAKE_TIMEOUT:
+        set_activity("bad password?");
+        break;
+    case WIFI_REASON_BEACON_TIMEOUT:
+        set_activity("signal lost");
+        break;
+    default:
+        set_activity("Wi-Fi error %u", (unsigned)wifi_disconnect_reason);
+        break;
+    }
+}
+
 static void wifi_event_handler(void *argument, esp_event_base_t event_base, int32_t event_id,
                                void *event_data)
 {
     (void)argument;
-    (void)event_data;
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        const wifi_event_sta_disconnected_t *disconnected = event_data;
         xEventGroupClearBits(wifi_events, WIFI_CONNECTED_BIT);
+        wifi_connected = false;
         if (!wifi_give_up) {
+            /* Retrying: show why the last attempt failed. */
+            wifi_disconnect_reason = disconnected->reason;
+            report_wifi_failure();
             esp_wifi_connect();
         }
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        const ip_event_got_ip_t *got_ip = event_data;
+        wifi_address = got_ip->ip_info.ip;
+        wifi_connected = true;
+        set_activity("Wi-Fi joined");
         xEventGroupSetBits(wifi_events, WIFI_CONNECTED_BIT);
     }
 }
@@ -561,13 +705,11 @@ static bool wifi_wait_connected(void)
 static bool wifi_connect(void)
 {
     wifi_events = xEventGroupCreate();
+    wifi_init_config_t init_config = WIFI_INIT_CONFIG_DEFAULT();
     if (wifi_events == NULL || esp_netif_init() != ESP_OK ||
         esp_event_loop_create_default() != ESP_OK ||
-        esp_netif_create_default_wifi_sta() == NULL) {
-        return false;
-    }
-    wifi_init_config_t init_config = WIFI_INIT_CONFIG_DEFAULT();
-    if (esp_wifi_init(&init_config) != ESP_OK) {
+        esp_netif_create_default_wifi_sta() == NULL || esp_wifi_init(&init_config) != ESP_OK) {
+        set_activity("Wi-Fi init err");
         return false;
     }
     esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL);
@@ -579,11 +721,14 @@ static bool wifi_connect(void)
     load_config_string("wifi_ssid", WIFI_SSID, ssid, sizeof(ssid));
     load_config_string("wifi_pass", WIFI_PASSWORD, password, sizeof(password));
     esp_wifi_set_storage(WIFI_STORAGE_RAM);
+    set_activity("join %s", ssid);
     if (esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK) {
+        set_activity("Wi-Fi init err");
         return false;
     }
     set_wifi_network(ssid, password);
     if (esp_wifi_start() != ESP_OK) {
+        set_activity("Wi-Fi init err");
         return false;
     }
     bool connected = wifi_wait_connected();
@@ -594,6 +739,8 @@ static bool wifi_connect(void)
         wifi_give_up = true;
         esp_wifi_disconnect();
         vTaskDelay(pdMS_TO_TICKS(100));
+        set_activity("join %s", WIFI_SSID);
+        wifi_disconnect_reason = 0;
         set_wifi_network(WIFI_SSID, WIFI_PASSWORD);
         wifi_give_up = false;
         esp_wifi_connect();
@@ -602,6 +749,7 @@ static bool wifi_connect(void)
     if (!connected) {
         wifi_give_up = true;
         esp_wifi_stop();
+        report_wifi_failure();
     }
     return connected;
 }
@@ -752,10 +900,14 @@ static esp_err_t github_get(esp_http_client_handle_t client, http_buffer_t *buff
     int status = esp_http_client_get_status_code(client);
     if (result != ESP_OK) {
         ESP_LOGW(TAG, "GitHub request failed: %s", esp_err_to_name(result));
+        /* "ESP_ERR_HTTP_CONNECT" shows as "HTTP_CONNECT". */
+        const char *name = esp_err_to_name(result);
+        set_activity("%s", strncmp(name, "ESP_ERR_", 8) == 0 ? name + 8 : name);
         return result;
     }
     if (status != 200 || buffer->data == NULL) {
         ESP_LOGW(TAG, "GitHub returned HTTP %d for %s", status, url);
+        set_activity("GitHub err %d", status);
         return ESP_ERR_INVALID_RESPONSE;
     }
     return ESP_OK;
@@ -785,6 +937,7 @@ static net_state_t fetch_branch_images(void)
     /* Static: the network task's stack also carries the TLS session. */
     static char branches[MAX_REMOTE_IMAGES][BRANCH_NAME_SIZE];
     int branch_count = 0;
+    set_activity("GET branches");
     if (github_get(client, &buffer, BRANCHES_URL) == ESP_OK) {
         const char *end = buffer.data + buffer.length;
         for (const char *name = json_value(buffer.data, end, "name");
@@ -795,6 +948,7 @@ static net_state_t fetch_branch_images(void)
                 ++branch_count;
             }
         }
+        set_activity("GET releases");
         if (github_get(client, &buffer, RELEASES_URL) == ESP_OK) {
             remote_count = 0;
             for (int i = 0; i < branch_count; ++i) {
@@ -808,6 +962,7 @@ static net_state_t fetch_branch_images(void)
                              IMAGE_ASSET_NAME);
                 }
             }
+            set_activity("%d on GitHub", remote_count);
             state = NET_READY;
         }
     }
@@ -1016,7 +1171,7 @@ static void activate_entry(int index)
     /* Still here: booting or downloading failed. The caller redraws the title. */
     build_entries();
     draw_entries();
-    draw_status();
+    draw_info();
 }
 
 void app_main(void)
@@ -1044,13 +1199,16 @@ void app_main(void)
     int64_t deadline = esp_timer_get_time() + MENU_TIMEOUT_US;
     int shown_seconds = -1;
     net_state_t shown_state = net_state;
+    uint32_t shown_activity_changes = activity_changes;
+    info_page_until = esp_timer_get_time() + INFO_PAGE_US;
     while (true) {
         cyd_touch_point_t point;
         if (xQueueReceive(touch_queue, &point, pdMS_TO_TICKS(50)) == pdTRUE) {
             int screen_row = point.y / CYD_FONT_HEIGHT;
+            int column = point.x / CYD_FONT_WIDTH;
             int index = scroll_offset + screen_row - MENU_FIRST_ROW;
-            if (screen_row >= MENU_FIRST_ROW && screen_row < MENU_FIRST_ROW + MENU_ROWS &&
-                index < entry_count) {
+            if (column < MENU_COLUMNS && screen_row >= MENU_FIRST_ROW &&
+                screen_row < MENU_FIRST_ROW + MENU_ROWS && index < entry_count) {
                 activate_entry(index);
                 /* Still here: booting or downloading failed. Start over. */
                 boot_choice = default_slot();
@@ -1061,32 +1219,33 @@ void app_main(void)
                     draw_title("NO IMAGES");
                 }
             } else {
-                /* Any other tap, scroll and brightness buttons included, buys more
-                   time to choose. */
-                int column = point.x / CYD_FONT_WIDTH;
-                if (screen_row == SCROLL_ROW) {
+                /* Any other tap, the scroll buttons, brightness slider and info row
+                   included, buys more time to choose. */
+                if (column >= BRIGHTNESS_COLUMN) {
+                    brightness_tap(screen_row);
+                } else if (screen_row == SCROLL_ROW) {
                     if (column >= SCROLL_UP_COLUMN &&
                         column < SCROLL_UP_COLUMN + SCROLL_BUTTON_COLUMNS) {
                         scroll_menu(-1);
                     } else if (column >= SCROLL_DOWN_COLUMN) {
                         scroll_menu(1);
                     }
-                } else if (screen_row == STATUS_ROW) {
-                    if (column >= BRIGHTNESS_DOWN_COLUMN &&
-                        column < BRIGHTNESS_DOWN_COLUMN + BRIGHTNESS_BUTTON_COLUMNS) {
-                        change_brightness(-CYD_BRIGHTNESS_STEP);
-                    } else if (column >= BRIGHTNESS_UP_COLUMN) {
-                        change_brightness(CYD_BRIGHTNESS_STEP);
-                    }
+                } else if (screen_row == INFO_ROW) {
+                    next_info_page();
                 }
                 deadline += MENU_TIMEOUT_US;
             }
         }
 
-        /* Put the network status back once the brightness has been shown. */
-        if (brightness_shown_until != 0 && esp_timer_get_time() >= brightness_shown_until) {
-            brightness_shown_until = 0;
-            draw_status();
+        /* New network activity shows at once; otherwise the pages take turns. */
+        uint32_t changes = activity_changes;
+        if (changes != shown_activity_changes) {
+            shown_activity_changes = changes;
+            info_page = INFO_ACTIVITY;
+            info_page_until = esp_timer_get_time() + INFO_PAGE_US;
+            draw_info();
+        } else if (esp_timer_get_time() >= info_page_until) {
+            next_info_page();
         }
 
         if (counting) {
@@ -1114,7 +1273,6 @@ void app_main(void)
                     draw_title("SELECT IMAGE");
                 }
             }
-            draw_status();
         }
     }
 }
