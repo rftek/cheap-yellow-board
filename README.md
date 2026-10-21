@@ -13,6 +13,7 @@ Each application lives on its own branch of this repository:
 | `touchscreen_cal` | This touchscreen calibration |
 | `stopwatch` | LVGL stopwatch |
 | `gear_roll` | LVGL gear demo |
+| `Datalogger` | Voltage logger on GPIO35 |
 
 ## What it does
 
