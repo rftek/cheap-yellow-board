@@ -13,6 +13,7 @@ Each application lives on its own branch of this repository:
 | `touchscreen_cal` | Touchscreen calibration |
 | `stopwatch` | LVGL stopwatch |
 | `gear_roll` | LVGL gear demo |
+| `Datalogger` | Voltage logger on GPIO35 |
 
 Every application branch builds an app binary that runs in either launcher slot. `components/cyd_display` (display, 5x7 font, patterns and touch) is copied on each branch.
 
