@@ -292,6 +292,20 @@ static void load_config_string(const char *key, const char *fallback, char *valu
     }
 }
 
+/* Saves the network that the launcher and every image join (NVS cyd_config). */
+static bool store_wifi_network(const char *ssid, const char *password)
+{
+    nvs_handle_t nvs;
+    if (nvs_open(CONFIG_NAMESPACE, NVS_READWRITE, &nvs) != ESP_OK) {
+        ESP_LOGE(TAG, "Could not open NVS for settings");
+        return false;
+    }
+    bool stored = nvs_set_str(nvs, "wifi_ssid", ssid) == ESP_OK &&
+                  nvs_set_str(nvs, "wifi_pass", password) == ESP_OK && nvs_commit(nvs) == ESP_OK;
+    nvs_close(nvs);
+    return stored;
+}
+
 /* The image that boots when nobody chooses: the last one chosen, else the
    first stored one. */
 static int default_slot(void)
@@ -838,11 +852,17 @@ static bool wifi_join(void)
     load_config_string("wifi_ssid", WIFI_SSID, ssid, sizeof(ssid));
     load_config_string("wifi_pass", WIFI_PASSWORD, password, sizeof(password));
     bool connected = wifi_try(ssid, password);
-    /* A mistyped network chosen on the device must not cut the launcher off
-       from GitHub, so fall back to this build's own credentials. */
+    /* A mistyped or vanished network chosen on the device must not cut the
+       launcher off from GitHub, so fall back to this build's own credentials.
+       The images join only the saved network and have no fallback, so when
+       this one works, save it in place of the one that did not. */
     if (!connected && (strcmp(ssid, WIFI_SSID) != 0 || strcmp(password, WIFI_PASSWORD) != 0)) {
         ESP_LOGW(TAG, "Saved Wi-Fi network %s did not connect; trying %s", ssid, WIFI_SSID);
         connected = wifi_try(WIFI_SSID, WIFI_PASSWORD);
+        if (connected && store_wifi_network(WIFI_SSID, WIFI_PASSWORD)) {
+            ESP_LOGW(TAG, "Saved Wi-Fi network %s in place of %s for the boot images", WIFI_SSID,
+                     ssid);
+        }
     }
     if (!connected) {
         wifi_give_up = true;
@@ -1674,14 +1694,9 @@ static void editor_type(editor_t *editor, char character)
    then has the network task join it. */
 static void save_wifi_settings(const char *ssid, const char *password)
 {
-    nvs_handle_t nvs;
-    if (nvs_open(CONFIG_NAMESPACE, NVS_READWRITE, &nvs) == ESP_OK) {
-        nvs_set_str(nvs, "wifi_ssid", ssid);
-        nvs_set_str(nvs, "wifi_pass", password);
-        nvs_commit(nvs);
-        nvs_close(nvs);
+    if (store_wifi_network(ssid, password)) {
+        ESP_LOGI(TAG, "Saved Wi-Fi network %s", ssid);
     }
-    ESP_LOGI(TAG, "Saved Wi-Fi network %s", ssid);
     rejoin_wifi();
 }
 
