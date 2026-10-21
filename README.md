@@ -1,6 +1,6 @@
-# ESP32 CYD Datalogger
+# ESP32 CYD Cat & Mouse
 
-A one-channel voltage logger for the ESP32 Cheap Yellow Display (CYD), following the [board documentation](https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display). Tap **CH1** to start a session: it samples GPIO35 every 3 seconds, converts each sample to volts, and shows the latest reading with session statistics.
+A small maze game in the manner of PAC-MAN for the ESP32 Cheap Yellow Display (CYD), following the [board documentation](https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display). You are the mouse. Eat every piece of cheese while three cats chase you; a big cheese turns the tables for a few seconds.
 
 Each application lives on its own branch of this repository:
 
@@ -13,69 +13,31 @@ Each application lives on its own branch of this repository:
 | `touchscreen_cal` | Touchscreen calibration |
 | `stopwatch` | LVGL stopwatch |
 | `gear_roll` | LVGL gear demo |
-| `Datalogger` | This voltage logger |
+| `Datalogger` | Voltage logger on GPIO35 |
+| `CatMouse` | This maze game |
 | `How_to_Build` | Build environment and installation guide |
 
-## Wiring
+## Playing
 
-**CH1 is GPIO35, on the CYD's P3 connector.** Connect the signal to GPIO35 and its ground to the board's GND, also on P3. The input is single-ended: it measures against the board's ground.
+- **Steer by touch.** Touch the screen on the side of the mouse you want it to go: above it to go up, to its right to go right, and so on. The farther of the two distances across and up-down wins. Hold your finger down to keep steering. Like PAC-MAN, the mouse remembers a turn until the next opening, and it keeps running until it meets a wall.
+- **Cheese** is worth 10 points. Eat all 128 pieces to clear the maze.
+- **Big cheese** (the four round ones in the corners, 50 points) scares the cats for 6 seconds, a second less each level down to 2. Scared cats turn blue, slow down and run at random; they flash white just before they recover. Catch one for 200 points, then 400 and 800 for the next ones on the same big cheese. A caught cat's eyes run back to the basket, and it comes out again shortly after.
+- **The cats** take turns wandering to their own corners (7 seconds) and hunting (20 seconds). The orange cat heads straight for you, the white one for four tiles ahead of you, and the pink one only chases from a distance. One starts outside the basket; the other two follow.
+- **The tunnel** on the middle row runs off both sides of the screen.
+- **Lives:** you start with three, shown at the top right. Each level is faster, and the cats leave the basket sooner.
+- **Score** is at the top left, and the level beside the cheese in the middle. The best score is kept in NVS (namespace `catmouse`, key `high`) and shown on the title screen.
 
-- **Keep it between 0 and 3.3 V.** Anything above the chip's supply can damage it. For higher voltages, add a resistor divider and scale the result.
-- **Accurate range: about 0.15–2.45 V.** Above 2.45 V readings still work up to about 3.1 V, but the ADC is non-linear there, so the reading turns yellow.
-- **Leave nothing floating.** GPIO35 has no internal pull resistors, so an unconnected pin reads random values.
-- **For a steadier reading,** put a 0.1 µF capacitor from GPIO35 to GND.
+## How it fits the board
 
-The original plan named IO21, IO22 and IO23. None of those can measure voltage on an ESP32, because they have no ADC. On this board IO21 also drives the backlight and IO23 the SD card. So CH1 uses GPIO35, an ADC1 pin, and there's no CH2 or CH3.
-
-## Using it
-
-| Screen row | Shows |
+| | |
 |---|---|
-| CH1 GPIO35 ADC1 | Channel. Reads `UNCAL` in red if the chip has no factory calibration. |
-| State | `TAP CH1 TO START`, `SAMPLING EVERY 3S` or `STOPPED` |
-| Voltage | Latest sample, in volts with millivolt resolution |
-| RAW | The averaged 12-bit reading behind it (0–4095) |
-| N / T | Samples taken and session time |
-| MIN / MAX / AVG | Session statistics |
-
-The first sample is taken right away, then one every 3 seconds. Tap **CH1** again to stop; the button is green while running. A new session clears the statistics.
-
-Every sample is also printed to the serial log (115200 baud) as CSV, ready for a spreadsheet:
-
-```
-# CH1 GPIO35 session, every 3 s, calibrated
-t_s,raw,mV
-0.0,1532,1287
-3.0,1534,1289
-```
-
-## How a sample is taken
-
-| Setting | Value |
-|---|---|
-| Driver | ESP-IDF `adc_oneshot`: one conversion on demand |
-| Unit / channel | ADC1, channel 7 (GPIO35). ADC1 is unaffected by Wi-Fi. |
-| Resolution | 12 bits (0–4095) |
-| Attenuation | 12 dB (range about 0.15–2.45 V) |
-| Averaging | 16 raw readings per sample, to reduce the ESP32 ADC's noise |
-| Raw to millivolts | Line-fitting calibration from the factory eFuse values (Two Point or Vref). Without them it falls back to an estimate (raw × 3100 mV / 4095) and shows `UNCAL`. |
-
-## ESP32 ADC configuration options
-
-The ADC options on this chip (ESP32, ESP-IDF 6.1), for choosing different settings:
-
-| Option | Values |
-|---|---|
-| ADC units | **ADC1**: 8 channels, GPIO32–39. **ADC2**: 10 channels, GPIO0, 2, 4, 12–15, 25–27. |
-| ADC2 restriction | Unavailable while Wi-Fi is running |
-| Input type | Single-ended only, against ground. No differential mode. |
-| Resolution | 9, 10, 11 or 12 bits (`ADC_BITWIDTH_9` … `_12`) |
-| Attenuation and recommended range | `ADC_ATTEN_DB_0`: about 100–950 mV · `DB_2_5`: about 100–1250 mV · `DB_6`: about 150–1750 mV · `DB_12`: about 150–2450 mV |
-| Absolute maximum input | 3.3 V |
-| Reference | Internal, about 1100 mV nominal; varies about 1000–1200 mV between chips, hence calibration |
-| Calibration schemes | Line fitting only (eFuse Two Point, eFuse Vref, or a default Vref). Curve fitting is for newer ESP32 chips. |
-| Drivers | Oneshot (`adc_oneshot`) for single readings; continuous (`adc_continuous`) for DMA streaming at about 20 kHz–2 MHz |
-| ADC pins free on the CYD | GPIO35 (P3), GPIO27 (CN1, ADC2), GPIO34 (wired to the onboard light sensor) |
+| Maze | 20 × 14 tiles of 16 pixels (320 × 224), under a 16-pixel score bar |
+| Frame rate | 25 frames per second, with speeds in eighths of a pixel per frame |
+| Drawing | No frame buffer. Each frame redraws only the box around the mouse and each cat, composed in a 2 KB buffer first (maze, then cats, then the mouse) and sent with `cyd_draw_bitmap`, so nothing flickers. |
+| Sprites | 16 × 16, stored as text in `main/main.c`; the mouse is turned for each direction, and each cat is recolored when scared |
+| Memory | About 19 KB of static RAM and 220 KB of flash |
+| Touch | `cyd_touch_read`, polled once a frame |
+| Cats | Classic target-tile chasing: at each tile they take the open way, other than back, closest to their target |
 
 ## Build and flash
 
@@ -86,12 +48,12 @@ $pio = "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe"
 & $pio run
 ```
 
-The app binary is `%USERPROFILE%\.platformio\cyd-datalogger-build\esp32dev\firmware.bin`. Use it in one of two ways:
+The app binary is `%USERPROFILE%\.platformio\cyd-catmouse-build\esp32dev\firmware.bin`. Use it in one of two ways:
 
-- **As a launcher image** (board runs the `bootloader` branch): every push to this branch runs `.github/workflows/build.yml`, which builds the app and publishes it as `firmware.bin` on the release tagged `Datalogger`. The launcher lists the branch and downloads that file. You can also write it to a slot over USB, as described in the `bootloader` README.
+- **As a launcher image** (board runs the `bootloader` branch): every push to this branch runs `.github/workflows/build.yml`, which builds the app and publishes it as `firmware.bin` on the release tagged `CatMouse`. The launcher lists the branch and downloads that file. You can also write it to a slot over USB, as described in the `bootloader` README.
 - **On its own:** `& $pio run --target upload --upload-port COM11`. This replaces everything on the board, including the launcher.
 
-To capture the CSV: `& $pio device monitor --port COM11 --baud 115200`. Ctrl+] exits.
+Monitor with `& $pio device monitor --port COM11 --baud 115200`. Ctrl+] exits.
 
 ## Hardware
 
