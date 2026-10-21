@@ -14,8 +14,8 @@
 
 /* Cat & Mouse: a small maze game in the manner of PAC-MAN. The mouse eats
    the cheese while three cats chase it; a big cheese lets it chase them
-   back to their basket for a while. Touch the screen to steer: the mouse
-   heads toward the side of it you touch.
+   back to their basket for a while. Steer with the W, A, S and D keys in
+   the bottom-right corner.
 
    Everything is drawn straight to the panel without a frame buffer. The
    maze is 20x14 tiles of 16 pixels under a 16-pixel score bar, and each
@@ -65,7 +65,8 @@ static const char *TAG = "catmouse";
 /* '#' wall, '.' cheese, 'o' big cheese, '-' the basket's door, ' ' empty.
    Row 7 runs off both sides: leaving one side enters the other. The basket
    (row 7, columns 8-11) is closed; cats leave it by appearing on the tile
-   above its door. */
+   above its door. The bottom corners of row 12 are wall so the WASD pad
+   covers no corridor (the left one only to keep the maze symmetric). */
 static const char *const MAZE_LAYOUT[ROWS] = {
     "####################",
     "#o.......##.......o#",
@@ -78,8 +79,8 @@ static const char *const MAZE_LAYOUT[ROWS] = {
     "####.#.######.#.####",
     "#........##........#",
     "#.##.###.##.###.##.#",
-    "#o.#............#.o#",
-    "#........##........#",
+    "#o................o#",
+    "###......##......###",
     "####################",
 };
 
@@ -308,6 +309,73 @@ static uint16_t maze_pixel(int x, int y)
     }
 }
 
+/* ---- The WASD pad ----
+
+   Four keys in the bottom-right corner, laid out like a keyboard's: W above
+   S, with A and D either side of it. The tiles under the pad are wall, and
+   the maze drawing leaves the pad's corner to it. */
+
+#define KEY_WIDTH 16
+#define KEY_HEIGHT 12
+#define PAD_WIDTH (3 * KEY_WIDTH)
+#define PAD_HEIGHT (2 * KEY_HEIGHT)
+#define PAD_X (CYD_LCD_WIDTH - PAD_WIDTH) /* screen and maze x are the same */
+#define PAD_Y (CYD_LCD_HEIGHT - PAD_HEIGHT)
+#define PAD_MAZE_Y (PAD_Y - HUD_HEIGHT)
+/* Touches this close outside the pad still go to the nearest key: the keys
+   are small for a resistive panel. */
+#define PAD_SLOP 10
+#define COLOR_KEY RGB565(60, 70, 110)
+#define COLOR_KEY_PRESSED RGB565(255, 220, 60)
+
+typedef struct {
+    uint16_t glyph; /* 3x5, three bits per row (octal) */
+    int dir;
+    int x, y; /* within the pad */
+} pad_key_t;
+
+static const pad_key_t PAD_KEYS[4] = {
+    {055775, DIR_UP, KEY_WIDTH, 0},              /* W */
+    {025755, DIR_LEFT, 0, KEY_HEIGHT},           /* A */
+    {034216, DIR_DOWN, KEY_WIDTH, KEY_HEIGHT},   /* S */
+    {065556, DIR_RIGHT, 2 * KEY_WIDTH, KEY_HEIGHT}, /* D */
+};
+
+static int pressed_key = -1;
+
+/* A 3x5 glyph's pixel at (x, y), drawn at twice its size (6x10). */
+static bool glyph_pixel(uint16_t glyph, int x, int y)
+{
+    if (x < 0 || x >= 6 || y < 0 || y >= 10) {
+        return false;
+    }
+    int bits = glyph >> (3 * (4 - y / 2));
+    return (bits >> (2 - x / 2)) & 1;
+}
+
+/* The pad's pixel at (x, y) within it: each key with a one-pixel gap at
+   its right and bottom, lit while pressed. */
+static uint16_t pad_pixel(int x, int y)
+{
+    for (int i = 0; i < 4; ++i) {
+        const pad_key_t *key = &PAD_KEYS[i];
+        int lx = x - key->x;
+        int ly = y - key->y;
+        if (lx < 0 || lx >= KEY_WIDTH || ly < 0 || ly >= KEY_HEIGHT) {
+            continue;
+        }
+        if (lx == KEY_WIDTH - 1 || ly == KEY_HEIGHT - 1) {
+            return COLOR_BLACK;
+        }
+        bool pressed = i == pressed_key;
+        if (glyph_pixel(key->glyph, lx - 4, ly - 1)) {
+            return pressed ? COLOR_BLACK : COLOR_WHITE;
+        }
+        return pressed ? COLOR_KEY_PRESSED : COLOR_KEY;
+    }
+    return COLOR_BLACK;
+}
+
 /* ---- Drawing ---- */
 
 #define REGION_SIZE 32
@@ -366,7 +434,18 @@ static void draw_region(int x0, int y0, int x1, int y1)
             }
         }
     }
+    /* The pad's corner is kept out of the maze. */
+    for (int y = y0 > PAD_MAZE_Y ? y0 : PAD_MAZE_Y; y < y1; ++y) {
+        for (int x = x0 > PAD_X ? x0 : PAD_X; x < x1; ++x) {
+            region[(y - y0) * width + (x - x0)] = pad_pixel(x - PAD_X, y - PAD_MAZE_Y);
+        }
+    }
     ESP_ERROR_CHECK(cyd_draw_bitmap(x0, HUD_HEIGHT + y0, width, height, region));
+}
+
+static void draw_pad(void)
+{
+    draw_region(PAD_X, PAD_MAZE_Y, MAZE_WIDTH, MAZE_HEIGHT);
 }
 
 static void draw_tile(int col, int row)
@@ -413,11 +492,10 @@ static bool digit_pixel(const char *text, int left, int x, int y)
     int index = (x - left) / 8;
     int cx = (x - left) % 8;
     int cy = y - 3;
-    if (x < left || index >= (int)strlen(text) || cx >= 6 || cy < 0 || cy >= 10) {
+    if (x < left || index >= (int)strlen(text)) {
         return false;
     }
-    int bits = DIGITS[text[index] - '0'] >> (3 * (4 - cy / 2));
-    return (bits >> (2 - cx / 2)) & 1;
+    return glyph_pixel(DIGITS[text[index] - '0'], cx, cy);
 }
 
 #define LEVEL_ICON_X 136
@@ -530,7 +608,7 @@ static void show_title(void)
     text_row(4, CYD_COLOR_WHITE, "dodge the cats.");
     text_row(5, CYD_COLOR_WHITE, "Big cheese lets");
     text_row(6, CYD_COLOR_WHITE, "you chase them.");
-    text_row(7, CYD_COLOR_CYAN, "Touch to steer.");
+    text_row(7, CYD_COLOR_CYAN, "Steer: W A S D");
     text_row(8, CYD_COLOR_GRAY, high);
     text_row(9, CYD_COLOR_YELLOW, "tap to play");
     /* A mouse running from a cat, either side of the title. */
@@ -849,6 +927,7 @@ static void reset_actors(void)
     static const int basket_x[CAT_COUNT] = {8 * TILE + 4, 9 * TILE + 8, 10 * TILE + 12};
     place(&mouse, MOUSE_START_COL * TILE, MOUSE_START_ROW * TILE, DIR_LEFT);
     wanted_dir = DIR_NONE;
+    pressed_key = -1;
     mouse_facing = DIR_LEFT;
     for (int i = 0; i < CAT_COUNT; ++i) {
         cat_t *cat = &cats[i];
@@ -887,23 +966,27 @@ static void reset_maze(void)
     }
 }
 
-/* Steers toward the touch: the larger of the across and up-down distances
-   from the mouse picks the way. */
+/* Steers with the WASD pad: a touch on or near it picks the nearest key,
+   which lights while held. Touches elsewhere do nothing. */
 static void read_touch(void)
 {
     cyd_touch_point_t point;
-    if (!cyd_touch_read(&point)) {
-        return;
+    int key = -1;
+    if (cyd_touch_read(&point) && point.x >= PAD_X - PAD_SLOP && point.y >= PAD_Y - PAD_SLOP) {
+        int best_distance = INT32_MAX;
+        for (int i = 0; i < 4; ++i) {
+            int dx = point.x - (PAD_X + PAD_KEYS[i].x + KEY_WIDTH / 2);
+            int dy = point.y - (PAD_Y + PAD_KEYS[i].y + KEY_HEIGHT / 2);
+            if (dx * dx + dy * dy < best_distance) {
+                best_distance = dx * dx + dy * dy;
+                key = i;
+            }
+        }
+        wanted_dir = PAD_KEYS[key].dir;
     }
-    int dx = point.x - (mouse.x + TILE / 2);
-    int dy = point.y - (HUD_HEIGHT + mouse.y + TILE / 2);
-    if (abs(dx) < TILE / 2 && abs(dy) < TILE / 2) {
-        return;
-    }
-    if (abs(dx) > abs(dy)) {
-        wanted_dir = dx > 0 ? DIR_RIGHT : DIR_LEFT;
-    } else {
-        wanted_dir = dy > 0 ? DIR_DOWN : DIR_UP;
+    if (key != pressed_key) {
+        pressed_key = key;
+        draw_pad();
     }
 }
 
