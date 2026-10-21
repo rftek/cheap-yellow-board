@@ -4,6 +4,15 @@ Documentation for building, flashing and publishing the applications in this rep
 
 **Start here: [INSTALL.md](INSTALL.md).** It covers what to install (Git and PlatformIO are required; VS Code is optional), the private Wi-Fi file, building each branch, flashing a new board once, publishing through GitHub Actions, troubleshooting, and the exact tool versions this project was built with.
 
+**WHAT TO EXPECT**
+After flashing. A bootloader will launch immediately; show any local files that are ready to launch and start countdown, if countdown ends then launch the last application run. 
+Will try to connect to the github repo and pull down list of binaries available. Click one to download and store in a slot, will run when download complete.
+
+screen brightness, wifi network are controlled from bootloader. power off then on reset. 
+
+
+
+
 | Branch | Application |
 |---|---|
 | `bootloader` | Launcher: a boot menu with two image slots, a custom bootloader and the partition table |
