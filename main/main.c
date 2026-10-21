@@ -1,3 +1,4 @@
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -5,12 +6,14 @@
 #include <string.h>
 
 #include "cyd_display.h"
+#include "esp_attr.h"
 #include "esp_crt_bundle.h"
 #include "esp_check.h"
 #include "esp_event.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "esp_heap_caps.h"
@@ -44,7 +47,6 @@ static char wifi_password[65];
 static char birdnet_base_url[128];
 static volatile bool wifi_connected;
 static TaskHandle_t app_task_handle;
-static bool displayed_image_ready;
 static char displayed_species[96];
 
 typedef struct {
@@ -99,6 +101,185 @@ typedef struct {
     size_t start;
     size_t end;
 } json_value_t;
+
+/* ---- Status screen ----
+
+   Until a photo is up, and whenever none is, the screen shows how the
+   viewer is getting on: why it last started (a crash or watchdog reset
+   boots straight back into this image, so this is how one shows), the
+   Wi-Fi network and its state, the BirdNET server and the last request. */
+
+#define STATUS_SIZE (CYD_TEXT_COLUMNS + 1)
+#define STATUS_MAGIC 0xB1DD5747u
+
+/* What the viewer was doing, kept across crash and watchdog resets. */
+typedef struct {
+    uint32_t magic;
+    uint32_t crashes; /* in a row */
+    char stage[STATUS_SIZE];
+} crash_record_t;
+
+static RTC_NOINIT_ATTR crash_record_t crash_record;
+static char start_status[STATUS_SIZE];
+static char crash_status[STATUS_SIZE];
+static portMUX_TYPE status_lock = portMUX_INITIALIZER_UNLOCKED;
+static char wifi_status[STATUS_SIZE] = "starting";
+static char server_status[STATUS_SIZE] = "waiting for Wi-Fi";
+static volatile uint32_t status_changes;
+static uint32_t shown_status_changes;
+/* False when something else has been drawn over the status screen. */
+static bool status_on_screen;
+
+static void set_stage(const char *stage)
+{
+    crash_record.magic = STATUS_MAGIC;
+    snprintf(crash_record.stage, sizeof(crash_record.stage), "%s", stage);
+}
+
+/* Records why this start happened, and what a crashed run was doing. */
+static void note_start(void)
+{
+    esp_reset_reason_t reason = esp_reset_reason();
+    const char *crash = NULL;
+    switch (reason) {
+    case ESP_RST_PANIC:
+        crash = "CRASHED";
+        break;
+    case ESP_RST_INT_WDT:
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_WDT:
+        crash = "WATCHDOG";
+        break;
+    case ESP_RST_BROWNOUT:
+        crash = "BROWNOUT";
+        break;
+    default:
+        break;
+    }
+    bool have_record = crash_record.magic == STATUS_MAGIC;
+    if (crash == NULL) {
+        snprintf(start_status, sizeof(start_status), "%s",
+                 reason == ESP_RST_SW ? "started" : "powered on");
+        crash_record.crashes = 0;
+    } else {
+        crash_record.crashes = have_record ? crash_record.crashes + 1 : 1;
+        if (crash_record.crashes > 1) {
+            snprintf(start_status, sizeof(start_status), "%.8s x%u", crash,
+                     (unsigned)(crash_record.crashes % 100));
+        } else {
+            snprintf(start_status, sizeof(start_status), "%s", crash);
+        }
+        if (have_record) {
+            crash_record.stage[sizeof(crash_record.stage) - 1] = '\0';
+            snprintf(crash_status, sizeof(crash_status), "in %.14s", crash_record.stage);
+        }
+        ESP_LOGW(TAG, "Restarted after a %s (reason %d) while %s", crash, (int)reason,
+                 have_record ? crash_record.stage : "unknown");
+    }
+    set_stage("starting");
+}
+
+static void set_status(char *field, const char *format, va_list arguments)
+{
+    char text[STATUS_SIZE];
+    vsnprintf(text, sizeof(text), format, arguments);
+    portENTER_CRITICAL(&status_lock);
+    memcpy(field, text, sizeof(text));
+    ++status_changes;
+    portEXIT_CRITICAL(&status_lock);
+}
+
+static void set_wifi_status(const char *format, ...) __attribute__((format(printf, 1, 2)));
+static void set_wifi_status(const char *format, ...)
+{
+    va_list arguments;
+    va_start(arguments, format);
+    set_status(wifi_status, format, arguments);
+    va_end(arguments);
+}
+
+static void set_server_status(const char *format, ...) __attribute__((format(printf, 1, 2)));
+static void set_server_status(const char *format, ...)
+{
+    va_list arguments;
+    va_start(arguments, format);
+    set_status(server_status, format, arguments);
+    va_end(arguments);
+}
+
+static void draw_status(void)
+{
+    char wifi[STATUS_SIZE];
+    char server[STATUS_SIZE];
+    portENTER_CRITICAL(&status_lock);
+    memcpy(wifi, wifi_status, sizeof(wifi));
+    memcpy(server, server_status, sizeof(server));
+    shown_status_changes = status_changes;
+    portEXIT_CRITICAL(&status_lock);
+
+    char network[STATUS_SIZE + 16];
+    snprintf(network, sizeof(network), "Wi-Fi %.11s", wifi_ssid);
+    const char *host = birdnet_base_url;
+    if (strncmp(host, "http://", 7) == 0) {
+        host += 7;
+    } else if (strncmp(host, "https://", 8) == 0) {
+        host += 8;
+    }
+    char memory[32];
+    snprintf(memory, sizeof(memory), "RAM %uK free", (unsigned)(esp_get_free_heap_size() / 1024));
+    bool crashed = crash_record.crashes > 0;
+    const struct {
+        uint16_t color;
+        const char *text;
+    } rows[CYD_TEXT_ROWS] = {
+        {CYD_COLOR_YELLOW, "BIRDNET VIEWER"},
+        {crashed ? CYD_COLOR_RED : CYD_COLOR_GRAY, start_status},
+        {CYD_COLOR_RED, crash_status},
+        {CYD_COLOR_CYAN, network},
+        {CYD_COLOR_WHITE, wifi},
+        {CYD_COLOR_CYAN, host},
+        {CYD_COLOR_WHITE, server},
+        {CYD_COLOR_GRAY, wifi_connected ? "" : "EN opens launcher"},
+        {CYD_COLOR_GRAY, memory},
+        {CYD_COLOR_GRAY, "tap to refresh"},
+    };
+    for (int row = 0; row < CYD_TEXT_ROWS; ++row) {
+        ESP_ERROR_CHECK(cyd_text_row(row, rows[row].color, CYD_COLOR_BLACK, rows[row].text));
+    }
+    status_on_screen = true;
+}
+
+static bool displayed_image_ready;
+
+/* Redraws the status screen when it changed, unless a photo is up. */
+static void update_status_screen(void)
+{
+    if (!displayed_image_ready && (!status_on_screen || status_changes != shown_status_changes)) {
+        draw_status();
+    }
+}
+
+/* Says what the viewer is doing, on screen and in the crash record. */
+static void show_progress(const char *stage)
+{
+    set_stage(stage);
+    set_server_status("%s", stage);
+    update_status_screen();
+}
+
+/* The status of the last request that got an answer, else 0. */
+static int last_http_status;
+
+/* "visits HTTP 404", or the error without its ESP_ERR_ prefix. */
+static void report_failure(const char *what, esp_err_t result)
+{
+    if (result == ESP_FAIL && last_http_status != 0 && last_http_status != 200) {
+        set_server_status("%s HTTP %d", what, last_http_status);
+    } else {
+        const char *name = esp_err_to_name(result);
+        set_server_status("%s %s", what, strncmp(name, "ESP_ERR_", 8) == 0 ? name + 8 : name);
+    }
+}
 
 static esp_err_t http_event_handler(esp_http_client_event_t *event)
 {
@@ -168,6 +349,7 @@ static esp_err_t http_get(const char *url, size_t capacity, http_response_t *res
 
     esp_err_t result = esp_http_client_perform(client);
     int status = esp_http_client_get_status_code(client);
+    last_http_status = result == ESP_OK ? status : 0;
     if (result == ESP_OK && status != 200) {
         ESP_LOGE(TAG, "GET %s returned HTTP %d", url, status);
         result = ESP_FAIL;
@@ -664,6 +846,7 @@ static esp_err_t fetch_bird_image(const char *scientific_name, size_t *jpeg_leng
     }
     int64_t content_length = esp_http_client_fetch_headers(*image_client);
     int status = esp_http_client_get_status_code(*image_client);
+    last_http_status = status;
     if (status != 200 || content_length <= 0 ||
         content_length > IMAGE_JPEG_CAPACITY) {
         ESP_LOGE(TAG, "Wikimedia image stream returned HTTP %d and %u bytes",
@@ -827,6 +1010,7 @@ static esp_err_t draw_jpeg(esp_http_client_handle_t image_client, size_t length)
         .rgb565 = rgb565,
         .buffer_capacity = output_capacity,
     };
+    status_on_screen = false;
     if (cyd_fill_rect(0, IMAGE_TOP, LCD_WIDTH, IMAGE_HEIGHT, COLOR_BLACK) != ESP_OK) {
         heap_caps_free(rgb565);
         heap_caps_free(work_buffer);
@@ -847,15 +1031,20 @@ static esp_err_t draw_jpeg(esp_http_client_handle_t image_client, size_t length)
 static void refresh_birdnet(void)
 {
     bird_detection_t bird;
+    show_progress("getting visits");
     esp_err_t result = fetch_latest_bird(&bird);
     if (result != ESP_OK) {
+        /* A photo already up stays; otherwise the status screen says why. */
+        report_failure("visits", result);
+        set_stage("idle");
         return;
     }
 
     if (!bird.found) {
         displayed_species[0] = '\0';
         displayed_image_ready = false;
-        ESP_ERROR_CHECK(cyd_fill_rect(0, 0, LCD_WIDTH, LCD_HEIGHT, COLOR_BLACK));
+        set_server_status("no bird >= %.0f%%", MIN_BIRD_CONFIDENCE * 100);
+        set_stage("idle");
         return;
     }
 
@@ -866,9 +1055,11 @@ static void refresh_birdnet(void)
     esp_http_client_handle_t image_client = NULL;
     esp_err_t image_result = ESP_OK;
     if (need_image) {
+        show_progress("getting photo");
         image_result = fetch_bird_image(bird.scientific_name, &jpeg_length,
                                         image_url, sizeof(image_url), &image_client);
         if (image_result != ESP_OK) {
+            report_failure("photo", image_result);
             ESP_LOGW(TAG, "Bird image unavailable");
         }
     }
@@ -877,22 +1068,24 @@ static void refresh_birdnet(void)
         displayed_image_ready = false;
     }
     if (image_result == ESP_OK && need_image) {
+        set_stage("drawing photo");
         image_result = draw_jpeg(image_client, jpeg_length);
         esp_http_client_close(image_client);
         esp_http_client_cleanup(image_client);
         if (image_result == ESP_OK) {
             displayed_image_ready = true;
+            set_server_status("showing photo");
         } else {
+            report_failure("drawing", image_result);
             ESP_LOGW(TAG, "Could not render bird image: %s", esp_err_to_name(image_result));
         }
     }
-    if (need_image && image_result != ESP_OK) {
-        ESP_ERROR_CHECK(cyd_fill_rect(0, IMAGE_TOP, LCD_WIDTH, IMAGE_HEIGHT, COLOR_BLACK));
-    }
+    /* Without a photo, the status screen comes back and says why. */
     if (!displayed_image_ready) {
         ESP_LOGW(TAG, "No bird image is displayed");
     }
     snprintf(displayed_species, sizeof(displayed_species), "%s", bird.scientific_name);
+    set_stage("idle");
 }
 
 /* Turns taps from the shared touchscreen driver into refresh requests. */
@@ -910,19 +1103,56 @@ static void touch_task(void *argument)
     }
 }
 
+/* Why a join failed, in a few words. */
+static const char *wifi_failure_text(uint8_t reason, char *text, size_t size)
+{
+    switch (reason) {
+    case WIFI_REASON_NO_AP_FOUND:
+        return "no AP found";
+    case WIFI_REASON_AUTH_EXPIRE:
+    case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+    case WIFI_REASON_AUTH_FAIL:
+    case WIFI_REASON_HANDSHAKE_TIMEOUT:
+    case WIFI_REASON_MIC_FAILURE:
+        return "bad password?";
+    case WIFI_REASON_BEACON_TIMEOUT:
+        return "signal lost";
+    default:
+        snprintf(text, size, "error %u", (unsigned)reason);
+        return text;
+    }
+}
+
 static void wifi_event_handler(void *argument, esp_event_base_t event_base,
                                int32_t event_id, void *event_data)
 {
     (void)argument;
+    static unsigned attempts;
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        ESP_ERROR_CHECK(esp_wifi_connect());
+        set_wifi_status("joining");
+        esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        const wifi_event_sta_disconnected_t *disconnected = event_data;
+        char text[16];
+        if (wifi_connected) {
+            set_server_status("waiting for Wi-Fi");
+        }
         wifi_connected = false;
-        ESP_LOGW(TAG, "Wi-Fi disconnected; retrying");
-        ESP_ERROR_CHECK(esp_wifi_connect());
+        ++attempts;
+        set_wifi_status("#%u %s", attempts,
+                        wifi_failure_text(disconnected->reason, text, sizeof(text)));
+        ESP_LOGW(TAG, "Wi-Fi disconnected (reason %u); retrying",
+                 (unsigned)disconnected->reason);
+        /* Retrying never gives up, so a failed attempt must not abort. */
+        esp_err_t result = esp_wifi_connect();
+        if (result != ESP_OK) {
+            ESP_LOGE(TAG, "Wi-Fi reconnect failed: %s", esp_err_to_name(result));
+        }
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = event_data;
         wifi_connected = true;
+        attempts = 0;
+        set_wifi_status(IPSTR, IP2STR(&event->ip_info.ip));
         ESP_LOGI(TAG, "Wi-Fi connected; IP address: " IPSTR, IP2STR(&event->ip_info.ip));
         if (app_task_handle != NULL) {
             xTaskNotifyGive(app_task_handle);
@@ -973,9 +1203,10 @@ static void wifi_init(void)
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
                                                wifi_event_handler, NULL));
 
+    /* An open network has no password and would fail a WPA2 threshold. */
     wifi_config_t wifi_config = {
         .sta = {
-            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+            .threshold.authmode = wifi_password[0] != '\0' ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN,
         },
     };
     memcpy(wifi_config.sta.ssid, wifi_ssid, strnlen(wifi_ssid, sizeof(wifi_config.sta.ssid)));
@@ -995,6 +1226,7 @@ static void birdnet_task(void *argument)
     int64_t next_query_time = 0;
     bool refresh_requested = true;
     while (true) {
+        update_status_screen();
         int64_t now = esp_timer_get_time();
         if (wifi_connected &&
             (refresh_requested || next_query_time == 0 || now >= next_query_time)) {
@@ -1018,6 +1250,7 @@ static void birdnet_task(void *argument)
 void app_main(void)
 {
     ESP_ERROR_CHECK(cyd_display_init());
+    note_start();
     if (!load_config()) {
         ESP_LOGE(TAG, "No Wi-Fi settings in NVS; start the launcher once to store them");
         ESP_ERROR_CHECK(cyd_text_row(3, CYD_COLOR_YELLOW, CYD_COLOR_BLACK, "NO WI-FI SETTINGS"));
