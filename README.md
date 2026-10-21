@@ -17,7 +17,11 @@ Each application lives on its own branch of this repository:
 
 ## What it does
 
-The viewer connects to Wi-Fi and queries a local BirdNET server every two minutes, or immediately after a tap. The latest visit from today with a confidence of at least 80% is shown as a full-screen Wikimedia photo, with no text. If nothing qualifies, the screen clears. A failed refresh keeps the last photo.
+The viewer connects to Wi-Fi and queries a local BirdNET server every two minutes. The latest visit from today with a confidence of at least 80% is shown as a full-screen Wikimedia photo, with no text. A failed refresh keeps the last photo.
+
+Tap the photo for the bird's details: its name and scientific name, its family (from [GBIF](https://www.gbif.org/developer/species), since the BirdNET server has no taxonomy), when it was heard (`10-20 09:06-09:13`), the number of calls and the best confidence, the current temperature and sky (the server keeps only the current weather, not the weather at the time of a detection), and how often and since when the station has heard the species. The details fill in as they arrive. Tap again, or wait 30 seconds, to go back to the photo, which is fetched again because it is streamed rather than kept in RAM.
+
+Until a photo is up, and whenever none is, a status screen shows why the viewer started (marking a crash, watchdog or brownout reset, which boots straight back into the viewer, with what it was doing), the Wi-Fi network and why joining fails (such as `#12 no AP found`), the BirdNET server and its last request (such as `no bird >= 80%` or `visits HTTP 404`), and the free RAM. If the network doesn't join, press EN to open the launcher and choose another. A tap on the status screen refreshes at once.
 
 This is the original viewer from `main`, ported to the shared display component (`components/cyd_display`). That port fixes swapped red and blue and transposed image tiles on this panel.
 
@@ -32,6 +36,7 @@ Without Wi-Fi settings, the screen says so. Press EN to run the launcher once, t
 
 - `GET {BIRDNET_BASE_URL}/api/v1/detections/visits`
 - `GET {BIRDNET_BASE_URL}/api/v1/image/{URL-encoded-scientific-name}`
+- For the details: `GET {BIRDNET_BASE_URL}/api/v1/weather/current`, `GET {BIRDNET_BASE_URL}/api/v1/species/detail?sci_name=...` and `GET https://api.gbif.org/v1/species/match?name=...`
 
 Wikimedia's 1280-pixel thumbnail is streamed over HTTPS straight into the ESP32 ROM JPEG decoder and scaled down to 320x240, so the full image is never held in RAM.
 

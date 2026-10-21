@@ -36,8 +36,14 @@
 #define JPEG_WORKBUF_SIZE 3100
 #define IMAGE_TOP 0
 #define IMAGE_HEIGHT LCD_HEIGHT
-#define TOUCH_TRIGGER_BIT BIT0
+/* Notification bits for the BirdNET task. */
+#define TAP_BIT BIT0
+#define WIFI_JOINED_BIT BIT1
 #define MIN_BIRD_CONFIDENCE 0.80
+/* A tap on the photo shows the bird's details this long, or until the next tap. */
+#define INFO_TIMEOUT_US (30LL * 1000 * 1000)
+/* The BirdNET server has no taxonomy, so the family comes from GBIF. */
+#define GBIF_MATCH_URL "https://api.gbif.org/v1/species/match?name="
 #define COLOR_BLACK CYD_COLOR_BLACK
 
 static const char *TAG = "birdnet_cyd";
@@ -60,10 +66,23 @@ typedef struct {
     char species[64];
     char scientific_name[96];
     char date[16];
+    char first_time[16];
     char detected_time[16];
     double confidence;
+    int count; /* detections in the visit; 0 if the server did not say */
     bool found;
 } bird_detection_t;
+
+/* Details fetched for the info screen; empty strings until they arrive. */
+typedef struct {
+    char family[40];
+    char weather[40];
+    char seen[40];
+    char since[40];
+} bird_info_t;
+
+/* The bird in the photo, for the info screen. */
+static bird_detection_t displayed_bird;
 
 typedef struct {
     const uint8_t *data;
@@ -250,11 +269,15 @@ static void draw_status(void)
 }
 
 static bool displayed_image_ready;
+/* True while the bird info screen is up in place of the photo. */
+static bool info_on_screen;
 
-/* Redraws the status screen when it changed, unless a photo is up. */
+/* Redraws the status screen when it changed, unless a photo or the bird
+   info is up. */
 static void update_status_screen(void)
 {
-    if (!displayed_image_ready && (!status_on_screen || status_changes != shown_status_changes)) {
+    if (!displayed_image_ready && !info_on_screen &&
+        (!status_on_screen || status_changes != shown_status_changes)) {
         draw_status();
     }
 }
@@ -725,6 +748,18 @@ static esp_err_t fetch_latest_bird(bird_detection_t *bird)
                  scientific_name);
         snprintf(bird->date, sizeof(bird->date), "%s", date);
         snprintf(bird->detected_time, sizeof(bird->detected_time), "%s", detected_time);
+        /* Extras for the info screen; a visit without them still counts. */
+        if (!json_object_string(array.data, visit.start, visit.end, "first_time",
+                                bird->first_time, sizeof(bird->first_time))) {
+            snprintf(bird->first_time, sizeof(bird->first_time), "%s", detected_time);
+        }
+        json_value_t count_value;
+        double count = 0;
+        bird->count = json_object_field(array.data, visit.start, visit.end, "count",
+                                        &count_value) &&
+                              json_value_number(array.data, count_value, &count)
+                          ? (int)count
+                          : 0;
         bird->confidence = confidence;
         bird->found = true;
         best_seconds_ago = seconds_ago;
@@ -1085,7 +1120,199 @@ static void refresh_birdnet(void)
         ESP_LOGW(TAG, "No bird image is displayed");
     }
     snprintf(displayed_species, sizeof(displayed_species), "%s", bird.scientific_name);
+    displayed_bird = bird;
     set_stage("idle");
+}
+
+/* ---- Bird info screen ---- */
+
+/* Fetches a JSON document of up to capacity bytes. */
+static esp_err_t get_json(const char *url, size_t capacity, http_response_t *response)
+{
+    esp_err_t result = http_get(url, capacity, response);
+    if (result != ESP_OK) {
+        ESP_LOGW(TAG, "GET %s failed: %s", url, esp_err_to_name(result));
+    }
+    return result;
+}
+
+static int rounded(double value)
+{
+    return (int)(value < 0 ? value - 0.5 : value + 0.5);
+}
+
+static bool json_top_number(const http_response_t *response, const char *key, double *number)
+{
+    json_value_t value;
+    return json_object_field((const char *)response->data, 0, response->length, key, &value) &&
+           json_value_number((const char *)response->data, value, number);
+}
+
+static bool json_top_string(const http_response_t *response, const char *key, char *output,
+                            size_t capacity)
+{
+    return json_object_string((const char *)response->data, 0, response->length, key, output,
+                              capacity);
+}
+
+/* The family from GBIF's name match, such as "Paridae"; kept per species. */
+static void fetch_family(const char *scientific_name, char *family, size_t capacity)
+{
+    static char cached_species[96];
+    static char cached_family[40];
+    if (strcmp(cached_species, scientific_name) != 0) {
+        char encoded[288];
+        char url[sizeof(GBIF_MATCH_URL) + sizeof(encoded)];
+        http_response_t response;
+        cached_family[0] = '\0';
+        if (url_encode_path(scientific_name, encoded, sizeof(encoded)) &&
+            snprintf(url, sizeof(url), GBIF_MATCH_URL "%s", encoded) < (int)sizeof(url) &&
+            get_json(url, API_JSON_CAPACITY, &response) == ESP_OK) {
+            json_top_string(&response, "family", cached_family, sizeof(cached_family));
+            http_response_free(&response);
+        }
+        snprintf(cached_species, sizeof(cached_species), "%s", scientific_name);
+    }
+    snprintf(family, capacity, "%s", cached_family[0] != '\0' ? cached_family : "family ?");
+}
+
+/* "now 68F Clear": the server keeps only the current weather, not the
+   weather at the time of a detection. */
+static void fetch_weather(char *weather, size_t capacity)
+{
+    char url[sizeof(birdnet_base_url) + 32];
+    snprintf(url, sizeof(url), "%s/api/v1/weather/current", birdnet_base_url);
+    http_response_t response;
+    snprintf(weather, capacity, "weather ?");
+    if (get_json(url, API_JSON_CAPACITY, &response) != ESP_OK) {
+        return;
+    }
+    double temperature;
+    char unit[8];
+    char condition[24];
+    if (json_top_number(&response, "temp", &temperature)) {
+        /* "°F" arrives as "?F": keep the letter. */
+        size_t unit_length = json_top_string(&response, "temp_unit", unit, sizeof(unit))
+                                 ? strlen(unit)
+                                 : 0;
+        if (!json_top_string(&response, "condition", condition, sizeof(condition))) {
+            condition[0] = '\0';
+        }
+        snprintf(weather, capacity, "now %d%c %s", rounded(temperature),
+                 unit_length > 0 ? unit[unit_length - 1] : ' ', condition);
+    }
+    http_response_free(&response);
+}
+
+/* How often the station has heard the species, and since when. */
+static void fetch_species_totals(const char *scientific_name, bird_info_t *info)
+{
+    char encoded[288];
+    char url[sizeof(birdnet_base_url) + sizeof(encoded) + 40];
+    http_response_t response;
+    snprintf(info->seen, sizeof(info->seen), "heard ? times");
+    if (!url_encode_path(scientific_name, encoded, sizeof(encoded)) ||
+        snprintf(url, sizeof(url), "%s/api/v1/species/detail?sci_name=%s", birdnet_base_url,
+                 encoded) >= (int)sizeof(url) ||
+        get_json(url, 4 * API_JSON_CAPACITY, &response) != ESP_OK) {
+        return;
+    }
+    double total;
+    char first_seen[16];
+    if (json_top_number(&response, "total_detections", &total)) {
+        snprintf(info->seen, sizeof(info->seen), "heard %d times", rounded(total));
+    }
+    if (json_top_string(&response, "first_seen", first_seen, sizeof(first_seen))) {
+        snprintf(info->since, sizeof(info->since), "since %s", first_seen);
+    }
+    http_response_free(&response);
+}
+
+/* Splits a name at the last space that keeps the first line within one row. */
+static void wrap_name(const char *name, char *first, char *second, size_t capacity)
+{
+    size_t length = strlen(name);
+    size_t split = length;
+    if (length > CYD_TEXT_COLUMNS) {
+        split = CYD_TEXT_COLUMNS;
+        while (split > 0 && name[split] != ' ') {
+            --split;
+        }
+        if (split == 0) {
+            split = CYD_TEXT_COLUMNS;
+        }
+    }
+    snprintf(first, capacity, "%.*s", (int)split, name);
+    snprintf(second, capacity, "%s", name + split + (name[split] == ' ' ? 1 : 0));
+}
+
+/* "Carolina Chickadee / Poecile caro... / Paridae / 10-20 09:06-09:13 /
+   19 calls, 94% / now 68F Clear / heard 1127 times / since 2026-09-12". */
+static void draw_bird_info(const bird_detection_t *bird, const bird_info_t *info)
+{
+    char name[2][CYD_TEXT_COLUMNS * 4];
+    char heard[48];
+    char calls[48];
+    wrap_name(bird->species, name[0], name[1], sizeof(name[0]));
+    /* "2026-10-20" shows as "10-20"; times drop their seconds. */
+    const char *date = strlen(bird->date) >= 10 ? bird->date + 5 : bird->date;
+    if (strcmp(bird->first_time, bird->detected_time) == 0) {
+        snprintf(heard, sizeof(heard), "%.5s at %.5s", date, bird->detected_time);
+    } else {
+        snprintf(heard, sizeof(heard), "%.5s %.5s-%.5s", date, bird->first_time,
+                 bird->detected_time);
+    }
+    if (bird->count > 0) {
+        snprintf(calls, sizeof(calls), "%d call%s, %d%%", bird->count,
+                 bird->count == 1 ? "" : "s", rounded(bird->confidence * 100));
+    } else {
+        snprintf(calls, sizeof(calls), "confidence %d%%", rounded(bird->confidence * 100));
+    }
+    const struct {
+        uint16_t color;
+        const char *text;
+    } rows[CYD_TEXT_ROWS] = {
+        {CYD_COLOR_YELLOW, name[0]},
+        {CYD_COLOR_YELLOW, name[1]},
+        {CYD_COLOR_GRAY, bird->scientific_name},
+        {CYD_COLOR_CYAN, info->family[0] != '\0' ? info->family : "..."},
+        {CYD_COLOR_WHITE, heard},
+        {CYD_COLOR_WHITE, calls},
+        {CYD_COLOR_WHITE, info->weather[0] != '\0' ? info->weather : "..."},
+        {CYD_COLOR_WHITE, info->seen[0] != '\0' ? info->seen : "..."},
+        {CYD_COLOR_WHITE, info->since},
+        {CYD_COLOR_GRAY, "tap for photo"},
+    };
+    for (int row = 0; row < CYD_TEXT_ROWS; ++row) {
+        ESP_ERROR_CHECK(cyd_text_row(row, rows[row].color, CYD_COLOR_BLACK, rows[row].text));
+    }
+}
+
+/* Shows what is known about the bird in the photo at once, then fills in
+   its family, the weather and its totals as they arrive. */
+static void show_bird_info(void)
+{
+    bird_info_t info = {0};
+    info_on_screen = true;
+    status_on_screen = false;
+    set_stage("showing info");
+    draw_bird_info(&displayed_bird, &info);
+    fetch_family(displayed_bird.scientific_name, info.family, sizeof(info.family));
+    draw_bird_info(&displayed_bird, &info);
+    fetch_weather(info.weather, sizeof(info.weather));
+    draw_bird_info(&displayed_bird, &info);
+    fetch_species_totals(displayed_bird.scientific_name, &info);
+    draw_bird_info(&displayed_bird, &info);
+    set_stage("idle");
+}
+
+/* The photo was streamed, not kept, so going back fetches it again. The
+   info stays up until the photo starts drawing over it. */
+static void leave_bird_info(void)
+{
+    displayed_image_ready = false;
+    refresh_birdnet();
+    info_on_screen = false;
 }
 
 /* Turns taps from the shared touchscreen driver into refresh requests. */
@@ -1095,9 +1322,9 @@ static void touch_task(void *argument)
     while (true) {
         cyd_touch_point_t point;
         if (xQueueReceive(touch_queue, &point, portMAX_DELAY) == pdTRUE) {
-            ESP_LOGI(TAG, "Touch at %d,%d; refreshing BirdNET", point.x, point.y);
+            ESP_LOGI(TAG, "Touch at %d,%d", point.x, point.y);
             if (app_task_handle != NULL) {
-                xTaskNotifyGive(app_task_handle);
+                xTaskNotify(app_task_handle, TAP_BIT, eSetBits);
             }
         }
     }
@@ -1155,7 +1382,7 @@ static void wifi_event_handler(void *argument, esp_event_base_t event_base,
         set_wifi_status(IPSTR, IP2STR(&event->ip_info.ip));
         ESP_LOGI(TAG, "Wi-Fi connected; IP address: " IPSTR, IP2STR(&event->ip_info.ip));
         if (app_task_handle != NULL) {
-            xTaskNotifyGive(app_task_handle);
+            xTaskNotify(app_task_handle, WIFI_JOINED_BIT, eSetBits);
         }
     }
 }
@@ -1219,17 +1446,24 @@ static void wifi_init(void)
     ESP_ERROR_CHECK(esp_wifi_start());
 }
 
+/* Refreshes every QUERY_INTERVAL_US. A tap on the photo shows the bird's
+   details, and a tap on those (or INFO_TIMEOUT_US) goes back to the photo;
+   a tap with no photo up refreshes at once. */
 static void birdnet_task(void *argument)
 {
     (void)argument;
     app_task_handle = xTaskGetCurrentTaskHandle();
     int64_t next_query_time = 0;
+    int64_t info_until = 0;
     bool refresh_requested = true;
     while (true) {
         update_status_screen();
         int64_t now = esp_timer_get_time();
-        if (wifi_connected &&
-            (refresh_requested || next_query_time == 0 || now >= next_query_time)) {
+        if (info_on_screen && now >= info_until) {
+            leave_bird_info();
+            next_query_time = esp_timer_get_time() + QUERY_INTERVAL_US;
+        } else if (!info_on_screen && wifi_connected &&
+                   (refresh_requested || next_query_time == 0 || now >= next_query_time)) {
             refresh_requested = false;
             refresh_birdnet();
             next_query_time = esp_timer_get_time() + QUERY_INTERVAL_US;
@@ -1241,8 +1475,25 @@ static void birdnet_task(void *argument)
         if (wait_ticks == 0 || wait_ticks > pdMS_TO_TICKS(1000)) {
             wait_ticks = pdMS_TO_TICKS(1000);
         }
-        if (ulTaskNotifyTake(pdTRUE, wait_ticks) > 0) {
+        uint32_t events = 0;
+        if (xTaskNotifyWait(0, UINT32_MAX, &events, wait_ticks) != pdTRUE) {
+            continue;
+        }
+        if (events & WIFI_JOINED_BIT) {
             refresh_requested = true;
+        }
+        if (events & TAP_BIT) {
+            if (info_on_screen) {
+                leave_bird_info();
+                next_query_time = esp_timer_get_time() + QUERY_INTERVAL_US;
+            } else if (displayed_image_ready && wifi_connected) {
+                show_bird_info();
+                info_until = esp_timer_get_time() + INFO_TIMEOUT_US;
+            } else {
+                refresh_requested = true;
+            }
+            /* Taps made while the screen was busy are dropped. */
+            ulTaskNotifyValueClear(NULL, TAP_BIT);
         }
     }
 }
