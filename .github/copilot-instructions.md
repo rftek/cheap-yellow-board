@@ -1,8 +1,9 @@
-# ESP32 CYD Datalogger
+# ESP32 CYD Bluetooth Diagnostics
 
-- PlatformIO project using native ESP-IDF C for an ESP32 Cheap Yellow Display. Each application has its own branch: `bootloader`, `wifi_checker`, `birdnet_viewer`, `screen_check`, `touchscreen_cal`, `stopwatch`, `gear_roll`, `Datalogger` (this); docs on `How_to_Build`.
-- One channel, CH1 = GPIO35 (ADC1 channel 7, P3 connector): adc_oneshot, 12-bit, 12 dB attenuation, 16 readings averaged per sample, line-fitting calibration to mV (falls back to an UNCAL estimate). Tap CH1 to start/stop; one sample every 3 s; CSV lines `t_s,raw,mV` on the serial log.
-- GPIO21/22/23 have no ADC on the ESP32; IO21 is the backlight and IO23 the SD card on the CYD. Do not use them for analog inputs.
+- PlatformIO project using native ESP-IDF C for an ESP32 Cheap Yellow Display. Each application has its own branch: `bootloader`, `wifi_checker`, `birdnet_viewer`, `screen_check`, `touchscreen_cal`, `stopwatch`, `gear_roll`, `Datalogger`, `bluetooth_diag` (this); docs on `How_to_Build`.
+- Dual-mode controller with the Bluedroid host (not NimBLE, which has no Classic support). Scans Classic (inquiry) then LE, then tests connections: Classic by SDP service discovery (paging), LE by a GATT client open, MTU exchange, service search and Device Information reads.
+- The tool never pairs: it refuses PIN, SSP and LE security requests.
+- Settings are option indexes in `settings[]`, saved as one NVS blob (`bt_diag/settings`). Adding a setting: extend the enum and `setting_info`, then add it to a configuration page.
 - `components/cyd_display` is copied on every application branch; keep the copies in sync.
-- No Wi-Fi or credentials. The binary also runs as a `bootloader` launcher image; keep it under 1.31 MB.
+- No Wi-Fi or credentials. The binary also runs as a `bootloader` launcher image; keep it under 1.31 MB (about 850 KB now).
 - Build with `pio run`; verify firmware changes with a PlatformIO build before flashing.

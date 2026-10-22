@@ -1,6 +1,6 @@
-# ESP32 CYD Datalogger
+# ESP32 CYD Bluetooth Diagnostics
 
-A one-channel voltage logger for the ESP32 Cheap Yellow Display (CYD), following the [board documentation](https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display). Tap **CH1** to start a session: it samples GPIO35 every 3 seconds, converts each sample to volts, and shows the latest reading with session statistics.
+A Bluetooth diagnostic tool for the ESP32 Cheap Yellow Display (CYD), following the [board documentation](https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display). On start it scans for Classic (BR/EDR) and Bluetooth LE devices, tries to connect to each one that might accept a connection, and shows which ones do. A configuration screen shows the ESP32 Bluetooth controller's and host's settings and changes the ones that can be changed while running.
 
 Each application lives on its own branch of this repository:
 
@@ -13,69 +13,51 @@ Each application lives on its own branch of this repository:
 | `touchscreen_cal` | Touchscreen calibration |
 | `stopwatch` | LVGL stopwatch |
 | `gear_roll` | LVGL gear demo |
-| `Datalogger` | This voltage logger |
+| `Datalogger` | Voltage logger on GPIO35 |
+| `bluetooth_diag` | This Bluetooth diagnostic tool |
 | `How_to_Build` | Build environment and installation guide |
 
-## Wiring
+## What it does
 
-**CH1 is GPIO35, on the CYD's P3 connector.** Connect the signal to GPIO35 and its ground to the board's GND, also on P3. The input is single-ended: it measures against the board's ground.
+1. **Scans.** A Classic inquiry (6.4 s by default), with name requests for devices that sent no name, then an active LE scan (6 s by default). The screen counts devices as they are found.
+2. **Tests connections.** Every device that might accept one is tried in list order, and its row turns green or red. Tap anywhere to stop.
+   - **Classic:** the board pages the device and asks for its SDP service list. A completed ACL connection means it accepts connections. If the device sent no name, its name is read too.
+   - **LE:** only devices that advertise as connectable (`ADV_IND`) are tried. The board connects as a GATT client, requests an MTU of 517, lists the GATT services, reads Device Name, Manufacturer Name and Model Number if the device allows it, then disconnects. Devices that advertise as beacons, scannable-only or directed to another device are marked not connectable without trying.
+   - The tool never pairs. It refuses every pairing or security request, so a connection test can't bond with anything.
+3. **Lists the results.** Tap a device for its details.
 
-- **Keep it between 0 and 3.3 V.** Anything above the chip's supply can damage it. For higher voltages, add a resistor divider and scale the result.
-- **Accurate range: about 0.15–2.45 V.** Above 2.45 V readings still work up to about 3.1 V, but the ADC is non-linear there, so the reading turns yellow.
-- **Leave nothing floating.** GPIO35 has no internal pull resistors, so an unconnected pin reads random values.
-- **For a steadier reading,** put a 0.1 µF capacitor from GPIO35 to GND.
+## The screens
 
-The original plan named IO21, IO22 and IO23. None of those can measure voltage on an ESP32, because they have no ADC. On this board IO21 also drives the backlight and IO23 the SD card. So CH1 uses GPIO35, an ADC1 pin, and there's no CH2 or CH3.
+**Device list**
 
-## Using it
-
-| Screen row | Shows |
+| Part | What it does |
 |---|---|
-| CH1 GPIO35 ADC1 | Channel. Reads `UNCAL` in red if the chip has no factory calibration. |
-| State | `TAP CH1 TO START`, `SAMPLING EVERY 3S` or `STOPPED` |
-| Voltage | Latest sample, in volts with millivolt resolution |
-| RAW | The averaged 12-bit reading behind it (0–4095) |
-| N / T | Samples taken and session time |
-| MIN / MAX / AVG | Session statistics |
+| `BT12` (top left) | Device count. Tap it to scan again. |
+| `CFG` | Opens the configuration pages |
+| ▲ ▼ | Page through the list, eight devices at a time |
+| Device rows | `C-72 name`: the radio (`C` Classic, `L` LE, `D` LE from a dual-mode device), the signal in dBm, then the name, or the address if there is none |
+| Row color | Green: connects. Red: the test failed. Gray: not connectable, or unnamed and not tested yet. White: not tested. Yellow: being tested. |
+| Bottom row | `OK 5 FAIL 2` and a `TEST` button that tests every device again |
 
-The first sample is taken right away, then one every 3 seconds. Tap **CH1** again to stop; the button is green while running. A new session clears the statistics.
+**Device detail:** radio, name, address, signal (and the advertised TX power), the address kind (public, static random, or private) and advertising type for LE, or the device class for Classic. Then the test result: the time to connect, and for LE the MTU, connection interval, slave latency and supervision timeout, or for Classic the number of SDP services. A failure shows its reason, such as `PAGE TIMEOUT`, `NO RESPONSE`, `CONN FAILED` or `REJECTED`. `TEST` tests this device again; `SVCS` lists the services by UUID with their names, the manufacturer and the model.
 
-Every sample is also printed to the serial log (115200 baud) as CSV, ready for a spreadsheet:
+Everything is also printed to the serial log (115200 baud): each scan's devices, and each test's result with its services.
 
-```
-# CH1 GPIO35 session, every 3 s, calibrated
-t_s,raw,mV
-0.0,1532,1287
-3.0,1534,1289
-```
+## Configuration pages
 
-## How a sample is taken
+`CFG` opens five pages; `<` and `>` move between them. Rows with `-` and `+` buttons are settings. They take effect at once and are saved in NVS (namespace `bt_diag`), so they last across restarts. The other rows show what the controller and host report.
 
-| Setting | Value |
-|---|---|
-| Driver | ESP-IDF `adc_oneshot`: one conversion on demand |
-| Unit / channel | ADC1, channel 7 (GPIO35). ADC1 is unaffected by Wi-Fi. |
-| Resolution | 12 bits (0–4095) |
-| Attenuation | 12 dB (range about 0.15–2.45 V) |
-| Averaging | 16 raw readings per sample, to reduce the ESP32 ADC's noise |
-| Raw to millivolts | Line-fitting calibration from the factory eFuse values (Two Point or Vref). Without them it falls back to an estimate (raw × 3100 mV / 4095) and shows `UNCAL`. |
+| Page | Shows | Settings |
+|---|---|---|
+| 1 Controller | Status, mode (dual), maximum LE connections, maximum ACL and SCO links, modem sleep, controller task priority and core, minimum encryption key size, duplicate filter list size | |
+| 2 Host | Bluedroid status, the board's Bluetooth address and name, Secure Simple Pairing and Secure Connections, open ACL links, the page timeout read back from the controller | `VISIBLE`: makes the board discoverable and connectable over Classic, for testing it from a phone |
+| 3 TX power (dBm) | The LE and BR/EDR levels the controller reports now, and its inquiry and page TX levels | `LE ADV`, `LE SCAN`, `LE CONN`: −12 to +9 dBm. `BR/EDR LO`, `BR/EDR HI`: the BR/EDR power range. |
+| 4 Scan and test | | `INQUIRY s` (Classic inquiry, 1.3–13 s), `LE SCAN s` (2–30 s), `LE ACTIVE` (active scans ask for scan responses, which often carry the name), `LE INT ms` and `LE DUTY %` (scan interval, and how much of it the radio listens), `LE CONN s` (LE connection timeout), `PAGE TO s` (Classic page timeout, 1.3–41 s), `AUTO TEST` (test after every scan) |
+| 5 Build | ESP-IDF version, LE 4.2 and 5.0 features, GATT client and server, SMP, GATT cache, local MTU, BTC task stack, free and minimum free heap | |
 
-## ESP32 ADC configuration options
+On the first start the TX power settings begin at the controller's own levels. The ESP32 applies a new BR/EDR power range only before its radio has transmitted, so a change shows in `BR NOW` after the next restart.
 
-The ADC options on this chip (ESP32, ESP-IDF 6.1), for choosing different settings:
-
-| Option | Values |
-|---|---|
-| ADC units | **ADC1**: 8 channels, GPIO32–39. **ADC2**: 10 channels, GPIO0, 2, 4, 12–15, 25–27. |
-| ADC2 restriction | Unavailable while Wi-Fi is running |
-| Input type | Single-ended only, against ground. No differential mode. |
-| Resolution | 9, 10, 11 or 12 bits (`ADC_BITWIDTH_9` … `_12`) |
-| Attenuation and recommended range | `ADC_ATTEN_DB_0`: about 100–950 mV · `DB_2_5`: about 100–1250 mV · `DB_6`: about 150–1750 mV · `DB_12`: about 150–2450 mV |
-| Absolute maximum input | 3.3 V |
-| Reference | Internal, about 1100 mV nominal; varies about 1000–1200 mV between chips, hence calibration |
-| Calibration schemes | Line fitting only (eFuse Two Point, eFuse Vref, or a default Vref). Curve fitting is for newer ESP32 chips. |
-| Drivers | Oneshot (`adc_oneshot`) for single readings; continuous (`adc_continuous`) for DMA streaming at about 20 kHz–2 MHz |
-| ADC pins free on the CYD | GPIO35 (P3), GPIO27 (CN1, ADC2), GPIO34 (wired to the onboard light sensor) |
+The settings fixed when the firmware is built are in `sdkconfig.defaults`: a dual-mode controller (`CONFIG_BTDM_CTRL_MODE_BTDM`) with the Bluedroid host, Classic with SSP, LE 4.2 features, and the GATT client without the GATT server.
 
 ## Build and flash
 
@@ -86,12 +68,12 @@ $pio = "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe"
 & $pio run
 ```
 
-The app binary is `%USERPROFILE%\.platformio\cyd-datalogger-build\esp32dev\firmware.bin`. Use it in one of two ways:
+The app binary (about 850 KB, mostly the Bluedroid dual-mode stack) is `%USERPROFILE%\.platformio\cyd-bt-diag-build\esp32dev\firmware.bin`. Use it in one of two ways:
 
-- **As a launcher image** (board runs the `bootloader` branch): every push to this branch runs `.github/workflows/build.yml`, which builds the app and publishes it as `firmware.bin` on the release tagged `Datalogger`. The launcher lists the branch and downloads that file. You can also write it to a slot over USB, as described in the `bootloader` README.
+- **As a launcher image** (board runs the `bootloader` branch): every push to this branch runs `.github/workflows/build.yml`, which builds the app and publishes it as `firmware.bin` on the release tagged `bluetooth_diag`. The launcher lists the branch and downloads that file. You can also write it to a slot over USB, as described in the `bootloader` README.
 - **On its own:** `& $pio run --target upload --upload-port COM11`. This replaces everything on the board, including the launcher.
 
-To capture the CSV: `& $pio device monitor --port COM11 --baud 115200`. Ctrl+] exits.
+To watch the log: `& $pio device monitor --port COM11 --baud 115200`. Ctrl+] exits.
 
 ## Hardware
 
