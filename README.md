@@ -1,6 +1,6 @@
-# ESP32 CYD Cat & Mouse
+# ESP32 CYD F1 Race
 
-A small maze game in the manner of PAC-MAN for the ESP32 Cheap Yellow Display (CYD), following the [board documentation](https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display). You are the mouse. Eat every piece of cheese while three cats chase you; a big cheese turns the tables for a few seconds.
+A mini Formula 1 race for the ESP32 Cheap Yellow Display (CYD), following the [board documentation](https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display). The road runs over the horizon in pseudo-3D, in the manner of OutRun: it is drawn in perspective, stripe by stripe, and bends toward the horizon on curves. Race Hamilton, Kimi and Verstappen through four or five random curves to the chequered flag.
 
 Each application lives on its own branch of this repository:
 
@@ -14,30 +14,42 @@ Each application lives on its own branch of this repository:
 | `stopwatch` | LVGL stopwatch |
 | `gear_roll` | LVGL gear demo |
 | `Datalogger` | Voltage logger on GPIO35 |
-| `CatMouse` | This maze game |
+| `CatMouse` | PAC-MAN-style maze game |
+| `f1_race` | This racing game |
 | `How_to_Build` | Build environment and installation guide |
 
 ## Playing
 
-- **Steer with the WASD keys** in the bottom-right corner, laid out like a keyboard's: **W** up, with **A** left, **S** down and **D** right beneath it. Each key is 32 × 24 pixels, so the pad is 96 × 48, and a key lights yellow while you hold it. A touch up to 10 pixels outside the pad still goes to the nearest key, for the resistive panel's aim; touches elsewhere do nothing. Like PAC-MAN, the mouse remembers a turn until the next opening, and it keeps running until it meets a wall.
-- **Cheese** is worth 10 points. Eat all 113 pieces to clear the maze.
-- **Big cheese** (the four round ones in the corners, 50 points) scares the cats for 6 seconds, a second less each level down to 2. Scared cats turn blue, slow down and run at random; they flash white just before they recover. Catch one for 200 points, then 400 and 800 for the next ones on the same big cheese. A caught cat's eyes run back to the basket, and it comes out again shortly after.
-- **The cats** take turns wandering to their own corners (7 seconds) and hunting (20 seconds). The orange cat heads straight for you, the white one for four tiles ahead of you, and the pink one only chases from a distance. One starts outside the basket; the other two follow.
-- **The tunnel** on the middle row runs off both sides of the screen.
-- **Lives:** you start with three, shown at the top right. Each level is faster, and the cats leave the basket sooner.
-- **Score** is at the top left, and the level beside the cheese in the middle. The best score is kept in NVS (namespace `catmouse`, key `high`) and shown on the title screen.
+- **The splash screen** shows your car. Tap **START** to go to the grid.
+- **The start:** you line up fourth, behind Hamilton (red Ferrari, 44), Kimi (silver and teal Mercedes, 12) and Verstappen (dark blue Red Bull, 3). Red numbers count down 3, 2, 1, then GO.
+- **Steering:** hold the left half of the screen to steer left and the right half to steer right. The car accelerates by itself, up to 330 km/h. Curves push you toward their outside, so steer into them.
+- **Grass** (past the red and white kerbs) slows you to about 130 km/h. **Running into the back of a car** holds you behind it and costs speed, so pass to the side.
+- **The track:** a start straight, four or five random curves of random length, sharpness and direction with straights between, then a final straight to the chequered line. Each race is new. The bar at the top shows everyone's progress, with your position at the top left and your speed at the top right.
+- **Results:** after the flag, the finishing order shows each driver with the winner's time and the gaps, and your own place and time below. Tap to go back to the splash screen.
+
+### Hamilton's auto-win (the secret)
+
+With the auto-win on, which is the default, Hamilton always wins, Kimi finishes second and Verstappen third, however well you drive. You can pass them early on, but from just under halfway they close up behind you and come past before the flag.
+
+Tap the **top-right corner** (the 40 × 40 pixels there) to toggle it, on the splash screen, during the race or on the results screen. Nothing on screen labels it. When the auto-win is **off**, a tiny dark-gray 2 × 2 dot appears in the very corner; with it on, there is nothing. A press that starts in the corner during the race doesn't steer.
+
+With it off, the rivals race at their own pace, Hamilton fastest, then Kimi, then Verstappen, each varied slightly from race to race. A clean drive at full speed beats all three by about a second, but time on the grass or stuck behind a car loses that quickly, so the result depends on how you drive.
+
+The setting is kept in NVS (namespace `f1_race`, key `rigged`), so it survives a restart. Each toggle is logged on the serial port as `Hamilton's auto-win on` or `off`.
 
 ## How it fits the board
 
 | | |
 |---|---|
-| Maze | 20 × 14 tiles of 16 pixels (320 × 224), under a 16-pixel score bar. The WASD pad's corner is kept out of it: the tiles under the pad (rows 11-13 of columns 14-19) are wall, the bottom-right corner is reshaped around them with its big cheese moved up to row 9, and maze drawing leaves the keys' pixels to the pad. |
-| Frame rate | 25 frames per second, with speeds in eighths of a pixel per frame |
-| Drawing | No frame buffer. Each frame redraws only the box around the mouse and each cat, composed in a 2 KB buffer first (maze, then cats, then the mouse) and sent with `cyd_draw_bitmap`, so nothing flickers. |
-| Sprites | 16 × 16, stored as text in `main/main.c`; the mouse is turned for each direction, and each cat is recolored when scared |
-| Memory | About 19 KB of static RAM and 220 KB of flash |
-| Touch | `cyd_touch_read`, polled once a frame; the nearest WASD key to the touch wins |
-| Cats | Classic target-tile chasing: at each tile they take the open way, other than back, closest to their target |
+| Road | Each road row below the horizon (y = 100) shows the road at a fixed depth: 112 / dy road units for the row dy pixels below it. The road's sideways offset at each depth is integrated from the track's curvature every frame, so curves bend toward the horizon. Stripes alternate every 4 units; the far rows fade into haze. |
+| Track | One curvature value per road unit (about 2,500 units a race), with eased ends on each curve |
+| Drawing | No frame buffer. The screen is composed in 20-row strips (a 12.8 KB buffer) and each strip is sent with `cyd_draw_bitmap`. The road and the score bar are redrawn every frame; the sky, mountains and hills only when the background scrolls on a curve or a message changes. |
+| Cars | One 40 × 20 sprite, recolored for each team with the car's number stamped on; scaled to depth, nearest pixel. Your car is drawn at twice that size. |
+| Frame rate | Up to 25 frames per second, with physics on the measured frame time. The CPU runs at 240 MHz. |
+| Touch | `cyd_touch_read`, polled once a frame; a press counts as released after 3 frames with no reading |
+| Memory | About 53 KB of static RAM and 234 KB of flash |
+
+Tuning constants are at the top of `main/main.c`: `TOP_SPEED`, `STEER_RATE`, `CENTRIFUGAL`, the rivals' `base_pace` in `cars[]` and `PACE_JITTER`, and the auto-win's `RIG_*` and `lead` values.
 
 ## Build and flash
 
@@ -48,9 +60,9 @@ $pio = "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe"
 & $pio run
 ```
 
-The app binary is `%USERPROFILE%\.platformio\cyd-catmouse-build\esp32dev\firmware.bin`. Use it in one of two ways:
+The app binary is `%USERPROFILE%\.platformio\cyd-f1race-build\esp32dev\firmware.bin`. Use it in one of two ways:
 
-- **As a launcher image** (board runs the `bootloader` branch): every push to this branch runs `.github/workflows/build.yml`, which builds the app and publishes it as `firmware.bin` on the release tagged `CatMouse`. The launcher lists the branch and downloads that file. You can also write it to a slot over USB, as described in the `bootloader` README.
+- **As a launcher image** (board runs the `bootloader` branch): every push to this branch runs `.github/workflows/build.yml`, which builds the app and publishes it as `firmware.bin` on the release tagged `f1_race`. The launcher lists the branch and downloads that file. You can also write it to a slot over USB, as described in the `bootloader` README.
 - **On its own:** `& $pio run --target upload --upload-port COM11`. This replaces everything on the board, including the launcher.
 
 Monitor with `& $pio device monitor --port COM11 --baud 115200`. Ctrl+] exits.

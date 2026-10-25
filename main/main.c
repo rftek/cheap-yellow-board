@@ -1,1100 +1,1019 @@
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #include "cyd_display.h"
 #include "esp_log.h"
 #include "esp_random.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 
-/* Cat & Mouse: a small maze game in the manner of PAC-MAN. The mouse eats
-   the cheese while three cats chase it; a big cheese lets it chase them
-   back to their basket for a while. Steer with the W, A, S and D keys in
-   the bottom-right corner.
+/* F1 Race: a short pseudo-3D race in the manner of OutRun. The road is
+   drawn row by row in perspective, each row's depth fixed by its height
+   above the bottom of the screen, and bends toward the horizon on curves.
+   Hold the left or right half of the screen to steer; the car accelerates
+   by itself. Four or five random curves lead to the chequered flag.
 
-   Everything is drawn straight to the panel without a frame buffer. The
-   maze is 20x14 tiles of 16 pixels under a 16-pixel score bar, and each
-   frame redraws only the small boxes around the mouse and the cats,
-   composed in RAM first so nothing flickers. */
+   There is no frame buffer: the screen is composed in 20-row strips, each
+   sent with cyd_draw_bitmap. The road strips are redrawn every frame, the
+   sky only when the background scrolls or a message changes.
 
-static const char *TAG = "catmouse";
+   An unlabelled tap target in the top-right corner toggles Hamilton's
+   auto-win. With it on (the default), Hamilton, Kimi and Verstappen always
+   finish first, second and third; with it off they race at their own pace
+   and the result depends on the player's driving. A 2x2 dot in the corner
+   shows when it is off. */
+
+static const char *TAG = "f1_race";
 
 #define RGB565(r, g, b) ((uint16_t)((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3)))
 
-#define TILE 16
-#define COLS 20
-#define ROWS 14
-#define HUD_HEIGHT 16
-#define MAZE_WIDTH (COLS * TILE)
-#define MAZE_HEIGHT (ROWS * TILE)
+#define SCREEN_W CYD_LCD_WIDTH
+#define SCREEN_H CYD_LCD_HEIGHT
+#define STRIP 20                /* rows per cyd_draw_bitmap call */
+#define HORIZON 100             /* the first road row */
+#define CENTER_X (SCREEN_W / 2)
 
-#define FRAME_MS 40 /* 25 frames per second */
-#define FRAMES(seconds) ((int)((seconds) * 1000 / FRAME_MS))
+#define FRAME_MS 40 /* 25 frames per second at most */
 
-/* Speeds in eighths of a pixel per frame. */
-#define MOUSE_SPEED 14
-#define CAT_SPEED 11
-#define CAT_SPEED_MAX 15
-#define SCARED_SPEED 7
-#define EYES_SPEED 24
+/* The world: x across the road (the road is -1..1), s along it. The camera
+   sits CAMERA_HEIGHT above the road; a road row dy pixels below the
+   horizon (dy = 1 for the first) shows the road at depth DRAW_DISTANCE / dy. */
+#define CAMERA_HEIGHT 0.7f
+#define FOCAL 160.0f
+#define DRAW_DISTANCE (CAMERA_HEIGHT * FOCAL)
+#define ROAD_HALF 1.0f
+#define RUMBLE 0.14f
+#define LANE_LINE 0.03f
+#define SEGMENT 4.0f /* stripes alternate every segment */
+#define OFFSET_STEP 0.5f
+#define OFFSET_COUNT 226 /* DRAW_DISTANCE / OFFSET_STEP + 2 */
+#define FOG_START 8.0f
 
-#define START_LIVES 3
-#define CHEESE_POINTS 10
-#define BIG_CHEESE_POINTS 50
-#define CAT_POINTS 200
-/* Closer than this on both axes, a cat catches the mouse. */
-#define CATCH_DISTANCE 11
+/* The player's car is drawn this far ahead of the camera: 80 pixels wide,
+   twice the sprite's size. */
+#define PLAYER_Z 0.9f
+#define CAR_WIDTH 0.45f
+#define CAR_LENGTH 1.0f
 
-#define COLOR_BLACK 0x0000
-#define COLOR_WHITE 0xFFFF
-#define COLOR_WALL RGB565(20, 30, 150)
-#define COLOR_WALL_EDGE RGB565(90, 130, 255)
-#define COLOR_CHEESE RGB565(255, 220, 60)
-#define COLOR_BIG_CHEESE RGB565(255, 190, 0)
-#define COLOR_CHEESE_HOLE RGB565(200, 130, 0)
-#define COLOR_DOOR RGB565(255, 150, 200)
-#define COLOR_MOUSE RGB565(170, 170, 180)
-#define COLOR_PINK RGB565(255, 140, 170)
-#define COLOR_SCARED RGB565(40, 60, 255)
+/* Speeds in road units per second. */
+#define TOP_SPEED 55.0f
+#define OFFROAD_SPEED 22.0f
+#define COAST_SPEED 20.0f
+#define ACCELERATION 10.0f
+#define BRAKING 25.0f
+#define STEER_RATE 1.8f   /* across the road per second at top speed */
+#define CENTRIFUGAL 0.34f /* drift per unit of curvature and speed */
+#define PARALLAX 25.0f    /* background pixels per unit of curvature and speed */
+#define GRASS_EDGE 2.2f
+#define KMH_PER_SPEED 6
 
-/* '#' wall, '.' cheese, 'o' big cheese, '-' the basket's door, ' ' empty.
-   Row 7 runs off both sides: leaving one side enters the other. The basket
-   (row 7, columns 8-11) is closed; cats leave it by appearing on the tile
-   above its door. The WASD pad covers rows 11-13 of columns 14-19, so
-   those are wall and the bottom-right corner is reshaped around them,
-   with its big cheese moved up to row 9. */
-static const char *const MAZE_LAYOUT[ROWS] = {
-    "####################",
-    "#o.......##.......o#",
-    "#.##.###.##.###.##.#",
-    "#..................#",
-    "#.##.#.######.#.##.#",
-    "#....#........#....#",
-    "####.#.##--##.#.####",
-    "    .#.#    #.#.    ",
-    "####.#.######.#.####",
-    "#........##....o####",
-    "#.##.###.##.########",
-    "#o............######",
-    "###......##...######",
-    "####################",
+/* The track: curvature for every road unit, positive bending right. */
+#define TRACK_MAX 3600
+#define START_STRAIGHT 120
+#define FINAL_STRAIGHT 250
+#define CURVE_EASE 50
+#define FINISH_SECONDS 2.5f
+
+/* Hamilton's auto-win: rivals close up on the player from this far into the
+   race, to these leads at the finish. */
+#define RIG_FROM 0.45f
+#define PACE_JITTER 0.006f
+#define RIG_RAMP 0.4f
+#define RIG_CLAMP 0.9f
+
+/* The secret corner. */
+#define SECRET_SIZE 40
+#define INDICATOR_X 316
+#define INDICATOR_Y 1
+#define INDICATOR_SIZE 2
+
+/* Touch readings drop out now and then while a finger is held. */
+#define RELEASE_FRAMES 3
+
+#define COLOR_SKY_TOP RGB565(30, 80, 200)
+#define COLOR_HAZE RGB565(170, 210, 250)
+#define COLOR_MOUNTAIN RGB565(90, 105, 160)
+#define COLOR_SNOW RGB565(230, 235, 245)
+#define COLOR_HILLS RGB565(40, 120, 50)
+#define COLOR_GRASS_LIGHT RGB565(16, 200, 16)
+#define COLOR_GRASS_DARK RGB565(0, 154, 0)
+#define COLOR_RUMBLE_LIGHT RGB565(255, 255, 255)
+#define COLOR_RUMBLE_DARK RGB565(210, 0, 0)
+#define COLOR_ROAD_LIGHT RGB565(112, 112, 112)
+#define COLOR_ROAD_DARK RGB565(96, 96, 96)
+#define COLOR_LANE RGB565(240, 240, 240)
+#define COLOR_SHADOW RGB565(0, 0, 0)
+#define COLOR_INDICATOR RGB565(60, 60, 60)
+#define COLOR_GREEN RGB565(40, 230, 60)
+#define TRANSPARENT 0xF81F
+
+/* 3x5 glyphs, one byte per row, bit 2 on the left. */
+static const uint8_t FONT[128][5] = {
+    ['0'] = {7, 5, 5, 5, 7}, ['1'] = {2, 6, 2, 2, 7}, ['2'] = {7, 1, 7, 4, 7},
+    ['3'] = {7, 1, 7, 1, 7}, ['4'] = {5, 5, 7, 1, 1}, ['5'] = {7, 4, 7, 1, 7},
+    ['6'] = {7, 4, 7, 5, 7}, ['7'] = {7, 1, 1, 2, 2}, ['8'] = {7, 5, 7, 5, 7},
+    ['9'] = {7, 5, 7, 1, 7}, ['A'] = {2, 5, 7, 5, 5}, ['B'] = {6, 5, 6, 5, 6},
+    ['C'] = {3, 4, 4, 4, 3}, ['D'] = {6, 5, 5, 5, 6}, ['E'] = {7, 4, 6, 4, 7},
+    ['F'] = {7, 4, 6, 4, 4}, ['G'] = {3, 4, 5, 5, 3}, ['H'] = {5, 5, 7, 5, 5},
+    ['I'] = {7, 2, 2, 2, 7}, ['J'] = {1, 1, 1, 5, 2}, ['K'] = {5, 5, 6, 5, 5},
+    ['L'] = {4, 4, 4, 4, 7}, ['M'] = {5, 7, 7, 5, 5}, ['N'] = {6, 5, 5, 5, 5},
+    ['O'] = {2, 5, 5, 5, 2}, ['P'] = {6, 5, 6, 4, 4}, ['Q'] = {2, 5, 5, 6, 3},
+    ['R'] = {6, 5, 6, 5, 5}, ['S'] = {3, 4, 2, 1, 6}, ['T'] = {7, 2, 2, 2, 2},
+    ['U'] = {5, 5, 5, 5, 7}, ['V'] = {5, 5, 5, 5, 2}, ['W'] = {5, 5, 7, 7, 5},
+    ['X'] = {5, 5, 2, 5, 5}, ['Y'] = {5, 5, 2, 2, 2}, ['Z'] = {7, 1, 2, 4, 7},
+    ['/'] = {1, 1, 2, 4, 4}, ['!'] = {2, 2, 2, 0, 2}, ['.'] = {0, 0, 0, 0, 2},
+    ['+'] = {0, 2, 7, 2, 0}, ['-'] = {0, 0, 7, 0, 0}, [':'] = {0, 2, 0, 2, 0},
 };
 
-#define MOUSE_START_COL 9
-#define MOUSE_START_ROW 11
-#define EXIT_COL 9 /* where cats appear when they leave the basket */
-#define EXIT_ROW 5
-#define BASKET_Y (7 * TILE)
+/* An F1 car from behind: 'c' body, 'd' trim, 'h' helmet, 'k' tires and
+   diffuser, 'g' gray, 'r' rain light, '.' transparent. The car's number
+   goes on the engine cover. */
+#define SPRITE_W 40
+#define SPRITE_H 20
+static const char CAR_SPRITE[SPRITE_H][SPRITE_W + 1] = {
+    "......dddddddddddddddddddddddddddd......",
+    "......dccccccccccccccccccccccccccd......",
+    "......dccccccccccccccccccccccccccd......",
+    "......dddddddddddddddddddddddddddd......",
+    "......d...........hhhh...........d......",
+    "......d..........hhhhhh..........d......",
+    "......d........cccccccccc........d......",
+    ".kkkkkkk.....cccccccccccccc.....kkkkkkk.",
+    "kkkkkkkkk...cccccccccccccccc...kkkkkkkkk",
+    "kgkkkkkkk.cccccccccccccccccccc.kkkkkkkgk",
+    "kgkkkkkkkgccccccccccccccccccccgkkkkkkkgk",
+    "kgkkkkkkk.cccccccccccccccccccc.kkkkkkkgk",
+    "kgkkkkkkk.cccccccccccccccccccc.kkkkkkkgk",
+    "kgkkkkkkkgccccccccccccccccccccgkkkkkkkgk",
+    "kgkkkkkkk.dddddddddddddddddddd.kkkkkkkgk",
+    "kgkkkkkkk..kkkkkkkkkkkkkkkkkk..kkkkkkkgk",
+    "kgkkkkkkk..kkgkkgkkrrkkgkkgkk..kkkkkkkgk",
+    "kgkkkkkkk..kkgkkgkkrrkkgkkgkk..kkkkkkkgk",
+    "kkkkkkkkk..kkgkkgkkkkkkgkkgkk..kkkkkkkkk",
+    ".kkkkkkk........................kkkkkkk.",
+};
+#define NUMBER_ROW 9
 
-enum { DIR_UP, DIR_LEFT, DIR_DOWN, DIR_RIGHT, DIR_NONE };
-static const int DX[4] = {0, -1, 0, 1};
-static const int DY[4] = {-1, 0, 1, 0};
-
-static int opposite(int dir)
-{
-    return dir == DIR_NONE ? DIR_NONE : (dir + 2) % 4;
-}
+enum { HAMILTON, KIMI, VERSTAPPEN, PLAYER, CAR_COUNT };
 
 typedef struct {
-    int x, y;         /* top-left corner, in maze pixels */
-    int old_x, old_y; /* where it was drawn last */
-    int dir;
-    int sub; /* eighths of a pixel still to move */
-} actor_t;
+    const char *name;
+    int number; /* 0: none */
+    uint16_t body, trim, numeral, helmet;
+    uint16_t label;  /* name color on the results screen */
+    float base_pace; /* share of TOP_SPEED */
+    float pace;      /* this race's, varied a little */
+    float lead;      /* when rigged, the lead over the player at the finish */
+    /* Race state. */
+    float s, x, v;
+    float lane, lane_timer;
+    float finish_time; /* seconds, or negative before the finish */
+    uint16_t pixels[SPRITE_H * SPRITE_W];
+} car_t;
 
-typedef enum { CAT_BASKET, CAT_HUNT, CAT_SCARED, CAT_EYES } cat_mode_t;
+static car_t cars[CAR_COUNT] = {
+    [HAMILTON] = {.name = "HAMILTON", .number = 44, .body = RGB565(220, 0, 0),
+                  .trim = RGB565(120, 0, 0), .numeral = RGB565(255, 255, 255),
+                  .helmet = RGB565(255, 220, 0), .label = RGB565(255, 60, 60),
+                  .base_pace = 0.965f, .lead = 30},
+    [KIMI] = {.name = "KIMI", .number = 12, .body = RGB565(185, 190, 195),
+              .trim = RGB565(0, 170, 160), .numeral = RGB565(20, 20, 20),
+              .helmet = RGB565(40, 120, 255), .label = RGB565(0, 220, 200),
+              .base_pace = 0.955f, .lead = 18},
+    [VERSTAPPEN] = {.name = "VERSTAPPEN", .number = 3, .body = RGB565(25, 35, 110),
+                    .trim = RGB565(220, 20, 50), .numeral = RGB565(255, 200, 0),
+                    .helmet = RGB565(255, 120, 0), .label = RGB565(110, 140, 255),
+                    .base_pace = 0.95f, .lead = 8},
+    [PLAYER] = {.name = "YOU", .body = RGB565(255, 210, 0), .trim = RGB565(30, 30, 30),
+                .helmet = RGB565(255, 255, 255), .label = CYD_COLOR_YELLOW},
+};
 
-typedef struct {
-    actor_t actor;
-    cat_mode_t mode;
-    int timer;    /* frames left in the basket */
-    int basket_x; /* its place in the basket */
-    uint16_t color;
-    int home_col, home_row; /* the corner it wanders to when not hunting */
-} cat_t;
+static float curvature[TRACK_MAX];
+static float track_length;
+static int curve_count;
 
-#define CAT_COUNT 3
-
-static char maze[ROWS][COLS + 1];
-static int cheese_left;
-static actor_t mouse;
-static int wanted_dir; /* the way the player last asked to go */
-static int mouse_facing;
-static cat_t cats[CAT_COUNT];
-static int scared_frames; /* frames left of the big cheese */
-static int cats_caught;   /* during this big cheese, for doubling points */
-static int mode_frames;   /* into the wander/hunt cycle */
-static bool wandering;
-static bool big_cheese_shown = true; /* big cheese blinks */
-static bool walls_flash;             /* walls drawn white, when a level is cleared */
+static bool rigged = true; /* Hamilton's auto-win */
+static float race_time;
 static int frame_count;
-static uint32_t score;
-static uint32_t high_score;
-static int lives;
-static int level;
 
-/* ---- Sprites ----
+/* Per frame: the road's sideways offset at each depth from the camera. */
+static float offsets[OFFSET_COUNT];
+static float camera_s;
+static float bg_scroll;
 
-   16x16, one character per pixel. The mouse is drawn facing right and
-   turned for the other directions; 'X' is each cat's own color. */
+static const char *message;
+static uint16_t message_color;
+static const char *drawn_message;
+static int drawn_far = -1, drawn_near = -1;
+static bool sky_dirty = true;
 
-static const char *const MOUSE_SPRITE[TILE] = {
-    "................",
-    "........PP......",
-    ".......PPPP.....",
-    "......GGPPGG....",
-    "....GGGGGGGGG...",
-    "...GGGGGGGGGGG..",
-    "T.GGGGGGGGGGKGG.",
-    ".TGGGGGGGGGGGGGN",
-    ".TGGGGGGGGGGGGGN",
-    "T.GGGGGGGGGGKGG.",
-    "...GGGGGGGGGGG..",
-    "....GGGGGGGGG...",
-    "......GGPPGG....",
-    ".......PPPP.....",
-    "........PP......",
-    "................",
-};
-
-static const char *const CAT_SPRITE[TILE] = {
-    "................",
-    ".X............X.",
-    ".XX..........XX.",
-    ".XPX........XPX.",
-    ".XXXXXXXXXXXXXX.",
-    "XXXXXXXXXXXXXXXX",
-    "XXXWWXXXXXXWWXXX",
-    "XXXWKXXXXXXKWXXX",
-    "XXXXXXXXXXXXXXXX",
-    "XXXXXXXPPXXXXXXX",
-    "WWWXXXXXXXXXXWWW",
-    "XXXWWXXXXXXWWXXX",
-    ".XXXXXXXXXXXXXX.",
-    "..XXXXXXXXXXXX..",
-    "...XXXXXXXXXX...",
-    "................",
-};
-
-/* The mouse sprite's pixel at (x, y) when facing dir. */
-static char mouse_sprite_at(int dir, int x, int y)
-{
-    switch (dir) {
-    case DIR_LEFT:
-        return MOUSE_SPRITE[y][TILE - 1 - x];
-    case DIR_UP:
-        return MOUSE_SPRITE[x][TILE - 1 - y];
-    case DIR_DOWN:
-        return MOUSE_SPRITE[TILE - 1 - x][y];
-    default:
-        return MOUSE_SPRITE[y][x];
-    }
-}
-
-static bool mouse_pixel(int dir, int x, int y, uint16_t *color)
-{
-    switch (mouse_sprite_at(dir, x, y)) {
-    case 'G':
-        *color = COLOR_MOUSE;
-        return true;
-    case 'P':
-    case 'N':
-    case 'T':
-        *color = COLOR_PINK;
-        return true;
-    case 'K':
-        *color = COLOR_BLACK;
-        return true;
-    default:
-        return false;
-    }
-}
-
-static bool cat_pixel(const cat_t *cat, int x, int y, uint16_t *color)
-{
-    char c = CAT_SPRITE[y][x];
-    if (c == '.') {
-        return false;
-    }
-    if (cat->mode == CAT_EYES) {
-        /* Caught: only its eyes run home. */
-        if (c != 'W' && c != 'K') {
-            return false;
-        }
-        *color = c == 'W' ? COLOR_WHITE : COLOR_SCARED;
-        return true;
-    }
-    uint16_t body = cat->color;
-    if (cat->mode == CAT_SCARED) {
-        /* Flashes white as the big cheese wears off. */
-        body = scared_frames < FRAMES(2) && (frame_count / 5) % 2 ? COLOR_WHITE : COLOR_SCARED;
-    }
-    switch (c) {
-    case 'X':
-        *color = body;
-        break;
-    case 'W':
-        *color = COLOR_WHITE;
-        break;
-    case 'K':
-        *color = COLOR_BLACK;
-        break;
-    default:
-        *color = COLOR_PINK;
-        break;
-    }
-    return true;
-}
-
-/* ---- The maze ---- */
-
-static bool layout_wall(int col, int row)
-{
-    return col < 0 || col >= COLS || row < 0 || row >= ROWS || MAZE_LAYOUT[row][col] == '#';
-}
-
-/* True when the mouse or a cat may stand on the tile. */
-static bool passable(int col, int row)
-{
-    col = (col + COLS) % COLS;
-    return row >= 0 && row < ROWS && maze[row][col] != '#' && maze[row][col] != '-';
-}
-
-static uint16_t big_cheese_pixel(int x, int y)
-{
-    /* A round cheese with two holes, in half-pixel units from the center. */
-    int dx = 2 * x - (TILE - 1);
-    int dy = 2 * y - (TILE - 1);
-    if (dx * dx + dy * dy > 11 * 11) {
-        return COLOR_BLACK;
-    }
-    if ((dx - 4) * (dx - 4) + (dy + 3) * (dy + 3) <= 9 ||
-        (dx + 4) * (dx + 4) + (dy - 4) * (dy - 4) <= 6) {
-        return COLOR_CHEESE_HOLE;
-    }
-    return COLOR_BIG_CHEESE;
-}
-
-/* The maze's own pixel at (x, y), without the mouse or cats. */
-static uint16_t maze_pixel(int x, int y)
-{
-    int col = x / TILE;
-    int row = y / TILE;
-    int lx = x % TILE;
-    int ly = y % TILE;
-    switch (maze[row][col]) {
-    case '#': {
-        if (walls_flash) {
-            return COLOR_WHITE;
-        }
-        /* A lighter rim along the sides that face a corridor. */
-        bool rim = (ly < 3 && !layout_wall(col, row - 1)) ||
-                   (ly > TILE - 4 && !layout_wall(col, row + 1)) ||
-                   (lx < 3 && !layout_wall(col - 1, row)) ||
-                   (lx > TILE - 4 && !layout_wall(col + 1, row));
-        return rim ? COLOR_WALL_EDGE : COLOR_WALL;
-    }
-    case '.':
-        return lx >= 6 && lx <= 9 && ly >= 6 && ly <= 9 ? COLOR_CHEESE : COLOR_BLACK;
-    case 'o':
-        return big_cheese_shown ? big_cheese_pixel(lx, ly) : COLOR_BLACK;
-    case '-':
-        return ly >= 6 && ly <= 9 ? COLOR_DOOR : COLOR_BLACK;
-    default:
-        return COLOR_BLACK;
-    }
-}
-
-/* ---- The WASD pad ----
-
-   Four keys in the bottom-right corner, laid out like a keyboard's: W above
-   S, with A and D either side of it. The tiles under the pad are wall, and
-   the maze drawing leaves the pad's corner to it. */
-
-#define KEY_WIDTH 32
-#define KEY_HEIGHT 24
-#define KEY_GLYPH_SCALE 4
-#define PAD_WIDTH (3 * KEY_WIDTH)
-#define PAD_HEIGHT (2 * KEY_HEIGHT)
-#define PAD_X (CYD_LCD_WIDTH - PAD_WIDTH) /* screen and maze x are the same */
-#define PAD_Y (CYD_LCD_HEIGHT - PAD_HEIGHT)
-#define PAD_MAZE_Y (PAD_Y - HUD_HEIGHT)
-/* Touches this close outside the pad still go to the nearest key, for the
-   resistive panel's aim. */
-#define PAD_SLOP 10
-#define COLOR_KEY RGB565(60, 70, 110)
-#define COLOR_KEY_PRESSED RGB565(255, 220, 60)
+static uint16_t strip[STRIP * SCREEN_W];
+static uint16_t sky_colors[HORIZON];
+static uint8_t far_heights[512];
+static uint8_t near_heights[512];
 
 typedef struct {
-    uint16_t glyph; /* 3x5, three bits per row (octal) */
-    int dir;
-    int x, y; /* within the pad */
-} pad_key_t;
+    int x, y, w, h; /* screen rectangle, top-left */
+    float z;
+    const uint16_t *pixels;
+} sprite_t;
 
-static const pad_key_t PAD_KEYS[4] = {
-    {055775, DIR_UP, KEY_WIDTH, 0},              /* W */
-    {025755, DIR_LEFT, 0, KEY_HEIGHT},           /* A */
-    {034216, DIR_DOWN, KEY_WIDTH, KEY_HEIGHT},   /* S */
-    {065556, DIR_RIGHT, 2 * KEY_WIDTH, KEY_HEIGHT}, /* D */
-};
+static sprite_t sprites[CAR_COUNT];
+static int sprite_count;
 
-static int pressed_key = -1;
-
-/* A 3x5 glyph's pixel at (x, y), drawn scale times its size. */
-static bool glyph_pixel(uint16_t glyph, int scale, int x, int y)
+static float random_range(float low, float high)
 {
-    if (x < 0 || x >= 3 * scale || y < 0 || y >= 5 * scale) {
-        return false;
-    }
-    int bits = glyph >> (3 * (4 - y / scale));
-    return (bits >> (2 - x / scale)) & 1;
+    return low + (high - low) * (float)(esp_random() >> 8) / (float)(1 << 24);
 }
 
-/* The pad's pixel at (x, y) within it, false off the keys (the corners
-   beside W, which show the wall beneath): each key has a one-pixel gap at
-   its right and bottom, a centered letter, and lights while pressed. */
-static bool pad_pixel(int x, int y, uint16_t *color)
+static uint16_t blend(uint16_t a, uint16_t b, int t)
 {
-    /* The letter's offset within the key's visible part. */
-    const int letter_x = (KEY_WIDTH - 1 - 3 * KEY_GLYPH_SCALE) / 2;
-    const int letter_y = (KEY_HEIGHT - 1 - 5 * KEY_GLYPH_SCALE) / 2;
-    for (int i = 0; i < 4; ++i) {
-        const pad_key_t *key = &PAD_KEYS[i];
-        int lx = x - key->x;
-        int ly = y - key->y;
-        if (lx < 0 || lx >= KEY_WIDTH || ly < 0 || ly >= KEY_HEIGHT) {
-            continue;
-        }
-        bool pressed = i == pressed_key;
-        if (lx == KEY_WIDTH - 1 || ly == KEY_HEIGHT - 1) {
-            *color = COLOR_BLACK;
-        } else if (glyph_pixel(key->glyph, KEY_GLYPH_SCALE, lx - letter_x, ly - letter_y)) {
-            *color = pressed ? COLOR_BLACK : COLOR_WHITE;
-        } else {
-            *color = pressed ? COLOR_KEY_PRESSED : COLOR_KEY;
-        }
-        return true;
-    }
-    return false;
+    int r = ((a >> 11) * (256 - t) + (b >> 11) * t) >> 8;
+    int g = (((a >> 5) & 0x3F) * (256 - t) + ((b >> 5) & 0x3F) * t) >> 8;
+    int bl = ((a & 0x1F) * (256 - t) + (b & 0x1F) * t) >> 8;
+    return (uint16_t)((r << 11) | (g << 5) | bl);
 }
 
-/* ---- Drawing ---- */
-
-#define REGION_SIZE 32
-static uint16_t region[REGION_SIZE * REGION_SIZE];
-
-static bool overlaps(int x0, int y0, int x1, int y1, const actor_t *actor)
+static float curvature_at(float s)
 {
-    return actor->x < x1 && actor->x + TILE > x0 && actor->y < y1 && actor->y + TILE > y0;
+    int i = (int)s;
+    return i >= 0 && i < TRACK_MAX ? curvature[i] : 0;
 }
 
-/* Draws maze pixels [x0, x1) x [y0, y1) with the cats and the mouse on top. */
-static void draw_region(int x0, int y0, int x1, int y1)
+/* ---- Setup ---- */
+
+static void build_sprites(void)
 {
-    x0 = x0 < 0 ? 0 : x0;
-    y0 = y0 < 0 ? 0 : y0;
-    x1 = x1 > MAZE_WIDTH ? MAZE_WIDTH : x1;
-    y1 = y1 > MAZE_HEIGHT ? MAZE_HEIGHT : y1;
-    int width = x1 - x0;
-    int height = y1 - y0;
-    if (width <= 0 || height <= 0) {
-        return;
-    }
-    if (width > REGION_SIZE || height > REGION_SIZE) {
-        int middle_x = width > REGION_SIZE ? x0 + width / 2 : x1;
-        int middle_y = height > REGION_SIZE ? y0 + height / 2 : y1;
-        draw_region(x0, y0, middle_x, middle_y);
-        draw_region(middle_x, y0, x1, middle_y);
-        draw_region(x0, middle_y, middle_x, y1);
-        draw_region(middle_x, middle_y, x1, y1);
-        return;
-    }
-    for (int y = y0; y < y1; ++y) {
-        for (int x = x0; x < x1; ++x) {
-            region[(y - y0) * width + (x - x0)] = maze_pixel(x, y);
-        }
-    }
-    for (int i = 0; i <= CAT_COUNT; ++i) {
-        /* Cats first, so the mouse stays on top. */
-        const actor_t *actor = i < CAT_COUNT ? &cats[i].actor : &mouse;
-        if (!overlaps(x0, y0, x1, y1, actor)) {
-            continue;
-        }
-        for (int y = y0; y < y1; ++y) {
-            for (int x = x0; x < x1; ++x) {
-                int sx = x - actor->x;
-                int sy = y - actor->y;
-                uint16_t color;
-                if (sx < 0 || sx >= TILE || sy < 0 || sy >= TILE) {
-                    continue;
+    for (int i = 0; i < CAR_COUNT; ++i) {
+        car_t *car = &cars[i];
+        for (int y = 0; y < SPRITE_H; ++y) {
+            for (int x = 0; x < SPRITE_W; ++x) {
+                uint16_t color = TRANSPARENT;
+                switch (CAR_SPRITE[y][x]) {
+                case 'c': color = car->body; break;
+                case 'd': color = car->trim; break;
+                case 'h': color = car->helmet; break;
+                case 'k': color = RGB565(25, 25, 25); break;
+                case 'g': color = RGB565(110, 110, 110); break;
+                case 'r': color = RGB565(255, 40, 40); break;
+                default: break;
                 }
-                bool drawn = i < CAT_COUNT ? cat_pixel(&cats[i], sx, sy, &color)
-                                           : mouse_pixel(mouse_facing, sx, sy, &color);
-                if (drawn) {
-                    region[(y - y0) * width + (x - x0)] = color;
+                car->pixels[y * SPRITE_W + x] = color;
+            }
+        }
+        if (car->number == 0) {
+            continue;
+        }
+        /* One digit centered, or two either side of the middle. */
+        char digits[4];
+        snprintf(digits, sizeof(digits), "%d", car->number % 100);
+        int count = (int)strlen(digits);
+        for (int d = 0; d < count; ++d) {
+            int left = count == 1 ? 18 : 16 + d * 5;
+            const uint8_t *glyph = FONT[(int)digits[d]];
+            for (int gy = 0; gy < 5; ++gy) {
+                for (int gx = 0; gx < 3; ++gx) {
+                    if (glyph[gy] & (4 >> gx)) {
+                        car->pixels[(NUMBER_ROW + gy) * SPRITE_W + left + gx] = car->numeral;
+                    }
                 }
             }
         }
     }
-    /* The pad's corner is kept out of the maze. */
-    for (int y = y0 > PAD_MAZE_Y ? y0 : PAD_MAZE_Y; y < y1; ++y) {
-        for (int x = x0 > PAD_X ? x0 : PAD_X; x < x1; ++x) {
-            uint16_t color;
-            if (pad_pixel(x - PAD_X, y - PAD_MAZE_Y, &color)) {
-                region[(y - y0) * width + (x - x0)] = color;
-            }
+}
+
+static void build_scenery(void)
+{
+    for (int y = 0; y < HORIZON; ++y) {
+        sky_colors[y] = blend(COLOR_SKY_TOP, COLOR_HAZE, y * 256 / HORIZON);
+    }
+    const float tau = 6.2831853f / 512;
+    for (int x = 0; x < 512; ++x) {
+        far_heights[x] = (uint8_t)(22 + 10 * sinf(tau * 2 * x) + 7 * sinf(tau * 5 * x + 1.3f) +
+                                   3 * sinf(tau * 11 * x + 0.4f));
+        near_heights[x] = (uint8_t)(8 + 4 * sinf(tau * 3 * x + 2) + 3 * sinf(tau * 7 * x));
+    }
+}
+
+/* A start straight, four or five curves with straights between, a final
+   straight and the finish line, then road to coast on. */
+static void build_track(void)
+{
+    memset(curvature, 0, sizeof(curvature));
+    int s = START_STRAIGHT;
+    curve_count = 4 + (int)(esp_random() % 2);
+    for (int i = 0; i < curve_count; ++i) {
+        s += 100 + (int)(esp_random() % 151);
+        int length = 150 + (int)(esp_random() % 151);
+        float strength = random_range(0.03f, 0.07f) * (esp_random() % 2 ? 1 : -1);
+        for (int k = 0; k < length; ++k) {
+            float ramp = fminf(1, fminf((float)k / CURVE_EASE, (float)(length - 1 - k) / CURVE_EASE));
+            curvature[s + k] = strength * ramp * ramp * (3 - 2 * ramp);
         }
+        ESP_LOGI(TAG, "Curve %d at %d: %d long, %s %.3f", i + 1, s, length,
+                 strength > 0 ? "right" : "left", fabsf(strength));
+        s += length;
     }
-    ESP_ERROR_CHECK(cyd_draw_bitmap(x0, HUD_HEIGHT + y0, width, height, region));
+    track_length = (float)(s + FINAL_STRAIGHT);
 }
 
-static void draw_pad(void)
+static void reset_cars(void)
 {
-    draw_region(PAD_X, PAD_MAZE_Y, MAZE_WIDTH, MAZE_HEIGHT);
-}
-
-static void draw_tile(int col, int row)
-{
-    draw_region(col * TILE, row * TILE, (col + 1) * TILE, (row + 1) * TILE);
-}
-
-static void draw_maze(void)
-{
-    for (int row = 0; row < ROWS; ++row) {
-        for (int col = 0; col < COLS; ++col) {
-            draw_tile(col, row);
-        }
+    /* Grid: the player starts fourth, in the right-hand lane. */
+    static const float grid_s[CAR_COUNT] = {15, 10, 5, 0};
+    static const float grid_x[CAR_COUNT] = {-0.45f, 0.45f, -0.45f, 0.45f};
+    for (int i = 0; i < CAR_COUNT; ++i) {
+        car_t *car = &cars[i];
+        car->s = grid_s[i];
+        car->x = car->lane = grid_x[i];
+        car->v = 0;
+        car->lane_timer = random_range(3, 6);
+        car->finish_time = -1;
+        car->pace = car->base_pace + random_range(-PACE_JITTER, PACE_JITTER);
     }
+    bg_scroll = 0;
+    race_time = 0;
+    sky_dirty = true;
 }
 
-/* Redraws where an actor was and where it is now: one box when they
-   overlap, two after a jump through the tunnel or into the basket. */
-static void redraw_actor(actor_t *actor)
-{
-    int ox = actor->old_x;
-    int oy = actor->old_y;
-    if (abs(ox - actor->x) < TILE && abs(oy - actor->y) < TILE) {
-        int x0 = ox < actor->x ? ox : actor->x;
-        int y0 = oy < actor->y ? oy : actor->y;
-        int x1 = (ox > actor->x ? ox : actor->x) + TILE;
-        int y1 = (oy > actor->y ? oy : actor->y) + TILE;
-        draw_region(x0, y0, x1, y1);
-    } else {
-        draw_region(ox, oy, ox + TILE, oy + TILE);
-        draw_region(actor->x, actor->y, actor->x + TILE, actor->y + TILE);
-    }
-    actor->old_x = actor->x;
-    actor->old_y = actor->y;
-}
-
-/* 3x5 digits, three bits per row (octal), drawn at twice their size. */
-static const uint16_t DIGITS[10] = {
-    075557, 026227, 071747, 071717, 055711, 074717, 074757, 071111, 075757, 075717,
-};
-
-static bool digit_pixel(const char *text, int left, int x, int y)
-{
-    int index = (x - left) / 8;
-    int cx = (x - left) % 8;
-    int cy = y - 3;
-    if (x < left || index >= (int)strlen(text)) {
-        return false;
-    }
-    return glyph_pixel(DIGITS[text[index] - '0'], 2, cx, cy);
-}
-
-#define LEVEL_ICON_X 136
-#define LEVEL_TEXT_X (LEVEL_ICON_X + TILE + 2)
-
-/* The score at the left, the level by a big cheese, the lives at the right. */
-static uint16_t hud_pixel(int x, int y, const char *score_text, const char *level_text)
-{
-    if (digit_pixel(score_text, 4, x, y) || digit_pixel(level_text, LEVEL_TEXT_X, x, y)) {
-        return COLOR_WHITE;
-    }
-    if (x >= LEVEL_ICON_X && x < LEVEL_ICON_X + TILE) {
-        return big_cheese_pixel(x - LEVEL_ICON_X, y);
-    }
-    int from_right = CYD_LCD_WIDTH - 1 - x;
-    int life = from_right / (TILE + 2);
-    int lx = TILE - 1 - from_right % (TILE + 2);
-    uint16_t color;
-    if (life < lives && lx >= 0 && mouse_pixel(DIR_RIGHT, lx, y, &color)) {
-        return color;
-    }
-    return COLOR_BLACK;
-}
-
-static void draw_hud(void)
-{
-    char score_text[12];
-    char level_text[12];
-    snprintf(score_text, sizeof(score_text), "%u", (unsigned)(score % 1000000));
-    snprintf(level_text, sizeof(level_text), "%d", level % 100);
-    for (int left = 0; left < CYD_LCD_WIDTH; left += REGION_SIZE) {
-        for (int y = 0; y < HUD_HEIGHT; ++y) {
-            for (int x = 0; x < REGION_SIZE; ++x) {
-                region[y * REGION_SIZE + x] = hud_pixel(left + x, y, score_text, level_text);
-            }
-        }
-        ESP_ERROR_CHECK(cyd_draw_bitmap(left, 0, REGION_SIZE, HUD_HEIGHT, region));
-    }
-}
-
-static void draw_big_cheeses(void)
-{
-    for (int row = 0; row < ROWS; ++row) {
-        for (int col = 0; col < COLS; ++col) {
-            if (maze[row][col] == 'o') {
-                draw_tile(col, row);
-            }
-        }
-    }
-}
-
-/* ---- Text screens ---- */
-
-/* Text centered in the 17 columns of one row. */
-static void text_row(int row, uint16_t color, const char *text)
-{
-    char line[40];
-    int length = (int)strnlen(text, CYD_TEXT_COLUMNS);
-    int pad = (CYD_TEXT_COLUMNS - length) / 2;
-    snprintf(line, sizeof(line), "%*s%.*s", pad, "", length, text);
-    ESP_ERROR_CHECK(cyd_text_row(row, color, COLOR_BLACK, line));
-}
-
-static void clear_screen(void)
-{
-    ESP_ERROR_CHECK(cyd_fill_rect(0, 0, CYD_LCD_WIDTH, CYD_LCD_HEIGHT, COLOR_BLACK));
-}
-
-/* Draws the mouse, or a cat, on a black background anywhere on the screen. */
-static void draw_sprite(int x, int y, const cat_t *cat)
-{
-    for (int sy = 0; sy < TILE; ++sy) {
-        for (int sx = 0; sx < TILE; ++sx) {
-            uint16_t color = COLOR_BLACK;
-            if (cat != NULL) {
-                cat_pixel(cat, sx, sy, &color);
-            } else {
-                mouse_pixel(DIR_RIGHT, sx, sy, &color);
-            }
-            region[sy * TILE + sx] = color;
-        }
-    }
-    ESP_ERROR_CHECK(cyd_draw_bitmap(x, y, TILE, TILE, region));
-}
-
-/* Waits for a finger to land and lift. */
-static void wait_for_tap(void)
-{
-    cyd_touch_point_t point;
-    while (cyd_touch_read(&point)) {
-        vTaskDelay(pdMS_TO_TICKS(20));
-    }
-    vTaskDelay(pdMS_TO_TICKS(300));
-    while (!cyd_touch_read(&point)) {
-        vTaskDelay(pdMS_TO_TICKS(20));
-    }
-    while (cyd_touch_read(&point)) {
-        vTaskDelay(pdMS_TO_TICKS(20));
-    }
-}
-
-static void show_title(void)
-{
-    static const cat_t title_cat = {.mode = CAT_HUNT, .color = RGB565(255, 140, 30)};
-    char high[32];
-    snprintf(high, sizeof(high), "HIGH %u", (unsigned)high_score);
-    clear_screen();
-    text_row(1, CYD_COLOR_YELLOW, "CAT & MOUSE");
-    text_row(3, CYD_COLOR_WHITE, "Eat the cheese,");
-    text_row(4, CYD_COLOR_WHITE, "dodge the cats.");
-    text_row(5, CYD_COLOR_WHITE, "Big cheese lets");
-    text_row(6, CYD_COLOR_WHITE, "you chase them.");
-    text_row(7, CYD_COLOR_CYAN, "Steer: W A S D");
-    text_row(8, CYD_COLOR_GRAY, high);
-    text_row(9, CYD_COLOR_YELLOW, "tap to play");
-    /* A mouse running from a cat, either side of the title. */
-    draw_sprite(12, CYD_FONT_HEIGHT + 4, NULL);
-    draw_sprite(CYD_LCD_WIDTH - 12 - TILE, CYD_FONT_HEIGHT + 4, &title_cat);
-    wait_for_tap();
-}
-
-static void load_high_score(void)
+static void load_rigged(void)
 {
     nvs_handle_t nvs;
-    /* Never erase NVS here: it holds the launcher's settings too. */
-    if (nvs_flash_init() == ESP_OK && nvs_open("catmouse", NVS_READONLY, &nvs) == ESP_OK) {
-        nvs_get_u32(nvs, "high", &high_score);
+    uint8_t value = 1;
+    if (nvs_flash_init() == ESP_OK && nvs_open("f1_race", NVS_READONLY, &nvs) == ESP_OK) {
+        nvs_get_u8(nvs, "rigged", &value);
         nvs_close(nvs);
     }
+    rigged = value != 0;
 }
 
-static void save_high_score(void)
+static void toggle_rigged(void)
 {
     nvs_handle_t nvs;
-    if (nvs_open("catmouse", NVS_READWRITE, &nvs) == ESP_OK) {
-        nvs_set_u32(nvs, "high", high_score);
+    rigged = !rigged;
+    ESP_LOGI(TAG, "Hamilton's auto-win %s", rigged ? "on" : "off");
+    if (nvs_open("f1_race", NVS_READWRITE, &nvs) == ESP_OK) {
+        nvs_set_u8(nvs, "rigged", rigged ? 1 : 0);
         nvs_commit(nvs);
         nvs_close(nvs);
     }
 }
 
-static void show_game_over(void)
+static bool in_secret_corner(const cyd_touch_point_t *point)
 {
-    char line[32];
-    bool record = score > high_score;
-    if (record) {
-        high_score = score;
-        save_high_score();
-    }
-    ESP_LOGI(TAG, "Game over: score %u, level %d", (unsigned)score, level);
-    clear_screen();
-    text_row(2, CYD_COLOR_RED, "GAME OVER");
-    snprintf(line, sizeof(line), "SCORE %u", (unsigned)score);
-    text_row(4, CYD_COLOR_WHITE, line);
-    snprintf(line, sizeof(line), "LEVEL %d", level);
-    text_row(5, CYD_COLOR_WHITE, line);
-    if (record) {
-        text_row(7, CYD_COLOR_YELLOW, "NEW HIGH SCORE!");
-    } else {
-        snprintf(line, sizeof(line), "HIGH %u", (unsigned)high_score);
-        text_row(7, CYD_COLOR_GRAY, line);
-    }
-    text_row(9, CYD_COLOR_YELLOW, "tap to play");
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    wait_for_tap();
+    return point->x >= SCREEN_W - SECRET_SIZE && point->y < SECRET_SIZE;
 }
 
-/* ---- Moving ---- */
+/* ---- Drawing into the strip ---- */
 
-static bool at_tile_center(const actor_t *actor)
+/* Fills [x0, x1) of one strip row, rounded and clipped to the screen. */
+static void fill_span(uint16_t *row, float x0, float x1, uint16_t color)
 {
-    return actor->x % TILE == 0 && actor->y % TILE == 0;
-}
-
-/* Only meaningful at a tile center. */
-static bool can_go(const actor_t *actor, int dir)
-{
-    return dir != DIR_NONE && passable(actor->x / TILE + DX[dir], actor->y / TILE + DY[dir]);
-}
-
-static void step(actor_t *actor)
-{
-    actor->x += DX[actor->dir];
-    actor->y += DY[actor->dir];
-    if (actor->x < 0) {
-        actor->x = (COLS - 1) * TILE;
-    } else if (actor->x > (COLS - 1) * TILE) {
-        actor->x = 0;
+    int from = (int)floorf(x0 + 0.5f);
+    int to = (int)floorf(x1 + 0.5f);
+    from = from < 0 ? 0 : from;
+    to = to > SCREEN_W ? SCREEN_W : to;
+    for (int x = from; x < to; ++x) {
+        row[x] = color;
     }
 }
 
-/* Whole pixels to move this frame at speed, keeping the remainder. */
-static int pixels_this_frame(actor_t *actor, int speed)
+/* A rectangle in screen coordinates, clipped to the strip starting at y0. */
+static void strip_rect(int y0, int x, int y, int w, int h, uint16_t color)
 {
-    actor->sub += speed;
-    int pixels = actor->sub / 8;
-    actor->sub %= 8;
-    return pixels;
-}
-
-static void place(actor_t *actor, int x, int y, int dir)
-{
-    actor->x = x;
-    actor->y = y;
-    actor->dir = dir;
-    actor->sub = 0;
-}
-
-static void scare_cats(void)
-{
-    scared_frames = FRAMES(6) - (level - 1) * FRAMES(1);
-    if (scared_frames < FRAMES(2)) {
-        scared_frames = FRAMES(2);
-    }
-    cats_caught = 0;
-    for (int i = 0; i < CAT_COUNT; ++i) {
-        if (cats[i].mode == CAT_HUNT || cats[i].mode == CAT_SCARED) {
-            cats[i].mode = CAT_SCARED;
-            cats[i].actor.dir = opposite(cats[i].actor.dir);
+    int top = y > y0 ? y : y0;
+    int bottom = y + h < y0 + STRIP ? y + h : y0 + STRIP;
+    int left = x > 0 ? x : 0;
+    int right = x + w < SCREEN_W ? x + w : SCREEN_W;
+    for (int row = top; row < bottom; ++row) {
+        for (int column = left; column < right; ++column) {
+            strip[(row - y0) * SCREEN_W + column] = color;
         }
     }
 }
 
-static void eat(int col, int row)
+static int text_width(const char *text, int scale)
 {
-    char *tile = &maze[row][col];
-    if (*tile == '.') {
-        score += CHEESE_POINTS;
-    } else if (*tile == 'o') {
-        score += BIG_CHEESE_POINTS;
-        scare_cats();
-    } else {
-        return;
-    }
-    *tile = ' ';
-    --cheese_left;
-    draw_hud();
+    return (int)strlen(text) * 4 * scale - scale;
 }
 
-static void move_mouse(void)
+static void strip_text(int y0, int x, int y, int scale, uint16_t color, const char *text)
 {
-    int pixels = pixels_this_frame(&mouse, MOUSE_SPEED);
-    for (int i = 0; i < pixels; ++i) {
-        /* Turning back works anywhere; other turns wait for a tile center. */
-        if (wanted_dir != DIR_NONE && wanted_dir == opposite(mouse.dir)) {
-            mouse.dir = wanted_dir;
-        }
-        if (at_tile_center(&mouse)) {
-            eat(mouse.x / TILE, mouse.y / TILE);
-            if (can_go(&mouse, wanted_dir)) {
-                mouse.dir = wanted_dir;
-            }
-            if (!can_go(&mouse, mouse.dir)) {
-                mouse.dir = DIR_NONE;
-            }
-        }
-        if (mouse.dir == DIR_NONE) {
-            mouse.sub = 0;
-            break;
-        }
-        step(&mouse);
-        mouse_facing = mouse.dir;
-    }
-}
-
-/* The tile a cat heads for. Hunting, the orange cat goes for the mouse,
-   the white one for four tiles ahead of it, and the pink one for the
-   mouse only from afar, else its corner. */
-static void cat_target(int index, int *col, int *row)
-{
-    const cat_t *cat = &cats[index];
-    int mouse_col = (mouse.x + TILE / 2) / TILE;
-    int mouse_row = (mouse.y + TILE / 2) / TILE;
-    if (cat->mode == CAT_EYES) {
-        *col = EXIT_COL;
-        *row = EXIT_ROW;
-    } else if (wandering) {
-        *col = cat->home_col;
-        *row = cat->home_row;
-    } else if (index == 1 && mouse.dir != DIR_NONE) {
-        *col = mouse_col + 4 * DX[mouse.dir];
-        *row = mouse_row + 4 * DY[mouse.dir];
-    } else if (index == 2) {
-        int dc = mouse_col - cat->actor.x / TILE;
-        int dr = mouse_row - cat->actor.y / TILE;
-        bool far = dc * dc + dr * dr > 36;
-        *col = far ? mouse_col : cat->home_col;
-        *row = far ? mouse_row : cat->home_row;
-    } else {
-        *col = mouse_col;
-        *row = mouse_row;
-    }
-}
-
-/* At a tile center: never back the way it came, else the open way closest
-   to its target, or a random one when scared. */
-static void choose_cat_dir(int index)
-{
-    cat_t *cat = &cats[index];
-    actor_t *actor = &cat->actor;
-    int back = opposite(actor->dir);
-    int options[4];
-    int option_count = 0;
-    for (int dir = 0; dir < 4; ++dir) {
-        if (dir != back && can_go(actor, dir)) {
-            options[option_count++] = dir;
-        }
-    }
-    if (option_count == 0) {
-        actor->dir = back;
-        return;
-    }
-    if (cat->mode == CAT_SCARED) {
-        actor->dir = options[esp_random() % option_count];
-        return;
-    }
-    int target_col;
-    int target_row;
-    cat_target(index, &target_col, &target_row);
-    int best = options[0];
-    int best_distance = INT32_MAX;
-    for (int i = 0; i < option_count; ++i) {
-        int col = actor->x / TILE + DX[options[i]];
-        int row = actor->y / TILE + DY[options[i]];
-        int distance = (col - target_col) * (col - target_col) +
-                       (row - target_row) * (row - target_row);
-        if (distance < best_distance) {
-            best = options[i];
-            best_distance = distance;
-        }
-    }
-    actor->dir = best;
-}
-
-static int cat_speed(const cat_t *cat)
-{
-    switch (cat->mode) {
-    case CAT_SCARED:
-        return SCARED_SPEED;
-    case CAT_EYES:
-        return EYES_SPEED;
-    default: {
-        int speed = CAT_SPEED + level - 1;
-        return speed > CAT_SPEED_MAX ? CAT_SPEED_MAX : speed;
-    }
-    }
-}
-
-static void move_cat(int index)
-{
-    cat_t *cat = &cats[index];
-    actor_t *actor = &cat->actor;
-    if (cat->mode == CAT_BASKET) {
-        if (--cat->timer <= 0) {
-            place(actor, EXIT_COL * TILE, EXIT_ROW * TILE, DIR_LEFT);
-            cat->mode = scared_frames > 0 ? CAT_SCARED : CAT_HUNT;
-        }
-        return;
-    }
-    int pixels = pixels_this_frame(actor, cat_speed(cat));
-    for (int i = 0; i < pixels; ++i) {
-        if (at_tile_center(actor)) {
-            if (cat->mode == CAT_EYES && actor->x == EXIT_COL * TILE &&
-                actor->y == EXIT_ROW * TILE) {
-                /* Home: back into the basket for a moment. */
-                place(actor, cat->basket_x, BASKET_Y, DIR_LEFT);
-                cat->mode = CAT_BASKET;
-                cat->timer = FRAMES(1.5);
-                return;
-            }
-            choose_cat_dir(index);
-        }
-        step(actor);
-    }
-}
-
-/* Wander for 7 seconds, hunt for 20, and again; cats turn round at each change. */
-static void update_cat_mode(void)
-{
-    ++mode_frames;
-    int phase = wandering ? FRAMES(7) : FRAMES(20);
-    if (mode_frames < phase) {
-        return;
-    }
-    mode_frames = 0;
-    wandering = !wandering;
-    for (int i = 0; i < CAT_COUNT; ++i) {
-        if (cats[i].mode == CAT_HUNT) {
-            cats[i].actor.dir = opposite(cats[i].actor.dir);
-        }
-    }
-}
-
-/* Returns true when a cat caught the mouse. */
-static bool check_catches(void)
-{
-    for (int i = 0; i < CAT_COUNT; ++i) {
-        cat_t *cat = &cats[i];
-        if (cat->mode == CAT_BASKET || cat->mode == CAT_EYES ||
-            abs(cat->actor.x - mouse.x) >= CATCH_DISTANCE ||
-            abs(cat->actor.y - mouse.y) >= CATCH_DISTANCE) {
-            continue;
-        }
-        if (cat->mode == CAT_SCARED) {
-            /* 200, 400, 800 for each cat caught on one big cheese. */
-            score += CAT_POINTS << (cats_caught < 3 ? cats_caught : 3);
-            ++cats_caught;
-            cat->mode = CAT_EYES;
-            cat->actor.sub = 0;
-            draw_hud();
-        } else {
-            return true;
-        }
-    }
-    return false;
-}
-
-/* ---- Playing ---- */
-
-static void reset_actors(void)
-{
-    static const uint16_t colors[CAT_COUNT] = {
-        RGB565(255, 140, 30),  /* orange */
-        RGB565(235, 235, 235), /* white */
-        RGB565(240, 90, 200),  /* pink */
-    };
-    static const int homes[CAT_COUNT][2] = {{COLS - 1, 0}, {0, 0}, {0, ROWS - 1}};
-    /* The basket holds three cats side by side. */
-    static const int basket_x[CAT_COUNT] = {8 * TILE + 4, 9 * TILE + 8, 10 * TILE + 12};
-    place(&mouse, MOUSE_START_COL * TILE, MOUSE_START_ROW * TILE, DIR_LEFT);
-    wanted_dir = DIR_NONE;
-    pressed_key = -1;
-    mouse_facing = DIR_LEFT;
-    for (int i = 0; i < CAT_COUNT; ++i) {
-        cat_t *cat = &cats[i];
-        cat->color = colors[i];
-        cat->home_col = homes[i][0];
-        cat->home_row = homes[i][1];
-        cat->basket_x = basket_x[i];
-        cat->mode = CAT_BASKET;
-        place(&cat->actor, basket_x[i], BASKET_Y, DIR_LEFT);
-    }
-    /* The first cat starts outside; the others follow, sooner each level. */
-    int delay = FRAMES(3) - (level - 1) * FRAMES(0.5);
-    delay = delay < FRAMES(0.5) ? FRAMES(0.5) : delay;
-    cats[0].timer = 1;
-    cats[1].timer = delay;
-    cats[2].timer = 3 * delay;
-    scared_frames = 0;
-    mode_frames = 0;
-    wandering = true;
-    mouse.old_x = mouse.x;
-    mouse.old_y = mouse.y;
-    for (int i = 0; i < CAT_COUNT; ++i) {
-        cats[i].actor.old_x = cats[i].actor.x;
-        cats[i].actor.old_y = cats[i].actor.y;
-    }
-}
-
-static void reset_maze(void)
-{
-    cheese_left = 0;
-    for (int row = 0; row < ROWS; ++row) {
-        memcpy(maze[row], MAZE_LAYOUT[row], COLS + 1);
-        for (int col = 0; col < COLS; ++col) {
-            cheese_left += maze[row][col] == '.' || maze[row][col] == 'o';
-        }
-    }
-}
-
-/* Steers with the WASD pad: a touch on or near it picks the nearest key,
-   which lights while held. Touches elsewhere do nothing. */
-static void read_touch(void)
-{
-    cyd_touch_point_t point;
-    int key = -1;
-    if (cyd_touch_read(&point) && point.x >= PAD_X - PAD_SLOP && point.y >= PAD_Y - PAD_SLOP) {
-        int best_distance = INT32_MAX;
-        for (int i = 0; i < 4; ++i) {
-            int dx = point.x - (PAD_X + PAD_KEYS[i].x + KEY_WIDTH / 2);
-            int dy = point.y - (PAD_Y + PAD_KEYS[i].y + KEY_HEIGHT / 2);
-            if (dx * dx + dy * dy < best_distance) {
-                best_distance = dx * dx + dy * dy;
-                key = i;
-            }
-        }
-        wanted_dir = PAD_KEYS[key].dir;
-    }
-    if (key != pressed_key) {
-        pressed_key = key;
-        draw_pad();
-    }
-}
-
-static void redraw_actors(void)
-{
-    for (int i = 0; i < CAT_COUNT; ++i) {
-        redraw_actor(&cats[i].actor);
-    }
-    redraw_actor(&mouse);
-}
-
-static void flash_walls(void)
-{
-    for (int i = 0; i < 6; ++i) {
-        walls_flash = i % 2 == 0;
-        draw_maze();
-        vTaskDelay(pdMS_TO_TICKS(200));
-    }
-    walls_flash = false;
-}
-
-/* A word across the middle of the maze for a moment. */
-static void announce(const char *text, uint16_t color, int milliseconds)
-{
-    text_row(CYD_TEXT_ROWS / 2, color, text);
-    vTaskDelay(pdMS_TO_TICKS(milliseconds));
-    draw_maze();
-}
-
-/* Plays one maze until it is cleared (true) or the last life is lost. */
-static bool play_level(void)
-{
-    char ready[24];
-    snprintf(ready, sizeof(ready), "LEVEL %d", level % 100);
-    reset_maze();
-    reset_actors();
-    draw_hud();
-    draw_maze();
-    announce(ready, CYD_COLOR_YELLOW, 1500);
-    TickType_t last_frame = xTaskGetTickCount();
-    while (true) {
-        ++frame_count;
-        read_touch();
-        move_mouse();
-        for (int i = 0; i < CAT_COUNT; ++i) {
-            move_cat(i);
-        }
-        bool caught = check_catches();
-        if (scared_frames > 0 && --scared_frames == 0) {
-            for (int i = 0; i < CAT_COUNT; ++i) {
-                if (cats[i].mode == CAT_SCARED) {
-                    cats[i].mode = CAT_HUNT;
+    for (; *text != '\0'; ++text, x += 4 * scale) {
+        const uint8_t *glyph = FONT[*text & 0x7F];
+        for (int gy = 0; gy < 5; ++gy) {
+            for (int gx = 0; gx < 3; ++gx) {
+                if (glyph[gy] & (4 >> gx)) {
+                    strip_rect(y0, x + gx * scale, y + gy * scale, scale, scale, color);
                 }
             }
         }
-        update_cat_mode();
-        redraw_actors();
-        if (frame_count % 8 == 0) {
-            big_cheese_shown = !big_cheese_shown;
-            draw_big_cheeses();
-        }
+    }
+}
 
-        if (cheese_left == 0) {
-            vTaskDelay(pdMS_TO_TICKS(500));
-            flash_walls();
-            return true;
-        }
-        if (caught) {
-            --lives;
-            ESP_LOGI(TAG, "Caught on level %d; %d lives left", level, lives);
-            draw_hud();
-            vTaskDelay(pdMS_TO_TICKS(1200));
-            if (lives == 0) {
-                return false;
+/* Text with a drop shadow, for reading against the sky. */
+static void strip_label(int y0, int x, int y, int scale, uint16_t color, const char *text)
+{
+    int shadow = scale > 2 ? scale / 2 : 1;
+    strip_text(y0, x + shadow, y + shadow, scale, COLOR_SHADOW, text);
+    strip_text(y0, x, y, scale, color, text);
+}
+
+static void strip_sprites(int y0)
+{
+    for (int i = 0; i < sprite_count; ++i) {
+        const sprite_t *sprite = &sprites[i];
+        int top = sprite->y > y0 ? sprite->y : y0;
+        int bottom = sprite->y + sprite->h < y0 + STRIP ? sprite->y + sprite->h : y0 + STRIP;
+        int left = sprite->x > 0 ? sprite->x : 0;
+        int right = sprite->x + sprite->w < SCREEN_W ? sprite->x + sprite->w : SCREEN_W;
+        for (int y = top; y < bottom; ++y) {
+            const uint16_t *source =
+                sprite->pixels + (y - sprite->y) * SPRITE_H / sprite->h * SPRITE_W;
+            uint16_t *row = strip + (y - y0) * SCREEN_W;
+            for (int x = left; x < right; ++x) {
+                uint16_t color = source[(x - sprite->x) * SPRITE_W / sprite->w];
+                if (color != TRANSPARENT) {
+                    row[x] = color;
+                }
             }
-            reset_actors();
-            draw_maze();
-            announce("READY", CYD_COLOR_YELLOW, 1000);
-            last_frame = xTaskGetTickCount();
         }
-        vTaskDelayUntil(&last_frame, pdMS_TO_TICKS(FRAME_MS));
+    }
+}
+
+static int car_place(const car_t *car)
+{
+    int place = 1;
+    for (int i = 0; i < CAR_COUNT; ++i) {
+        const car_t *other = &cars[i];
+        if (other == car) {
+            continue;
+        }
+        bool ahead = car->finish_time >= 0
+                         ? other->finish_time >= 0 && other->finish_time < car->finish_time
+                         : other->finish_time >= 0 || other->s > car->s;
+        place += ahead ? 1 : 0;
+    }
+    return place;
+}
+
+static void draw_sky_strip(int y0)
+{
+    int far = (int)floorf(bg_scroll * 0.5f);
+    int near = (int)floorf(bg_scroll);
+    for (int r = 0; r < STRIP; ++r) {
+        int y = y0 + r;
+        uint16_t *row = strip + r * SCREEN_W;
+        uint16_t sky = sky_colors[y];
+        for (int x = 0; x < SCREEN_W; ++x) {
+            uint16_t color = sky;
+            int peak = HORIZON - far_heights[(x + far) & 511];
+            if (y >= HORIZON - near_heights[(x + near) & 511]) {
+                color = COLOR_HILLS;
+            } else if (y >= peak) {
+                color = y < peak + 3 && peak < HORIZON - 30 ? COLOR_SNOW : COLOR_MOUNTAIN;
+            }
+            row[x] = color;
+        }
+    }
+
+    if (message != NULL) {
+        strip_label(y0, (SCREEN_W - text_width(message, 6)) / 2, 30, 6, message_color, message);
+    }
+
+    if (y0 == 0) {
+        char text[16];
+        snprintf(text, sizeof(text), "P%d/%d", car_place(&cars[PLAYER]), CAR_COUNT);
+        strip_label(0, 6, 5, 2, CYD_COLOR_WHITE, text);
+        int kmh = (int)(cars[PLAYER].v * KMH_PER_SPEED + 0.5f);
+        snprintf(text, sizeof(text), "%d KMH", kmh % 1000);
+        strip_label(0, SCREEN_W - 10 - text_width(text, 2), 5, 2, CYD_COLOR_WHITE, text);
+        /* Track progress, with a mark for each car; the player's on top. */
+        const int bar_x = 100, bar_w = 120;
+        strip_rect(0, bar_x + 1, 10, bar_w, 2, COLOR_SHADOW);
+        strip_rect(0, bar_x, 9, bar_w, 2, RGB565(230, 230, 230));
+        for (int i = 0; i < CAR_COUNT; ++i) {
+            float progress = fminf(1, fmaxf(0, cars[i].s / track_length));
+            int x = bar_x + (int)(progress * (bar_w - 3));
+            strip_rect(0, x, 6, 3, 8, i == PLAYER ? CYD_COLOR_YELLOW : cars[i].label);
+        }
+        if (!rigged) {
+            strip_rect(0, INDICATOR_X, INDICATOR_Y, INDICATOR_SIZE, INDICATOR_SIZE,
+                       COLOR_INDICATOR);
+        }
+    }
+    cyd_draw_bitmap(0, y0, SCREEN_W, STRIP, strip);
+}
+
+static void draw_road_strip(int y0)
+{
+    float player_x = cars[PLAYER].x;
+    for (int r = 0; r < STRIP; ++r) {
+        uint16_t *row = strip + r * SCREEN_W;
+        int dy = y0 + r - HORIZON + 1;
+        float z = DRAW_DISTANCE / dy;
+        float scale = FOCAL / z;
+        float index = z / OFFSET_STEP;
+        int i = (int)index;
+        float offset = i + 1 < OFFSET_COUNT
+                           ? offsets[i] + (offsets[i + 1] - offsets[i]) * (index - i)
+                           : offsets[OFFSET_COUNT - 1];
+        float center = CENTER_X + (offset - player_x) * scale;
+        float half = ROAD_HALF * scale;
+        float rumble = RUMBLE * scale;
+        float s = camera_s + z;
+        bool light = ((int)floorf(s / SEGMENT)) & 1;
+        int fog = z <= FOG_START ? 0
+                                 : (int)(230 * (z - FOG_START) / (DRAW_DISTANCE - FOG_START));
+
+        fill_span(row, 0, SCREEN_W,
+                  blend(light ? COLOR_GRASS_LIGHT : COLOR_GRASS_DARK, COLOR_HAZE, fog));
+        uint16_t rumble_color =
+            blend(light ? COLOR_RUMBLE_LIGHT : COLOR_RUMBLE_DARK, COLOR_HAZE, fog);
+        fill_span(row, center - half - rumble, center - half, rumble_color);
+        fill_span(row, center + half, center + half + rumble, rumble_color);
+
+        bool checkered = (s >= 0 && s < 3) || (s >= track_length && s < track_length + 3);
+        if (checkered) {
+            int left = (int)floorf(center - half + 0.5f);
+            int right = (int)floorf(center + half + 0.5f);
+            left = left < 0 ? 0 : left;
+            right = right > SCREEN_W ? SCREEN_W : right;
+            int band = (int)floorf(s * 1.5f);
+            for (int x = left; x < right; ++x) {
+                int cell = (int)floorf(((float)x - center) / half * 5 + 5) + band;
+                row[x] = blend(cell & 1 ? CYD_COLOR_WHITE : CYD_COLOR_BLACK, COLOR_HAZE, fog);
+            }
+            continue;
+        }
+        fill_span(row, center - half, center + half,
+                  blend(light ? COLOR_ROAD_LIGHT : COLOR_ROAD_DARK, COLOR_HAZE, fog));
+        float line = LANE_LINE * scale;
+        if (light && line >= 0.5f) {
+            uint16_t lane_color = blend(COLOR_LANE, COLOR_HAZE, fog);
+            line = fmaxf(line, 1);
+            for (int lane = -1; lane <= 1; lane += 2) {
+                float x = center + lane * half / 3;
+                fill_span(row, x - line / 2, x + line / 2, lane_color);
+            }
+        }
+    }
+    strip_sprites(y0);
+    cyd_draw_bitmap(0, y0, SCREEN_W, STRIP, strip);
+}
+
+/* The road's sideways offset ahead of the camera, integrated from the
+   curvature: the camera always looks along the road where it is. */
+static void compute_offsets(void)
+{
+    float offset = 0;
+    float slope = 0;
+    offsets[0] = 0;
+    for (int i = 1; i < OFFSET_COUNT; ++i) {
+        float c = curvature_at(camera_s + (i - 0.5f) * OFFSET_STEP);
+        offset += slope * OFFSET_STEP + 0.5f * c * OFFSET_STEP * OFFSET_STEP;
+        slope += c * OFFSET_STEP;
+        offsets[i] = offset;
+    }
+}
+
+static void place_sprites(void)
+{
+    sprite_count = 0;
+    for (int i = 0; i < CAR_COUNT; ++i) {
+        const car_t *car = &cars[i];
+        float z = car->s - camera_s;
+        if (z < 0.35f || z > DRAW_DISTANCE) {
+            continue;
+        }
+        float scale = FOCAL / z;
+        int w = (int)(CAR_WIDTH * scale + 0.5f);
+        if (w < 2) {
+            continue;
+        }
+        float index = z / OFFSET_STEP;
+        int k = (int)index;
+        float offset = k + 1 < OFFSET_COUNT
+                           ? offsets[k] + (offsets[k + 1] - offsets[k]) * (index - k)
+                           : offsets[OFFSET_COUNT - 1];
+        sprite_t *sprite = &sprites[sprite_count++];
+        sprite->w = w;
+        sprite->h = w / 2 > 1 ? w / 2 : 1;
+        sprite->x = (int)floorf(CENTER_X + (car->x + offset - cars[PLAYER].x) * scale - w / 2.0f +
+                                0.5f);
+        sprite->y = HORIZON - 1 + (int)(DRAW_DISTANCE / z + 0.5f) - sprite->h + 1;
+        if (i == PLAYER && fabsf(car->x) > ROAD_HALF && car->v > 1) {
+            sprite->y -= frame_count & 1; /* bumping over the grass */
+        }
+        sprite->z = z;
+        sprite->pixels = car->pixels;
+    }
+    /* Far to near. */
+    for (int i = 1; i < sprite_count; ++i) {
+        sprite_t sprite = sprites[i];
+        int j = i - 1;
+        while (j >= 0 && sprites[j].z < sprite.z) {
+            sprites[j + 1] = sprites[j];
+            --j;
+        }
+        sprites[j + 1] = sprite;
+    }
+}
+
+static void render(void)
+{
+    camera_s = cars[PLAYER].s - PLAYER_Z;
+    compute_offsets();
+    place_sprites();
+    int far = (int)floorf(bg_scroll * 0.5f);
+    int near = (int)floorf(bg_scroll);
+    draw_sky_strip(0);
+    if (sky_dirty || far != drawn_far || near != drawn_near || message != drawn_message) {
+        for (int y0 = STRIP; y0 < HORIZON; y0 += STRIP) {
+            draw_sky_strip(y0);
+        }
+        drawn_far = far;
+        drawn_near = near;
+        drawn_message = message;
+        sky_dirty = false;
+    }
+    for (int y0 = HORIZON; y0 < SCREEN_H; y0 += STRIP) {
+        draw_road_strip(y0);
+    }
+}
+
+/* ---- Driving ---- */
+
+static bool touch_held;
+static bool touch_secret; /* this press began in the secret corner */
+static int touch_missed;
+static int touch_steer;
+
+/* -1 left, 1 right or 0. A press that starts in the secret corner toggles
+   the auto-win once and does not steer. */
+static int read_steering(void)
+{
+    cyd_touch_point_t point;
+    if (cyd_touch_read(&point)) {
+        touch_missed = 0;
+        if (!touch_held) {
+            touch_held = true;
+            touch_secret = in_secret_corner(&point);
+            if (touch_secret) {
+                toggle_rigged();
+            }
+        }
+        touch_steer = touch_secret ? 0 : point.x < CENTER_X ? -1 : 1;
+    } else if (touch_held && ++touch_missed >= RELEASE_FRAMES) {
+        touch_held = false;
+        touch_secret = false;
+        touch_steer = 0;
+    }
+    return touch_steer;
+}
+
+static void approach(float *value, float target, float up, float down)
+{
+    if (*value < target) {
+        *value = fminf(target, *value + up);
+    } else {
+        *value = fmaxf(target, *value - down);
+    }
+}
+
+static void move_player(float dt, int steer)
+{
+    car_t *player = &cars[PLAYER];
+    float limit = player->finish_time >= 0      ? COAST_SPEED
+                  : fabsf(player->x) > ROAD_HALF ? OFFROAD_SPEED
+                                                 : TOP_SPEED;
+    approach(&player->v, limit, ACCELERATION * dt, BRAKING * dt);
+    float c = curvature_at(player->s);
+    float steer_rate = STEER_RATE * (0.3f + 0.7f * player->v / TOP_SPEED);
+    player->x += (steer * steer_rate - c * player->v * CENTRIFUGAL) * dt;
+    player->x = fmaxf(-GRASS_EDGE, fminf(GRASS_EDGE, player->x));
+    player->s += player->v * dt;
+    bg_scroll += c * player->v * PARALLAX * dt;
+    if (player->finish_time < 0 && player->s >= track_length) {
+        player->finish_time = race_time;
+        ESP_LOGI(TAG, "Finished P%d in %.2f s", car_place(player), race_time);
+    }
+}
+
+static void move_rival(car_t *car, float dt)
+{
+    const car_t *player = &cars[PLAYER];
+    float target = car->pace * TOP_SPEED;
+    float progress = player->s / track_length;
+    if (rigged && progress > RIG_FROM) {
+        /* Close up to a lead over the player that grows toward the finish. */
+        float ramp = fminf(1, (progress - RIG_FROM) / RIG_RAMP);
+        float wanted = player->s + car->lead * ramp;
+        float gap = wanted - car->s;
+        if (gap > 0) {
+            target = fmaxf(target, fminf(1.5f * TOP_SPEED, player->v + 1.5f * gap));
+        }
+        if (progress > RIG_CLAMP && car->s < wanted) {
+            car->s = wanted;
+        }
+    }
+    approach(&car->v, target, ACCELERATION * dt, BRAKING * dt);
+    car->s += car->v * dt;
+
+    /* Wander between lanes; move aside for a player alongside or just ahead,
+       but not for one closing from behind. */
+    car->lane_timer -= dt;
+    if (car->lane_timer <= 0) {
+        static const float lanes[] = {-0.5f, 0, 0.5f};
+        car->lane = lanes[esp_random() % 3];
+        car->lane_timer = random_range(2, 5);
+    }
+    float behind = player->s - car->s;
+    if (behind > -0.5f && behind < 8 && fabsf(car->x - player->x) < 0.6f) {
+        car->lane = player->x > 0 ? -0.55f : 0.55f;
+    }
+    approach(&car->x, car->lane, 0.8f * dt, 0.8f * dt);
+
+    if (car->finish_time < 0 && car->s >= track_length) {
+        car->finish_time = race_time;
+        ESP_LOGI(TAG, "%s finished in %.2f s", car->name, race_time);
+    }
+}
+
+/* The player running into the back of a rival is held behind it. */
+static void check_collisions(const float before[CAR_COUNT])
+{
+    car_t *player = &cars[PLAYER];
+    for (int i = 0; i < PLAYER; ++i) {
+        car_t *car = &cars[i];
+        float gap = car->s - player->s;
+        if (before[i] > 0 && gap < CAR_LENGTH && fabsf(car->x - player->x) < CAR_WIDTH * 0.9f) {
+            player->s = car->s - CAR_LENGTH;
+            player->v = fminf(player->v, car->v * 0.75f);
+            player->x += player->x < car->x ? -0.06f : 0.06f;
+        }
+    }
+}
+
+static void update(float dt, int steer)
+{
+    float before[CAR_COUNT];
+    for (int i = 0; i < CAR_COUNT; ++i) {
+        before[i] = cars[i].s - cars[PLAYER].s;
+    }
+    race_time += dt;
+    for (int i = 0; i < PLAYER; ++i) {
+        move_rival(&cars[i], dt);
+    }
+    move_player(dt, steer);
+    check_collisions(before);
+}
+
+/* Waits for the rest of the frame, but always yields so the idle task runs. */
+static void end_frame(TickType_t *last_frame)
+{
+    TickType_t now = xTaskGetTickCount();
+    if (now - *last_frame < pdMS_TO_TICKS(FRAME_MS)) {
+        vTaskDelayUntil(last_frame, pdMS_TO_TICKS(FRAME_MS));
+    } else {
+        *last_frame = now;
+        vTaskDelay(1);
+    }
+}
+
+static void run_race(void)
+{
+    static const char *const COUNTDOWN[] = {"3", "2", "1"};
+    build_track();
+    reset_cars();
+    touch_held = false;
+    touch_steer = 0;
+    TickType_t last_frame = xTaskGetTickCount();
+
+    for (int i = 0; i < 3; ++i) {
+        message = COUNTDOWN[i];
+        message_color = CYD_COLOR_RED;
+        int64_t until = esp_timer_get_time() + 800000;
+        while (esp_timer_get_time() < until) {
+            read_steering();
+            render();
+            ++frame_count;
+            end_frame(&last_frame);
+        }
+    }
+
+    static const char GO[] = "GO";
+    message = GO;
+    message_color = COLOR_GREEN;
+    int64_t last = esp_timer_get_time();
+    float finished_for = 0;
+    while (finished_for < FINISH_SECONDS) {
+        int64_t now = esp_timer_get_time();
+        float dt = fminf(0.08f, (float)(now - last) / 1e6f);
+        last = now;
+        update(dt, read_steering());
+        if (message == GO && race_time > 1) {
+            message = NULL;
+        }
+        if (cars[PLAYER].finish_time >= 0) {
+            message = "FINISH";
+            message_color = CYD_COLOR_WHITE;
+            finished_for += dt;
+        }
+        render();
+        ++frame_count;
+        end_frame(&last_frame);
+    }
+    message = NULL;
+}
+
+/* ---- Screens ---- */
+
+/* Waits for a tap and returns where it began. */
+static void wait_for_tap(cyd_touch_point_t *tap)
+{
+    cyd_touch_point_t point;
+    while (cyd_touch_read(&point)) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    vTaskDelay(pdMS_TO_TICKS(150));
+    while (!cyd_touch_read(tap)) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    for (int missed = 0; missed < RELEASE_FRAMES;) {
+        missed = cyd_touch_read(&point) ? 0 : missed + 1;
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
+
+static void draw_indicator(void)
+{
+    cyd_fill_rect(INDICATOR_X, INDICATOR_Y, INDICATOR_SIZE, INDICATOR_SIZE,
+                  rigged ? CYD_COLOR_BLACK : COLOR_INDICATOR);
+}
+
+static void centered_row(int row, uint16_t color, const char *text)
+{
+    char line[CYD_TEXT_COLUMNS + 1];
+    int length = (int)strlen(text);
+    int pad = length < CYD_TEXT_COLUMNS ? (CYD_TEXT_COLUMNS - length) / 2 : 0;
+    snprintf(line, sizeof(line), "%*s%s", pad, "", text);
+    cyd_text_row(row, color, CYD_COLOR_BLACK, line);
+}
+
+#define START_ROW 9
+#define START_FIRST 5
+#define START_LAST 11
+
+static void show_splash(void)
+{
+    cyd_fill_rect(0, 0, SCREEN_W, SCREEN_H, CYD_COLOR_BLACK);
+    centered_row(1, CYD_COLOR_YELLOW, "F1 RACE");
+    centered_row(2, CYD_COLOR_WHITE, "GRAND PRIX");
+
+    /* The player's car at three times its size. */
+    sprites[0] = (sprite_t){.x = (SCREEN_W - 3 * SPRITE_W) / 2, .y = 80, .w = 3 * SPRITE_W,
+                            .h = 3 * SPRITE_H, .pixels = cars[PLAYER].pixels};
+    sprite_count = 1;
+    for (int y0 = 80; y0 < 80 + 3 * SPRITE_H; y0 += STRIP) {
+        memset(strip, 0, sizeof(strip));
+        strip_sprites(y0);
+        cyd_draw_bitmap(0, y0, SCREEN_W, STRIP, strip);
+    }
+
+    centered_row(6, CYD_COLOR_CYAN, "Tap left or right");
+    centered_row(7, CYD_COLOR_CYAN, "side to steer");
+
+    char label[CYD_TEXT_COLUMNS + 1];
+    uint16_t foreground[CYD_TEXT_COLUMNS];
+    uint16_t background[CYD_TEXT_COLUMNS];
+    snprintf(label, sizeof(label), "%*s START", START_FIRST, "");
+    for (int i = 0; i < CYD_TEXT_COLUMNS; ++i) {
+        bool button = i >= START_FIRST && i <= START_LAST;
+        foreground[i] = CYD_COLOR_WHITE;
+        background[i] = button ? RGB565(200, 0, 0) : CYD_COLOR_BLACK;
+    }
+    cyd_draw_cells(START_ROW, label, foreground, background);
+    draw_indicator();
+
+    while (true) {
+        cyd_touch_point_t tap;
+        wait_for_tap(&tap);
+        if (in_secret_corner(&tap)) {
+            toggle_rigged();
+            draw_indicator();
+            continue;
+        }
+        const int slop = 12;
+        if (tap.x >= START_FIRST * CYD_FONT_WIDTH - slop &&
+            tap.x < (START_LAST + 1) * CYD_FONT_WIDTH + slop &&
+            tap.y >= START_ROW * CYD_FONT_HEIGHT - slop) {
+            return;
+        }
+    }
+}
+
+static void show_results(void)
+{
+    int order[CAR_COUNT];
+    float times[CAR_COUNT];
+    for (int i = 0; i < CAR_COUNT; ++i) {
+        const car_t *car = &cars[i];
+        times[i] = car->finish_time >= 0
+                       ? car->finish_time
+                       : race_time + (track_length - car->s) / fmaxf(car->v, 1);
+        order[i] = i;
+    }
+    if (rigged) {
+        /* Hamilton, Kimi, Verstappen, then the player, at the player's own
+           time; the rivals' times are kept in that order. */
+        for (int k = CAR_COUNT - 2; k >= 0; --k) {
+            times[k] = fminf(times[k], times[k + 1] - 0.1f);
+        }
+    } else {
+        for (int i = 1; i < CAR_COUNT; ++i) {
+            int index = order[i];
+            int j = i - 1;
+            while (j >= 0 && times[order[j]] > times[index]) {
+                order[j + 1] = order[j];
+                --j;
+            }
+            order[j + 1] = index;
+        }
+    }
+
+    cyd_fill_rect(0, 0, SCREEN_W, SCREEN_H, CYD_COLOR_BLACK);
+    centered_row(0, CYD_COLOR_YELLOW, "CHEQUERED FLAG");
+    int place = 0;
+    for (int k = 0; k < CAR_COUNT; ++k) {
+        const car_t *car = &cars[order[k]];
+        float time = times[order[k]];
+        char gap[16];
+        if (k == 0) {
+            snprintf(gap, sizeof(gap), "%4.1f", fminf(time, 99.9f));
+        } else {
+            float behind = time - times[order[0]];
+            if (behind < 9.95f) {
+                snprintf(gap, sizeof(gap), "+%.1f", behind);
+            } else {
+                snprintf(gap, sizeof(gap), "+%2d", (int)fminf(behind + 0.5f, 99));
+            }
+        }
+        char line[48];
+        snprintf(line, sizeof(line), "%d %-10s %4s", k + 1, car->name, gap);
+        uint16_t foreground[CYD_TEXT_COLUMNS];
+        uint16_t background[CYD_TEXT_COLUMNS];
+        for (int i = 0; i < CYD_TEXT_COLUMNS; ++i) {
+            foreground[i] = i >= 2 && i < 12 ? car->label : CYD_COLOR_WHITE;
+            background[i] = order[k] == PLAYER ? RGB565(60, 50, 0) : CYD_COLOR_BLACK;
+        }
+        cyd_draw_cells(2 + k, line, foreground, background);
+        if (order[k] == PLAYER) {
+            place = k + 1;
+        }
+    }
+
+    char text[32];
+    if (place == 1) {
+        centered_row(7, COLOR_GREEN, "YOU WIN!");
+    } else {
+        snprintf(text, sizeof(text), "YOU FINISHED P%d", place);
+        centered_row(7, CYD_COLOR_WHITE, text);
+    }
+    snprintf(text, sizeof(text), "TIME %.2f S", times[PLAYER]);
+    centered_row(8, CYD_COLOR_GRAY, text);
+    centered_row(9, CYD_COLOR_YELLOW, "tap to go on");
+    draw_indicator();
+    ESP_LOGI(TAG, "Result: P%d of %d, %d curves, %s", place, CAR_COUNT, curve_count,
+             rigged ? "auto-win on" : "fair");
+
+    while (true) {
+        cyd_touch_point_t tap;
+        wait_for_tap(&tap);
+        if (!in_secret_corner(&tap)) {
+            return;
+        }
+        toggle_rigged();
+        draw_indicator();
     }
 }
 
 static void game_task(void *argument)
 {
     (void)argument;
-    load_high_score();
+    load_rigged();
+    build_sprites();
+    build_scenery();
     while (true) {
-        show_title();
-        score = 0;
-        lives = START_LIVES;
-        level = 1;
-        clear_screen();
-        while (play_level()) {
-            ++level;
-        }
-        show_game_over();
+        show_splash();
+        run_race();
+        show_results();
     }
 }
 
