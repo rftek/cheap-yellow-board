@@ -105,6 +105,12 @@ static const char *TAG = "f1_race";
 #define MAP_TOP STRIP
 #define ROAD_PX 3
 #define MAP_BOX 7 /* half the side of the box redrawn around a car */
+/* The map's touch zones: gas and brake left of CENTER_X, split at
+   PEDAL_SPLIT_Y; steering right of it, split at STEER_SPLIT_X. */
+#define PEDAL_SPLIT_Y 130
+#define STEER_SPLIT_X 240
+#define COAST_DRAG 3.0f /* slowing with neither pedal, units/s^2 */
+#define COLOR_MAP_GUIDE RGB565(0, 95, 0)
 #define COLOR_MAP_GRASS RGB565(0, 130, 0)
 #define COLOR_MAP_ROAD RGB565(100, 100, 100)
 #define COLOR_MAP_EDGE RGB565(235, 235, 235)
@@ -161,6 +167,7 @@ static const uint8_t FONT[128][5] = {
     ['X'] = {5, 5, 2, 5, 5}, ['Y'] = {5, 5, 2, 2, 2}, ['Z'] = {7, 1, 2, 4, 7},
     ['/'] = {1, 1, 2, 4, 4}, ['!'] = {2, 2, 2, 0, 2}, ['.'] = {0, 0, 0, 0, 2},
     ['+'] = {0, 2, 7, 2, 0}, ['-'] = {0, 0, 7, 0, 0}, [':'] = {0, 2, 0, 2, 0},
+    ['<'] = {1, 2, 4, 2, 1}, ['>'] = {4, 2, 1, 2, 4},
 };
 
 /* An F1 car from behind: 'c' body, 'd' trim, 'h' helmet, 'k' tires and
@@ -214,15 +221,15 @@ static car_t cars[CAR_COUNT] = {
     [HAMILTON] = {.name = "HAMILTON", .number = 44, .body = RGB565(220, 0, 0),
                   .trim = RGB565(120, 0, 0), .numeral = RGB565(255, 255, 255),
                   .helmet = RGB565(255, 220, 0), .label = RGB565(255, 60, 60),
-                  .base_pace = 0.965f, .lead = 30},
+                  .base_pace = 0.92f, .lead = 30},
     [KIMI] = {.name = "KIMI", .number = 12, .body = RGB565(185, 190, 195),
               .trim = RGB565(0, 170, 160), .numeral = RGB565(20, 20, 20),
               .helmet = RGB565(40, 120, 255), .label = RGB565(0, 220, 200),
-              .base_pace = 0.955f, .lead = 18},
+              .base_pace = 0.91f, .lead = 18},
     [VERSTAPPEN] = {.name = "VERSTAPPEN", .number = 3, .body = RGB565(25, 35, 110),
                     .trim = RGB565(220, 20, 50), .numeral = RGB565(255, 200, 0),
                     .helmet = RGB565(255, 120, 0), .label = RGB565(110, 140, 255),
-                    .base_pace = 0.95f, .lead = 8},
+                    .base_pace = 0.90f, .lead = 8},
     [PLAYER] = {.name = "YOU", .body = RGB565(255, 210, 0), .trim = RGB565(30, 30, 30),
                 .helmet = RGB565(255, 255, 255), .label = CYD_COLOR_YELLOW},
 };
@@ -238,6 +245,9 @@ static uint8_t edge_mask[SCREEN_H][SCREEN_W / 8];
 
 enum { VIEW_HORIZON, VIEW_MAP };
 static int view;
+
+enum { PEDAL_NONE, PEDAL_GAS, PEDAL_BRAKE };
+static int shown_pedal; /* the pedal held, for the bar */
 static int boxes[CAR_COUNT][4]; /* each car's last box on the map: x0, y0, x1, y1 */
 
 static bool rigged = true; /* Hamilton's auto-win */
@@ -557,6 +567,10 @@ static void strip_hud(bool on_map)
     int kmh = (int)(cars[PLAYER].v * KMH_PER_SPEED + 0.5f);
     snprintf(text, sizeof(text), "%d KMH", kmh % 1000);
     strip_label(0, SCREEN_W - 10 - text_width(text, 2), 5, 2, CYD_COLOR_WHITE, text);
+    if (on_map && shown_pedal != PEDAL_NONE) {
+        bool gas = shown_pedal == PEDAL_GAS;
+        strip_label(0, 44, 5, 2, gas ? COLOR_GREEN : CYD_COLOR_RED, gas ? "GAS" : "BRAKE");
+    }
     if (on_map && message != NULL) {
         strip_label(0, (SCREEN_W - text_width(message, 2)) / 2, 5, 2, message_color, message);
     } else {
@@ -809,6 +823,45 @@ static bool finish_pixel(int x, int y, uint16_t *color)
     return true;
 }
 
+/* Labels for the touch zones, on grass in each zone (the spots were found
+   against the road mask, keeping clear of the secret corner). */
+typedef struct {
+    const char *text;
+    int x, y, scale;
+} map_label_t;
+
+static const map_label_t MAP_LABELS[] = {
+    {"GAS", 78, 54, 2}, {"BRAKE", 60, 179, 2}, {"<", 194, 90, 4}, {">", 273, 129, 4},
+};
+
+static bool label_glyph(const map_label_t *label, int dx, int dy)
+{
+    int advance = 4 * label->scale;
+    if (dx < 0 || dy < 0 || dy >= 5 * label->scale ||
+        dx / advance >= (int)strlen(label->text)) {
+        return false;
+    }
+    int gx = dx % advance / label->scale;
+    int gy = dy / label->scale;
+    return gx < 3 && (FONT[label->text[dx / advance] & 0x7F][gy] & (4 >> gx));
+}
+
+static bool label_pixel(int x, int y, uint16_t *color)
+{
+    for (size_t i = 0; i < sizeof(MAP_LABELS) / sizeof(MAP_LABELS[0]); ++i) {
+        const map_label_t *label = &MAP_LABELS[i];
+        if (label_glyph(label, x - label->x, y - label->y)) {
+            *color = CYD_COLOR_WHITE;
+            return true;
+        }
+        if (label_glyph(label, x - label->x - 1, y - label->y - 1)) {
+            *color = COLOR_SHADOW;
+            return true;
+        }
+    }
+    return false;
+}
+
 static uint16_t map_pixel(int x, int y)
 {
     uint16_t color;
@@ -820,9 +873,19 @@ static uint16_t map_pixel(int x, int y)
     if (finish_pixel(x, y, &color)) {
         return color;
     }
-    return mask_bit(road_mask, x, y)   ? COLOR_MAP_ROAD
-           : mask_bit(edge_mask, x, y) ? COLOR_MAP_EDGE
-                                       : COLOR_MAP_GRASS;
+    if (mask_bit(road_mask, x, y)) {
+        return COLOR_MAP_ROAD;
+    }
+    if (mask_bit(edge_mask, x, y)) {
+        return COLOR_MAP_EDGE;
+    }
+    if (label_pixel(x, y, &color)) {
+        return color;
+    }
+    /* Dotted borders between the touch zones, on the grass only. */
+    bool border = x == CENTER_X || (x > CENTER_X && x == STEER_SPLIT_X) ||
+                  (x < CENTER_X && y == PEDAL_SPLIT_Y);
+    return border && ((x + y) & 2) ? COLOR_MAP_GUIDE : COLOR_MAP_GRASS;
 }
 
 static void draw_map_hud(void)
@@ -921,15 +984,26 @@ static void render(void)
 static bool touch_held;
 static bool touch_secret; /* this press began in the secret corner */
 static int touch_missed;
-static int touch_steer;
+static int16_t touch_x, touch_y; /* the latest reading of the press */
 
-/* -1 left, 1 right or 0. A press that starts in the secret corner toggles
-   the auto-win once and does not steer. */
-static int read_steering(void)
+typedef struct {
+    int steer; /* -1 left, 1 right or 0 */
+    int pedal; /* on the map only */
+} controls_t;
+
+/* Over the horizon, the left or right half of the screen steers. On the
+   map, the left half is the pedals (gas above PEDAL_SPLIT_Y, brake below)
+   and the right half steers (left of STEER_SPLIT_X, right beyond it). The
+   panel reads one touch at a time, so pedals and steering take turns. A
+   press that starts in the secret corner toggles the auto-win once and does
+   nothing else. */
+static controls_t read_controls(void)
 {
     cyd_touch_point_t point;
     if (cyd_touch_read(&point)) {
         touch_missed = 0;
+        touch_x = point.x;
+        touch_y = point.y;
         if (!touch_held) {
             touch_held = true;
             touch_secret = in_secret_corner(&point);
@@ -937,13 +1011,23 @@ static int read_steering(void)
                 toggle_rigged();
             }
         }
-        touch_steer = touch_secret ? 0 : point.x < CENTER_X ? -1 : 1;
     } else if (touch_held && ++touch_missed >= RELEASE_FRAMES) {
         touch_held = false;
         touch_secret = false;
-        touch_steer = 0;
     }
-    return touch_steer;
+
+    controls_t controls = {0, PEDAL_NONE};
+    if (touch_held && !touch_secret) {
+        if (view == VIEW_HORIZON) {
+            controls.steer = touch_x < CENTER_X ? -1 : 1;
+        } else if (touch_x < CENTER_X) {
+            controls.pedal = touch_y < PEDAL_SPLIT_Y ? PEDAL_GAS : PEDAL_BRAKE;
+        } else {
+            controls.steer = touch_x < STEER_SPLIT_X ? -1 : 1;
+        }
+    }
+    shown_pedal = controls.pedal;
+    return controls;
 }
 
 static void approach(float *value, float target, float up, float down)
@@ -955,18 +1039,35 @@ static void approach(float *value, float target, float up, float down)
     }
 }
 
-static void move_player(float dt, int steer)
+static void move_player(float dt, controls_t controls)
 {
     car_t *player = &cars[PLAYER];
     bool offroad = fabsf(player->x) > OFFROAD_EDGE;
-    float limit = player->finish_time >= 0 ? COAST_SPEED
-                  : offroad                ? OFFROAD_SPEED
-                                           : TOP_SPEED;
-    limit = fminf(limit, safe_speed_at(player->s));
-    approach(&player->v, limit, ACCELERATION * dt, (offroad ? OFFROAD_BRAKING : BRAKING) * dt);
+    if (view == VIEW_HORIZON || player->finish_time >= 0) {
+        /* Over the horizon, and after the flag, the car drives itself. */
+        float limit = player->finish_time >= 0 ? COAST_SPEED
+                      : offroad                ? OFFROAD_SPEED
+                                               : TOP_SPEED;
+        limit = fminf(limit, safe_speed_at(player->s));
+        approach(&player->v, limit, ACCELERATION * dt,
+                 (offroad ? OFFROAD_BRAKING : BRAKING) * dt);
+    } else {
+        /* On the map, the player's pedals; corners taken too fast run wide. */
+        float limit = offroad ? OFFROAD_SPEED : TOP_SPEED;
+        if (player->v > limit) {
+            player->v = fmaxf(limit, player->v - OFFROAD_BRAKING * dt);
+        } else if (controls.pedal == PEDAL_GAS) {
+            player->v = fminf(limit, player->v + ACCELERATION * dt);
+        }
+        if (controls.pedal == PEDAL_BRAKE) {
+            player->v = fmaxf(0, player->v - BRAKING * dt);
+        } else if (controls.pedal == PEDAL_NONE) {
+            player->v = fmaxf(0, player->v - COAST_DRAG * dt);
+        }
+    }
     float c = curvature_at(player->s);
     float steer_rate = STEER_RATE * (0.3f + 0.7f * player->v / TOP_SPEED);
-    player->x += (steer * steer_rate - c * player->v * player->v * GRIP) * dt;
+    player->x += (controls.steer * steer_rate - c * player->v * player->v * GRIP) * dt;
     player->x = fmaxf(-GRASS_EDGE, fminf(GRASS_EDGE, player->x));
     player->s += player->v * dt;
     bg_scroll += c * player->v * PARALLAX * dt;
@@ -1058,7 +1159,7 @@ static void check_collisions(const float before[CAR_COUNT], float dt)
     }
 }
 
-static void update(float dt, int steer)
+static void update(float dt, controls_t controls)
 {
     float before[CAR_COUNT];
     for (int i = 0; i < CAR_COUNT; ++i) {
@@ -1068,7 +1169,7 @@ static void update(float dt, int steer)
     for (int i = 0; i < PLAYER; ++i) {
         move_rival(&cars[i], dt);
     }
-    move_player(dt, steer);
+    move_player(dt, controls);
     check_collisions(before, dt);
 }
 
@@ -1089,7 +1190,6 @@ static void run_race(void)
     static const char *const COUNTDOWN[] = {"3", "2", "1"};
     reset_cars();
     touch_held = false;
-    touch_steer = 0;
     TickType_t last_frame = xTaskGetTickCount();
 
     for (int i = 0; i < 3; ++i) {
@@ -1097,7 +1197,7 @@ static void run_race(void)
         message_color = CYD_COLOR_RED;
         int64_t until = esp_timer_get_time() + 800000;
         while (esp_timer_get_time() < until) {
-            read_steering();
+            read_controls();
             render();
             ++frame_count;
             end_frame(&last_frame);
@@ -1113,7 +1213,7 @@ static void run_race(void)
         int64_t now = esp_timer_get_time();
         float dt = fminf(0.08f, (float)(now - last) / 1e6f);
         last = now;
-        update(dt, read_steering());
+        update(dt, read_controls());
         if (message == GO && race_time > 1) {
             message = NULL;
         }
