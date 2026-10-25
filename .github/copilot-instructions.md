@@ -1,7 +1,7 @@
 # ESP32 CYD F1 Race
 
 - PlatformIO project using native ESP-IDF C for an ESP32 Cheap Yellow Display. Each application has its own branch: `bootloader`, `wifi_checker`, `birdnet_viewer`, `screen_check`, `touchscreen_cal`, `stopwatch`, `gear_roll`, `Datalogger`, `CatMouse`, `f1_race` (this); docs on `How_to_Build`.
-- An OutRun-style pseudo-3D race: each road row below the horizon (y = 100) is one depth; the road's sideways offset is integrated from per-unit track curvature each frame. Four or five random curves, then the chequered line. Rivals Hamilton (44), Kimi (12) and Verstappen (3); the player starts fourth.
+- An OutRun-style pseudo-3D race: each road row below the horizon (y = 100) is one depth; the road's sideways offset is integrated from per-unit track curvature each frame. Four or five random curves, then the chequered line. Rivals Hamilton (44), Kimi (12) and Verstappen (3) on a 2x2 grid; the player starts fourth. Off track (a wheel past the edge) brakes hard to 15 units/s. Rivals coming from behind pick a side and keep to it for PASS_REACTION, so the player can block; marks on the bottom edge show cars just behind.
 - No frame buffer: the screen is composed in 20-row strips and sent with `cyd_draw_bitmap`. The road and score bar are redrawn every frame, the sky only when it scrolls or a message changes.
 - Steering polls `cyd_touch_read` each frame: hold the left or right half of the screen.
 - Secret: a press starting in the top-right 40x40 toggles Hamilton's auto-win (default on: Hamilton, Kimi, Verstappen finish 1-2-3). Off, the rivals race at their own pace. Kept in NVS namespace `f1_race`, key `rigged`; a 2x2 dot at (316,1) shows when it is off. Keep it unlabelled.

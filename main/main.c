@@ -63,14 +63,20 @@ static const char *TAG = "f1_race";
 
 /* Speeds in road units per second. */
 #define TOP_SPEED 55.0f
-#define OFFROAD_SPEED 22.0f
+#define OFFROAD_SPEED 15.0f
 #define COAST_SPEED 20.0f
 #define ACCELERATION 10.0f
 #define BRAKING 25.0f
+#define OFFROAD_BRAKING 45.0f
+/* Off the track once a rear wheel is past the road's edge. */
+#define OFFROAD_EDGE (ROAD_HALF - CAR_WIDTH * 0.3f)
 #define STEER_RATE 1.8f   /* across the road per second at top speed */
 #define CENTRIFUGAL 0.34f /* drift per unit of curvature and speed */
 #define PARALLAX 25.0f    /* background pixels per unit of curvature and speed */
 #define GRASS_EDGE 2.2f
+#define RIVAL_STEER 0.9f   /* rivals' sideways speed, half the player's */
+#define PASS_REACTION 0.7f /* seconds a rival keeps to the side it picked */
+#define MIRROR_RANGE 15.0f /* cars this close behind get a mark */
 #define KMH_PER_SPEED 6
 
 /* The track: curvature for every road unit, positive bending right. */
@@ -86,6 +92,8 @@ static const char *TAG = "f1_race";
 #define PACE_JITTER 0.006f
 #define RIG_RAMP 0.4f
 #define RIG_CLAMP 0.9f
+/* From here on, rigged rivals squeeze past a blocking player. */
+#define RIG_SQUEEZE 0.75f
 
 /* The secret corner. */
 #define SECRET_SIZE 40
@@ -173,6 +181,7 @@ typedef struct {
     /* Race state. */
     float s, x, v;
     float lane, lane_timer;
+    float pass_timer;
     float finish_time; /* seconds, or negative before the finish */
     uint16_t pixels[SPRITE_H * SPRITE_W];
 } car_t;
@@ -325,15 +334,17 @@ static void build_track(void)
 
 static void reset_cars(void)
 {
-    /* Grid: the player starts fourth, in the right-hand lane. */
-    static const float grid_s[CAR_COUNT] = {15, 10, 5, 0};
-    static const float grid_x[CAR_COUNT] = {-0.45f, 0.45f, -0.45f, 0.45f};
+    /* A 2x2 grid: Hamilton and Kimi on the front row, Verstappen beside the
+       player on the second, a nose ahead so the player starts fourth. */
+    static const float grid_s[CAR_COUNT] = {2.2f, 2.2f, 0.05f, 0};
+    static const float grid_x[CAR_COUNT] = {-0.3f, 0.3f, -0.3f, 0.3f};
     for (int i = 0; i < CAR_COUNT; ++i) {
         car_t *car = &cars[i];
         car->s = grid_s[i];
         car->x = car->lane = grid_x[i];
         car->v = 0;
         car->lane_timer = random_range(3, 6);
+        car->pass_timer = 0;
         car->finish_time = -1;
         car->pace = car->base_pace + random_range(-PACE_JITTER, PACE_JITTER);
     }
@@ -511,6 +522,25 @@ static void draw_sky_strip(int y0)
     cyd_draw_bitmap(0, y0, SCREEN_W, STRIP, strip);
 }
 
+/* Cars just behind, which the camera can't see: a mark along the bottom
+   edge under each one, wider when it is close. */
+static void strip_mirror(int y0)
+{
+    const car_t *player = &cars[PLAYER];
+    for (int i = 0; i < PLAYER; ++i) {
+        const car_t *car = &cars[i];
+        float behind = player->s - car->s;
+        if (behind < PLAYER_Z - 0.35f || behind > MIRROR_RANGE) {
+            continue; /* on screen, or far back */
+        }
+        int w = behind < 4 ? 24 : 14;
+        int x = CENTER_X + (int)((car->x - player->x) * FOCAL / PLAYER_Z) - w / 2;
+        x = x < 2 ? 2 : x > SCREEN_W - 2 - w ? SCREEN_W - 2 - w : x;
+        strip_rect(y0, x - 1, SCREEN_H - 7, w + 2, 6, COLOR_SHADOW);
+        strip_rect(y0, x, SCREEN_H - 6, w, 4, car->label);
+    }
+}
+
 static void draw_road_strip(int y0)
 {
     float player_x = cars[PLAYER].x;
@@ -565,6 +595,9 @@ static void draw_road_strip(int y0)
         }
     }
     strip_sprites(y0);
+    if (y0 + STRIP == SCREEN_H) {
+        strip_mirror(y0);
+    }
     cyd_draw_bitmap(0, y0, SCREEN_W, STRIP, strip);
 }
 
@@ -608,8 +641,8 @@ static void place_sprites(void)
         sprite->x = (int)floorf(CENTER_X + (car->x + offset - cars[PLAYER].x) * scale - w / 2.0f +
                                 0.5f);
         sprite->y = HORIZON - 1 + (int)(DRAW_DISTANCE / z + 0.5f) - sprite->h + 1;
-        if (i == PLAYER && fabsf(car->x) > ROAD_HALF && car->v > 1) {
-            sprite->y -= frame_count & 1; /* bumping over the grass */
+        if (i == PLAYER && fabsf(car->x) > OFFROAD_EDGE && car->v > 1) {
+            sprite->y -= (frame_count & 1) * 2; /* bumping over the grass */
         }
         sprite->z = z;
         sprite->pixels = car->pixels;
@@ -690,10 +723,11 @@ static void approach(float *value, float target, float up, float down)
 static void move_player(float dt, int steer)
 {
     car_t *player = &cars[PLAYER];
-    float limit = player->finish_time >= 0      ? COAST_SPEED
-                  : fabsf(player->x) > ROAD_HALF ? OFFROAD_SPEED
-                                                 : TOP_SPEED;
-    approach(&player->v, limit, ACCELERATION * dt, BRAKING * dt);
+    bool offroad = fabsf(player->x) > OFFROAD_EDGE;
+    float limit = player->finish_time >= 0 ? COAST_SPEED
+                  : offroad                ? OFFROAD_SPEED
+                                           : TOP_SPEED;
+    approach(&player->v, limit, ACCELERATION * dt, (offroad ? OFFROAD_BRAKING : BRAKING) * dt);
     float c = curvature_at(player->s);
     float steer_rate = STEER_RATE * (0.3f + 0.7f * player->v / TOP_SPEED);
     player->x += (steer * steer_rate - c * player->v * CENTRIFUGAL) * dt;
@@ -726,19 +760,24 @@ static void move_rival(car_t *car, float dt)
     approach(&car->v, target, ACCELERATION * dt, BRAKING * dt);
     car->s += car->v * dt;
 
-    /* Wander between lanes; move aside for a player alongside or just ahead,
-       but not for one closing from behind. */
+    /* Wander between lanes. Coming up on the player, pick the side with more
+       road to pass on and keep to it for a moment: rivals steer at half the
+       player's rate, so the player can move across and block. */
     car->lane_timer -= dt;
+    car->pass_timer -= dt;
     if (car->lane_timer <= 0) {
         static const float lanes[] = {-0.5f, 0, 0.5f};
         car->lane = lanes[esp_random() % 3];
         car->lane_timer = random_range(2, 5);
     }
     float behind = player->s - car->s;
-    if (behind > -0.5f && behind < 8 && fabsf(car->x - player->x) < 0.6f) {
-        car->lane = player->x > 0 ? -0.55f : 0.55f;
+    if (behind > -0.5f && behind < 8 && fabsf(car->x - player->x) < 0.6f &&
+        car->pass_timer <= 0) {
+        car->lane = player->x > 0 ? -0.6f : 0.6f;
+        car->pass_timer = PASS_REACTION;
+        car->lane_timer = fmaxf(car->lane_timer, 2);
     }
-    approach(&car->x, car->lane, 0.8f * dt, 0.8f * dt);
+    approach(&car->x, car->lane, RIVAL_STEER * dt, RIVAL_STEER * dt);
 
     if (car->finish_time < 0 && car->s >= track_length) {
         car->finish_time = race_time;
@@ -746,17 +785,37 @@ static void move_rival(car_t *car, float dt)
     }
 }
 
-/* The player running into the back of a rival is held behind it. */
-static void check_collisions(const float before[CAR_COUNT])
+/* Cars touching: side by side they push apart; the player running into the
+   back of a rival is held behind it; and a rival running into the back of
+   the player is held behind it too, so the player can block. Late in a
+   rigged race, rivals squeeze past instead. */
+static void check_collisions(const float before[CAR_COUNT], float dt)
 {
     car_t *player = &cars[PLAYER];
+    const float width = CAR_WIDTH * 0.9f;
+    bool squeeze = rigged && player->s / track_length > RIG_SQUEEZE;
     for (int i = 0; i < PLAYER; ++i) {
         car_t *car = &cars[i];
         float gap = car->s - player->s;
-        if (before[i] > 0 && gap < CAR_LENGTH && fabsf(car->x - player->x) < CAR_WIDTH * 0.9f) {
+        float dx = car->x - player->x;
+        if (fabsf(gap) >= CAR_LENGTH || fabsf(dx) >= width) {
+            continue;
+        }
+        float away = dx < 0 ? -1 : 1; /* the rival's side of the player */
+        if (fabsf(before[i]) < CAR_LENGTH * 0.6f) {
+            float push = (width - fabsf(dx)) / 2;
+            car->x += away * push;
+            player->x -= away * push;
+            player->v *= 1 - 0.5f * dt;
+        } else if (before[i] > 0) {
             player->s = car->s - CAR_LENGTH;
             player->v = fminf(player->v, car->v * 0.75f);
-            player->x += player->x < car->x ? -0.06f : 0.06f;
+            player->x -= away * 0.06f;
+        } else if (squeeze) {
+            car->x += away * 3 * dt;
+        } else {
+            car->s = player->s - CAR_LENGTH;
+            car->v = fminf(car->v, player->v);
         }
     }
 }
@@ -772,7 +831,7 @@ static void update(float dt, int steer)
         move_rival(&cars[i], dt);
     }
     move_player(dt, steer);
-    check_collisions(before);
+    check_collisions(before, dt);
 }
 
 /* Waits for the rest of the frame, but always yields so the idle task runs. */
@@ -867,6 +926,47 @@ static void centered_row(int row, uint16_t color, const char *text)
     cyd_text_row(row, color, CYD_COLOR_BLACK, line);
 }
 
+/* A red italic F1 mark for the splash screen, drawn from shapes. */
+#define LOGO_W 150
+#define LOGO_H 40
+#define LOGO_X ((SCREEN_W - LOGO_W) / 2)
+#define LOGO_Y 6
+#define LOGO_SLANT 0.45f
+#define COLOR_LOGO RGB565(225, 6, 0)
+
+static bool logo_pixel(int x, int y)
+{
+    if (x < 0 || x >= LOGO_W || y < 0 || y >= LOGO_H) {
+        return false;
+    }
+    /* u runs along the letters, unslanted. */
+    float u = x - (LOGO_H - 1 - y) * LOGO_SLANT;
+    if (u < 0) {
+        return false;
+    }
+    if (u < 12 && y < 12 && (12 - u) * (12 - u) + (12 - y) * (12 - y) > 144) {
+        return false; /* the F's rounded top-left corner */
+    }
+    bool stem = u < 22;
+    bool top_bar = y < 12 && u < 96;
+    bool middle_bar = y >= 17 && y < 28 && u < 70;
+    bool one = u >= 104 && u < 126;
+    return stem || top_bar || middle_bar || one;
+}
+
+static void draw_logo(void)
+{
+    for (int y0 = LOGO_Y; y0 < LOGO_Y + LOGO_H; y0 += STRIP) {
+        for (int r = 0; r < STRIP; ++r) {
+            for (int x = 0; x < SCREEN_W; ++x) {
+                strip[r * SCREEN_W + x] =
+                    logo_pixel(x - LOGO_X, y0 + r - LOGO_Y) ? COLOR_LOGO : CYD_COLOR_BLACK;
+            }
+        }
+        cyd_draw_bitmap(0, y0, SCREEN_W, STRIP, strip);
+    }
+}
+
 #define START_ROW 9
 #define START_FIRST 5
 #define START_LAST 11
@@ -874,7 +974,7 @@ static void centered_row(int row, uint16_t color, const char *text)
 static void show_splash(void)
 {
     cyd_fill_rect(0, 0, SCREEN_W, SCREEN_H, CYD_COLOR_BLACK);
-    centered_row(1, CYD_COLOR_YELLOW, "F1 RACE");
+    draw_logo();
     centered_row(2, CYD_COLOR_WHITE, "GRAND PRIX");
 
     /* The player's car at three times its size. */
