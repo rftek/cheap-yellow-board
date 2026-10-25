@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "cota_track.h"
 #include "cyd_display.h"
 #include "esp_log.h"
 #include "esp_random.h"
@@ -13,15 +14,20 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 
-/* F1 Race: a short pseudo-3D race in the manner of OutRun. The road is
-   drawn row by row in perspective, each row's depth fixed by its height
-   above the bottom of the screen, and bends toward the horizon on curves.
-   Hold the left or right half of the screen to steer; the car accelerates
-   by itself. Four or five random curves lead to the chequered flag.
+/* F1 Race: one lap of the Circuit of the Americas, about 30 seconds. The
+   first 5 seconds, from the grid up the main straight, are seen over the
+   horizon in the manner of OutRun: the road is drawn row by row in
+   perspective, each row's depth fixed by its height above the bottom of the
+   screen, and bends toward the horizon on curves. Then the view changes to
+   a top-down map of the whole circuit for the rest of the lap. Hold the left
+   or right half of the screen to steer; the car accelerates by itself and
+   slows for corners.
 
-   There is no frame buffer: the screen is composed in 20-row strips, each
-   sent with cyd_draw_bitmap. The road strips are redrawn every frame, the
-   sky only when the background scrolls or a message changes.
+   There is no frame buffer. Over the horizon, the screen is composed in
+   20-row strips, each sent with cyd_draw_bitmap; the road strips are redrawn
+   every frame, the sky only when the background scrolls or a message
+   changes. On the map, only small boxes around the cars are redrawn, from
+   1-bit masks of the road and its edges.
 
    An unlabelled tap target in the top-right corner toggles Hamilton's
    auto-win. With it on (the default), Hamilton, Kimi and Verstappen always
@@ -61,30 +67,47 @@ static const char *TAG = "f1_race";
 #define CAR_WIDTH 0.45f
 #define CAR_LENGTH 1.0f
 
-/* Speeds in road units per second. */
+/* Speeds in road units per second. TOP_SPEED, ACCELERATION, BRAKING,
+   CENTRIFUGAL and DRIFT_MAX are also in tools/cota_track.py, which sizes the
+   track from them; change them together and regenerate cota_track.h. */
 #define TOP_SPEED 55.0f
 #define OFFROAD_SPEED 15.0f
 #define COAST_SPEED 20.0f
-#define ACCELERATION 10.0f
-#define BRAKING 25.0f
+#define ACCELERATION 7.0f
+#define BRAKING 30.0f
 #define OFFROAD_BRAKING 45.0f
 /* Off the track once a rear wheel is past the road's edge. */
 #define OFFROAD_EDGE (ROAD_HALF - CAR_WIDTH * 0.3f)
-#define STEER_RATE 1.8f   /* across the road per second at top speed */
-#define CENTRIFUGAL 0.34f /* drift per unit of curvature and speed */
-#define PARALLAX 25.0f    /* background pixels per unit of curvature and speed */
+#define STEER_RATE 1.8f /* across the road per second at top speed */
+/* Corners push a car outward by curvature x speed squared x GRIP. Every car
+   slows for a corner to the speed where that push is DRIFT_MAX, a little
+   less than the player can steer against. */
+#define CENTRIFUGAL 0.34f /* the push at top speed, per unit of curvature */
+#define GRIP (CENTRIFUGAL / TOP_SPEED)
+#define DRIFT_MAX 1.0f
+#define PARALLAX 25.0f /* background pixels per unit of curvature and speed */
 #define GRASS_EDGE 2.2f
 #define RIVAL_STEER 0.9f   /* rivals' sideways speed, half the player's */
 #define PASS_REACTION 0.7f /* seconds a rival keeps to the side it picked */
 #define MIRROR_RANGE 15.0f /* cars this close behind get a mark */
 #define KMH_PER_SPEED 6
 
-/* The track: curvature for every road unit, positive bending right. */
-#define TRACK_MAX 3600
-#define START_STRAIGHT 120
-#define FINAL_STRAIGHT 250
-#define CURVE_EASE 50
+/* The track is COTA, from cota_track.h. s counts road units from the grid,
+   COTA_GRID_BACK behind the start line, and the race ends one lap later at
+   the start line. */
+#define RACE_LENGTH ((float)(COTA_GRID_BACK + COTA_LENGTH))
+#define HORIZON_SECONDS 5.0f /* then the top-down map */
 #define FINISH_SECONDS 2.5f
+
+/* The map: the whole circuit under a 20-row bar, the road drawn ROAD_PX
+   either side of the centerline. A car's place across the road maps to the
+   same scale, so the edge of the drawn road is the edge of the track. */
+#define MAP_TOP STRIP
+#define ROAD_PX 3
+#define MAP_BOX 7 /* half the side of the box redrawn around a car */
+#define COLOR_MAP_GRASS RGB565(0, 130, 0)
+#define COLOR_MAP_ROAD RGB565(100, 100, 100)
+#define COLOR_MAP_EDGE RGB565(235, 235, 235)
 
 /* Hamilton's auto-win: rivals close up on the player from this far into the
    race, to these leads at the finish. */
@@ -92,6 +115,7 @@ static const char *TAG = "f1_race";
 #define PACE_JITTER 0.006f
 #define RIG_RAMP 0.4f
 #define RIG_CLAMP 0.9f
+#define RIG_SPEEDUP 1.35f /* at most this times the safe speed */
 /* From here on, rigged rivals squeeze past a blocking player. */
 #define RIG_SQUEEZE 0.75f
 
@@ -203,9 +227,18 @@ static car_t cars[CAR_COUNT] = {
                 .helmet = RGB565(255, 255, 255), .label = CYD_COLOR_YELLOW},
 };
 
-static float curvature[TRACK_MAX];
-static float track_length;
-static int curve_count;
+static const float track_length = RACE_LENGTH;
+/* The fastest each road unit can be taken, braking in time for the next
+   corner. */
+static float safe_speed[COTA_LENGTH];
+
+/* 1-bit masks of the map: the road, and the road with its edge lines. */
+static uint8_t road_mask[SCREEN_H][SCREEN_W / 8];
+static uint8_t edge_mask[SCREEN_H][SCREEN_W / 8];
+
+enum { VIEW_HORIZON, VIEW_MAP };
+static int view;
+static int boxes[CAR_COUNT][4]; /* each car's last box on the map: x0, y0, x1, y1 */
 
 static bool rigged = true; /* Hamilton's auto-win */
 static float race_time;
@@ -249,10 +282,23 @@ static uint16_t blend(uint16_t a, uint16_t b, int t)
     return (uint16_t)((r << 11) | (g << 5) | bl);
 }
 
+/* The COTA table entry for race position s. */
+static int track_index(float s)
+{
+    int i = ((int)floorf(s) - COTA_GRID_BACK) % COTA_LENGTH;
+    return i < 0 ? i + COTA_LENGTH : i;
+}
+
 static float curvature_at(float s)
 {
-    int i = (int)s;
-    return i >= 0 && i < TRACK_MAX ? curvature[i] : 0;
+    return COTA_CURVATURE[track_index(s)] / COTA_CURVATURE_SCALE;
+}
+
+/* Distance past the start line, within the lap. */
+static float lap_position(float s)
+{
+    float p = fmodf(s - COTA_GRID_BACK, COTA_LENGTH);
+    return p < 0 ? p + COTA_LENGTH : p;
 }
 
 /* ---- Setup ---- */
@@ -310,26 +356,52 @@ static void build_scenery(void)
     }
 }
 
-/* A start straight, four or five curves with straights between, a final
-   straight and the finish line, then road to coast on. */
+static void stamp_disc(uint8_t mask[SCREEN_H][SCREEN_W / 8], int cx, int cy, int radius)
+{
+    for (int dy = -radius; dy <= radius; ++dy) {
+        for (int dx = -radius; dx <= radius; ++dx) {
+            int x = cx + dx;
+            int y = cy + dy;
+            if (dx * dx + dy * dy <= radius * radius && x >= 0 && x < SCREEN_W && y >= 0 &&
+                y < SCREEN_H) {
+                mask[y][x >> 3] |= (uint8_t)(1 << (x & 7));
+            }
+        }
+    }
+}
+
+static bool mask_bit(uint8_t mask[SCREEN_H][SCREEN_W / 8], int x, int y)
+{
+    return mask[y][x >> 3] & (1 << (x & 7));
+}
+
+/* Safe corner speeds (as in tools/cota_track.py) and the map masks. */
 static void build_track(void)
 {
-    memset(curvature, 0, sizeof(curvature));
-    int s = START_STRAIGHT;
-    curve_count = 4 + (int)(esp_random() % 2);
-    for (int i = 0; i < curve_count; ++i) {
-        s += 100 + (int)(esp_random() % 151);
-        int length = 150 + (int)(esp_random() % 151);
-        float strength = random_range(0.03f, 0.07f) * (esp_random() % 2 ? 1 : -1);
-        for (int k = 0; k < length; ++k) {
-            float ramp = fminf(1, fminf((float)k / CURVE_EASE, (float)(length - 1 - k) / CURVE_EASE));
-            curvature[s + k] = strength * ramp * ramp * (3 - 2 * ramp);
-        }
-        ESP_LOGI(TAG, "Curve %d at %d: %d long, %s %.3f", i + 1, s, length,
-                 strength > 0 ? "right" : "left", fabsf(strength));
-        s += length;
+    for (int i = 0; i < COTA_LENGTH; ++i) {
+        float c = fabsf(COTA_CURVATURE[i] / COTA_CURVATURE_SCALE);
+        safe_speed[i] = c > 0 ? fminf(TOP_SPEED, sqrtf(DRIFT_MAX / (GRIP * c))) : TOP_SPEED;
     }
-    track_length = (float)(s + FINAL_STRAIGHT);
+    for (int pass = 0; pass < 2; ++pass) { /* twice, so braking zones wrap */
+        for (int i = COTA_LENGTH - 1; i >= 0; --i) {
+            float next = safe_speed[(i + 1) % COTA_LENGTH];
+            safe_speed[i] = fminf(safe_speed[i], sqrtf(next * next + 2 * BRAKING));
+        }
+    }
+    for (int i = 0; i < COTA_LENGTH; ++i) {
+        int x = (int)lroundf(COTA_X[i] / COTA_POSITION_SCALE);
+        int y = (int)lroundf(COTA_Y[i] / COTA_POSITION_SCALE);
+        stamp_disc(road_mask, x, y, ROAD_PX);
+        stamp_disc(edge_mask, x, y, ROAD_PX + 1);
+    }
+    ESP_LOGI(TAG, "COTA: %d units of %.2f m, grid %d units back", COTA_LENGTH,
+             COTA_METERS_PER_UNIT, COTA_GRID_BACK);
+}
+
+/* The fastest a car can be going at race position s. */
+static float safe_speed_at(float s)
+{
+    return safe_speed[track_index(s)];
 }
 
 static void reset_cars(void)
@@ -351,6 +423,7 @@ static void reset_cars(void)
     bg_scroll = 0;
     race_time = 0;
     sky_dirty = true;
+    view = VIEW_HORIZON;
 }
 
 static void load_rigged(void)
@@ -474,6 +547,34 @@ static int car_place(const car_t *car)
     return place;
 }
 
+/* The bar across the top strip: place, speed and everyone's progress (or,
+   on the map, a message in its place), and the secret's indicator. */
+static void strip_hud(bool on_map)
+{
+    char text[16];
+    snprintf(text, sizeof(text), "P%d/%d", car_place(&cars[PLAYER]), CAR_COUNT);
+    strip_label(0, 6, 5, 2, CYD_COLOR_WHITE, text);
+    int kmh = (int)(cars[PLAYER].v * KMH_PER_SPEED + 0.5f);
+    snprintf(text, sizeof(text), "%d KMH", kmh % 1000);
+    strip_label(0, SCREEN_W - 10 - text_width(text, 2), 5, 2, CYD_COLOR_WHITE, text);
+    if (on_map && message != NULL) {
+        strip_label(0, (SCREEN_W - text_width(message, 2)) / 2, 5, 2, message_color, message);
+    } else {
+        /* A mark for each car; the player's on top. */
+        const int bar_x = 100, bar_w = 120;
+        strip_rect(0, bar_x + 1, 10, bar_w, 2, COLOR_SHADOW);
+        strip_rect(0, bar_x, 9, bar_w, 2, RGB565(230, 230, 230));
+        for (int i = 0; i < CAR_COUNT; ++i) {
+            float progress = fminf(1, fmaxf(0, cars[i].s / track_length));
+            int x = bar_x + (int)(progress * (bar_w - 3));
+            strip_rect(0, x, 6, 3, 8, i == PLAYER ? CYD_COLOR_YELLOW : cars[i].label);
+        }
+    }
+    if (!rigged) {
+        strip_rect(0, INDICATOR_X, INDICATOR_Y, INDICATOR_SIZE, INDICATOR_SIZE, COLOR_INDICATOR);
+    }
+}
+
 static void draw_sky_strip(int y0)
 {
     int far = (int)floorf(bg_scroll * 0.5f);
@@ -497,27 +598,8 @@ static void draw_sky_strip(int y0)
     if (message != NULL) {
         strip_label(y0, (SCREEN_W - text_width(message, 6)) / 2, 30, 6, message_color, message);
     }
-
     if (y0 == 0) {
-        char text[16];
-        snprintf(text, sizeof(text), "P%d/%d", car_place(&cars[PLAYER]), CAR_COUNT);
-        strip_label(0, 6, 5, 2, CYD_COLOR_WHITE, text);
-        int kmh = (int)(cars[PLAYER].v * KMH_PER_SPEED + 0.5f);
-        snprintf(text, sizeof(text), "%d KMH", kmh % 1000);
-        strip_label(0, SCREEN_W - 10 - text_width(text, 2), 5, 2, CYD_COLOR_WHITE, text);
-        /* Track progress, with a mark for each car; the player's on top. */
-        const int bar_x = 100, bar_w = 120;
-        strip_rect(0, bar_x + 1, 10, bar_w, 2, COLOR_SHADOW);
-        strip_rect(0, bar_x, 9, bar_w, 2, RGB565(230, 230, 230));
-        for (int i = 0; i < CAR_COUNT; ++i) {
-            float progress = fminf(1, fmaxf(0, cars[i].s / track_length));
-            int x = bar_x + (int)(progress * (bar_w - 3));
-            strip_rect(0, x, 6, 3, 8, i == PLAYER ? CYD_COLOR_YELLOW : cars[i].label);
-        }
-        if (!rigged) {
-            strip_rect(0, INDICATOR_X, INDICATOR_Y, INDICATOR_SIZE, INDICATOR_SIZE,
-                       COLOR_INDICATOR);
-        }
+        strip_hud(false);
     }
     cyd_draw_bitmap(0, y0, SCREEN_W, STRIP, strip);
 }
@@ -569,7 +651,7 @@ static void draw_road_strip(int y0)
         fill_span(row, center - half - rumble, center - half, rumble_color);
         fill_span(row, center + half, center + half + rumble, rumble_color);
 
-        bool checkered = (s >= 0 && s < 3) || (s >= track_length && s < track_length + 3);
+        bool checkered = lap_position(s) < 3; /* the start line */
         if (checkered) {
             int left = (int)floorf(center - half + 0.5f);
             int right = (int)floorf(center + half + 0.5f);
@@ -659,8 +741,161 @@ static void place_sprites(void)
     }
 }
 
+/* ---- The top-down map ---- */
+
+typedef struct {
+    float x, y;     /* map pixels */
+    float cos, sin; /* heading */
+    uint16_t body, outline;
+} map_car_t;
+
+static map_car_t map_cars[CAR_COUNT];
+
+/* Each car on the map: the centerline point at its place along the lap,
+   moved across the road by its place across it. */
+static void place_map_cars(void)
+{
+    for (int i = 0; i < CAR_COUNT; ++i) {
+        const car_t *car = &cars[i];
+        int k = track_index(car->s);
+        int next = (k + 1) % COTA_LENGTH;
+        float f = car->s - floorf(car->s);
+        float cx = (COTA_X[k] + (COTA_X[next] - COTA_X[k]) * f) / COTA_POSITION_SCALE;
+        float cy = (COTA_Y[k] + (COTA_Y[next] - COTA_Y[k]) * f) / COTA_POSITION_SCALE;
+        float heading = COTA_HEADING[k] / COTA_HEADING_SCALE;
+        map_car_t *m = &map_cars[i];
+        m->cos = cosf(heading);
+        m->sin = sinf(heading);
+        /* The driver's right is the heading turned a quarter clockwise. */
+        m->x = cx - m->sin * car->x * ROAD_PX;
+        m->y = cy + m->cos * car->x * ROAD_PX;
+        m->body = car->label;
+        m->outline = i == PLAYER ? CYD_COLOR_WHITE : CYD_COLOR_BLACK;
+    }
+}
+
+/* A car seen from above: a 7x4 body pointing along its heading, with a
+   narrower nose, outlined. */
+static bool map_car_pixel(const map_car_t *m, int x, int y, uint16_t *color)
+{
+    float dx = x + 0.5f - m->x;
+    float dy = y + 0.5f - m->y;
+    float along = dx * m->cos + dy * m->sin;
+    float across = -dx * m->sin + dy * m->cos;
+    if (fabsf(along) > 4.5f || fabsf(across) > 3.0f) {
+        return false;
+    }
+    bool body = fabsf(along) <= 3.5f && fabsf(across) <= 2.0f && !(along > 2 && fabsf(across) > 1);
+    *color = body ? m->body : m->outline;
+    return true;
+}
+
+/* The chequered start line across the road at the first table entry. */
+static bool finish_pixel(int x, int y, uint16_t *color)
+{
+    float dx = x + 0.5f - COTA_X[0] / COTA_POSITION_SCALE;
+    float dy = y + 0.5f - COTA_Y[0] / COTA_POSITION_SCALE;
+    if (fabsf(dx) > 6 || fabsf(dy) > 6) {
+        return false;
+    }
+    float heading = COTA_HEADING[0] / COTA_HEADING_SCALE;
+    float along = dx * cosf(heading) + dy * sinf(heading);
+    float across = -dx * sinf(heading) + dy * cosf(heading);
+    if (fabsf(along) >= 1.5f || fabsf(across) >= ROAD_PX + 0.5f) {
+        return false;
+    }
+    *color = ((int)floorf(along + 2) + (int)floorf(across + 8)) & 1 ? CYD_COLOR_WHITE
+                                                                       : CYD_COLOR_BLACK;
+    return true;
+}
+
+static uint16_t map_pixel(int x, int y)
+{
+    uint16_t color;
+    for (int i = CAR_COUNT - 1; i >= 0; --i) { /* the player on top */
+        if (map_car_pixel(&map_cars[i], x, y, &color)) {
+            return color;
+        }
+    }
+    if (finish_pixel(x, y, &color)) {
+        return color;
+    }
+    return mask_bit(road_mask, x, y)   ? COLOR_MAP_ROAD
+           : mask_bit(edge_mask, x, y) ? COLOR_MAP_EDGE
+                                       : COLOR_MAP_GRASS;
+}
+
+static void draw_map_hud(void)
+{
+    for (int i = 0; i < STRIP * SCREEN_W; ++i) {
+        strip[i] = CYD_COLOR_BLACK;
+    }
+    strip_hud(true);
+    cyd_draw_bitmap(0, 0, SCREEN_W, STRIP, strip);
+}
+
+/* Redraws a box of the map, clipped to the map's area. */
+static void draw_map_box(const int box[4])
+{
+    int x0 = box[0] > 0 ? box[0] : 0;
+    int y0 = box[1] > MAP_TOP ? box[1] : MAP_TOP;
+    int x1 = box[2] < SCREEN_W ? box[2] : SCREEN_W;
+    int y1 = box[3] < SCREEN_H ? box[3] : SCREEN_H;
+    int w = x1 - x0;
+    int h = y1 - y0;
+    if (w <= 0 || h <= 0 || w * h > STRIP * SCREEN_W) {
+        return;
+    }
+    for (int y = y0; y < y1; ++y) {
+        for (int x = x0; x < x1; ++x) {
+            strip[(y - y0) * w + (x - x0)] = map_pixel(x, y);
+        }
+    }
+    cyd_draw_bitmap(x0, y0, w, h, strip);
+}
+
+/* The whole map, when the view changes. */
+static void draw_map(void)
+{
+    place_map_cars();
+    draw_map_hud();
+    for (int y0 = MAP_TOP; y0 < SCREEN_H; y0 += STRIP) {
+        for (int r = 0; r < STRIP; ++r) {
+            for (int x = 0; x < SCREEN_W; ++x) {
+                strip[r * SCREEN_W + x] = map_pixel(x, y0 + r);
+            }
+        }
+        cyd_draw_bitmap(0, y0, SCREEN_W, STRIP, strip);
+    }
+    for (int i = 0; i < CAR_COUNT; ++i) {
+        boxes[i][0] = boxes[i][2] = -1; /* nothing to erase yet */
+    }
+}
+
+/* Each frame on the map: erase each car where it was and draw it where it
+   is. Both boxes are composed from everything, so overlaps come out right. */
+static void render_map(void)
+{
+    place_map_cars();
+    draw_map_hud();
+    for (int i = 0; i < CAR_COUNT; ++i) {
+        if (boxes[i][2] > boxes[i][0]) {
+            draw_map_box(boxes[i]);
+        }
+        int x = (int)floorf(map_cars[i].x);
+        int y = (int)floorf(map_cars[i].y);
+        int box[4] = {x - MAP_BOX, y - MAP_BOX, x + MAP_BOX + 1, y + MAP_BOX + 1};
+        draw_map_box(box);
+        memcpy(boxes[i], box, sizeof(box));
+    }
+}
+
 static void render(void)
 {
+    if (view == VIEW_MAP) {
+        render_map();
+        return;
+    }
     camera_s = cars[PLAYER].s - PLAYER_Z;
     compute_offsets();
     place_sprites();
@@ -727,10 +962,11 @@ static void move_player(float dt, int steer)
     float limit = player->finish_time >= 0 ? COAST_SPEED
                   : offroad                ? OFFROAD_SPEED
                                            : TOP_SPEED;
+    limit = fminf(limit, safe_speed_at(player->s));
     approach(&player->v, limit, ACCELERATION * dt, (offroad ? OFFROAD_BRAKING : BRAKING) * dt);
     float c = curvature_at(player->s);
     float steer_rate = STEER_RATE * (0.3f + 0.7f * player->v / TOP_SPEED);
-    player->x += (steer * steer_rate - c * player->v * CENTRIFUGAL) * dt;
+    player->x += (steer * steer_rate - c * player->v * player->v * GRIP) * dt;
     player->x = fmaxf(-GRASS_EDGE, fminf(GRASS_EDGE, player->x));
     player->s += player->v * dt;
     bg_scroll += c * player->v * PARALLAX * dt;
@@ -743,15 +979,17 @@ static void move_player(float dt, int steer)
 static void move_rival(car_t *car, float dt)
 {
     const car_t *player = &cars[PLAYER];
-    float target = car->pace * TOP_SPEED;
+    float safe = safe_speed_at(car->s);
+    float target = car->pace * safe;
     float progress = player->s / track_length;
     if (rigged && progress > RIG_FROM) {
-        /* Close up to a lead over the player that grows toward the finish. */
+        /* Close up to a lead over the player that grows toward the finish,
+           carrying a little more speed than is safe through the corners. */
         float ramp = fminf(1, (progress - RIG_FROM) / RIG_RAMP);
         float wanted = player->s + car->lead * ramp;
         float gap = wanted - car->s;
         if (gap > 0) {
-            target = fmaxf(target, fminf(1.5f * TOP_SPEED, player->v + 1.5f * gap));
+            target = fmaxf(target, fminf(RIG_SPEEDUP * safe, player->v + 1.5f * gap));
         }
         if (progress > RIG_CLAMP && car->s < wanted) {
             car->s = wanted;
@@ -849,7 +1087,6 @@ static void end_frame(TickType_t *last_frame)
 static void run_race(void)
 {
     static const char *const COUNTDOWN[] = {"3", "2", "1"};
-    build_track();
     reset_cars();
     touch_held = false;
     touch_steer = 0;
@@ -879,6 +1116,10 @@ static void run_race(void)
         update(dt, read_steering());
         if (message == GO && race_time > 1) {
             message = NULL;
+        }
+        if (view == VIEW_HORIZON && race_time >= HORIZON_SECONDS) {
+            view = VIEW_MAP;
+            draw_map();
         }
         if (cars[PLAYER].finish_time >= 0) {
             message = "FINISH";
@@ -975,7 +1216,7 @@ static void show_splash(void)
 {
     cyd_fill_rect(0, 0, SCREEN_W, SCREEN_H, CYD_COLOR_BLACK);
     draw_logo();
-    centered_row(2, CYD_COLOR_WHITE, "GRAND PRIX");
+    centered_row(2, CYD_COLOR_WHITE, "COTA GRAND PRIX");
 
     /* The player's car at three times its size. */
     sprites[0] = (sprite_t){.x = (SCREEN_W - 3 * SPRITE_W) / 2, .y = 80, .w = 3 * SPRITE_W,
@@ -1090,7 +1331,7 @@ static void show_results(void)
     centered_row(8, CYD_COLOR_GRAY, text);
     centered_row(9, CYD_COLOR_YELLOW, "tap to go on");
     draw_indicator();
-    ESP_LOGI(TAG, "Result: P%d of %d, %d curves, %s", place, CAR_COUNT, curve_count,
+    ESP_LOGI(TAG, "Result: P%d of %d, %s", place, CAR_COUNT,
              rigged ? "auto-win on" : "fair");
 
     while (true) {
@@ -1108,6 +1349,7 @@ static void game_task(void *argument)
 {
     (void)argument;
     load_rigged();
+    build_track();
     build_sprites();
     build_scenery();
     while (true) {
