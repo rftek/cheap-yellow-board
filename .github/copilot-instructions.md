@@ -1,6 +1,6 @@
 # ESP32 CYD Stopwatch
 
-- PlatformIO project using native ESP-IDF C for an ESP32 Cheap Yellow Display. Each application has its own branch: `bootloader`, `wifi_checker`, `birdnet_viewer`, `screen_check`, `touchscreen_cal`, `stopwatch` (this).
+- PlatformIO project using native ESP-IDF C for an ESP32 Cheap Yellow Display. Each application has its own branch: `bootloader`, `wifi_checker`, `birdnet_viewer`, `screen_check`, `touchscreen_cal`, `stopwatch` (this), `gear_roll`, `Datalogger`, `CatMouse`, `bluetooth_diag`, `f1_race`; docs on `How_to_Build`.
 - LVGL 9 UI: a round dial (lv_arc for seconds, lv_scale ticks), MM:SS.cc label, START/STOP/CLEAR buttons. Timing from esp_timer, never from LVGL ticks.
 - LVGL comes from the ESP-IDF component manager (`main/idf_component.yml`); configure it with CONFIG_LV_* in `sdkconfig.defaults`.
 - Display flush goes through `cyd_draw_pattern` (the panel fills windows column-major); touch input polls `cyd_touch_read` (calibrated). Do not also call `cyd_touch_start`: two tasks on the touch SPI device would collide.
