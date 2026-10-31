@@ -14,10 +14,12 @@ Applications for the ESP32 Cheap Yellow Display (CYD, ESP32-2432S028R), written 
 | [`stopwatch`](https://github.com/rftek/cheap-yellow-board/tree/stopwatch) | LVGL stopwatch |
 | [`gear_roll`](https://github.com/rftek/cheap-yellow-board/tree/gear_roll) | LVGL gear demo |
 | [`Datalogger`](https://github.com/rftek/cheap-yellow-board/tree/Datalogger) | Voltage logger on GPIO35 |
-| [`CatMouse`](https://github.com/rftek/cheap-yellow-board/tree/CatMouse) | Maze game: a mouse, cheese and three cats |
+| [`CatMouse`](https://github.com/rftek/cheap-yellow-board/tree/CatMouse) | PAC-MAN-style maze game |
 | [`bluetooth_diag`](https://github.com/rftek/cheap-yellow-board/tree/bluetooth_diag) | Bluetooth Classic and LE scanner and connection tester |
+| [`f1_race`](https://github.com/rftek/cheap-yellow-board/tree/f1_race) | F1 racing game |
 | [`How_to_Build`](https://github.com/rftek/cheap-yellow-board/tree/How_to_Build) | Build environment and installation guide |
 | `main` | This branch: the original BirdNET viewer, described below |
+| [`bruce`](https://github.com/rftek/cheap-yellow-board/tree/bruce) | [Bruce](https://github.com/BruceDevices/firmware) firmware with its full history (AGPL-3.0), imported from upstream `main`. Not a launcher app. |
 
 ## This branch: the original BirdNET viewer
 
