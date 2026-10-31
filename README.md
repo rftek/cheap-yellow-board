@@ -14,6 +14,9 @@ Each application lives on its own branch of this repository:
 | `stopwatch` | LVGL stopwatch |
 | `gear_roll` | LVGL gear demo |
 | `Datalogger` | This voltage logger |
+| `CatMouse` | PAC-MAN-style maze game |
+| `bluetooth_diag` | Bluetooth Classic and LE scanner and connection tester |
+| `f1_race` | F1 racing game |
 | `How_to_Build` | Build environment and installation guide |
 
 ## Wiring
