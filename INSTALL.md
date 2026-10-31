@@ -89,6 +89,8 @@ The branches:
 | `stopwatch` | LVGL stopwatch | Yes |
 | `gear_roll` | LVGL gear demo | Yes |
 | `Datalogger` | CH1 voltage logger (GPIO35) | Yes |
+| `CatMouse` | Maze game: a mouse, cheese and three cats | Yes |
+| `bluetooth_diag` | Bluetooth Classic and LE scanner and connection tester | Yes |
 | `How_to_Build` | This documentation | No |
 | `main` | The original BirdNET viewer, superseded by `birdnet_viewer` | No |
 
@@ -169,7 +171,7 @@ An application can also run on its own, without the launcher: `& $pio run --targ
 
 Push the branch. Its `.github/workflows/build.yml` runs on GitHub Actions: it installs PlatformIO with `pip`, runs `pio run`, and uploads the result as `firmware.bin` to the release tagged with the branch name, creating the release the first time. On its next start, the launcher shows the new build as an update.
 
-To add a new application, copy an existing app branch (for example `screen_check`, or `stopwatch` for LVGL), change `project(...)` in `CMakeLists.txt` and `build_dir` in `platformio.ini`, write the app in `main/`, and push. Boot images must stay under 1.31 MB, the slot size, and must never contain credentials, because their binaries are public.
+To add a new application, copy an existing app branch (for example `screen_check`, or `stopwatch` for LVGL), change `project(...)` in `CMakeLists.txt` and `build_dir` in `platformio.ini`, write the app in `main/`, and push. The `project(...)` name must be exactly the branch name, case included: the launcher compares the name in a slot's image with the branch it came from, and on a mismatch it keeps offering the app as an update. Then add the branch to the tables in this branch's `README.md` and `INSTALL.md`. Boot images must stay under 1.31 MB, the slot size, and must never contain credentials, because their binaries are public.
 
 The workflow needs the repository's Actions to have **read and write** permission for contents, so it can create releases. It asks for this with `permissions: contents: write`.
 
