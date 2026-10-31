@@ -7,13 +7,17 @@ Each application lives on its own branch of this repository:
 | Branch | Application |
 |---|---|
 | `bootloader` | Launcher: a boot menu with two image slots |
-| `wifi_checker` | Wi-Fi and Bluetooth LE scanner |
+| `wifi_checker` | Wi-Fi, Bluetooth LE and LAN scanner |
 | `birdnet_viewer` | BirdNET bird photo viewer |
 | `screen_check` | This screen color test |
 | `touchscreen_cal` | Touchscreen calibration |
 | `stopwatch` | LVGL stopwatch |
 | `gear_roll` | LVGL gear demo |
 | `Datalogger` | Voltage logger on GPIO35 |
+| `CatMouse` | PAC-MAN-style maze game |
+| `bluetooth_diag` | Bluetooth Classic and LE scanner and connection tester |
+| `f1_race` | F1 racing game |
+| `How_to_Build` | Build environment and installation guide |
 
 ## What it does
 
