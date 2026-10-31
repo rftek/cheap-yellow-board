@@ -23,9 +23,11 @@ Documentation for building, flashing and publishing the applications in this rep
 | `stopwatch` | LVGL stopwatch |
 | `gear_roll` | LVGL gear demo |
 | `Datalogger` | Voltage logger on GPIO35 |
-| `CatMouse` | Maze game: a mouse, cheese and three cats |
+| `CatMouse` | PAC-MAN-style maze game |
 | `bluetooth_diag` | Bluetooth Classic and LE scanner and connection tester |
+| `f1_race` | F1 racing game |
 | `How_to_Build` | This documentation |
 | `main` | The original BirdNET viewer, superseded by `birdnet_viewer` |
+| `bruce` | [Bruce](https://github.com/BruceDevices/firmware) firmware with its full history (AGPL-3.0), imported from upstream `main`. Not a launcher app. |
 
 Each application branch has its own README describing what the app does and how it is put together.

@@ -75,6 +75,15 @@ cd cheap-yellow-board
 git config remote.origin.tagOpt --no-tags
 ```
 
+A full clone downloads every branch, about 190 MB, almost all of it the `bruce` branch's history. To leave that out, clone only the branches you need:
+
+```bash
+git clone --single-branch --branch bootloader --no-tags https://github.com/rftek/cheap-yellow-board.git
+cd cheap-yellow-board
+git remote set-branches --add origin wifi_checker
+git fetch origin
+```
+
 **Why `--no-tags`:** each app branch publishes to a release tagged with the *same name* as the branch. In Git's name lookup a tag beats a branch, so with tags fetched, `git checkout wifi_checker` would check out the release tag instead of the branch. In scripts, `refs/heads/<branch>` is always unambiguous.
 
 The branches:
@@ -89,10 +98,12 @@ The branches:
 | `stopwatch` | LVGL stopwatch | Yes |
 | `gear_roll` | LVGL gear demo | Yes |
 | `Datalogger` | CH1 voltage logger (GPIO35) | Yes |
-| `CatMouse` | Maze game: a mouse, cheese and three cats | Yes |
+| `CatMouse` | PAC-MAN-style maze game | Yes |
 | `bluetooth_diag` | Bluetooth Classic and LE scanner and connection tester | Yes |
+| `f1_race` | F1 racing game | Yes |
 | `How_to_Build` | This documentation | No |
 | `main` | The original BirdNET viewer, superseded by `birdnet_viewer` | No |
+| `bruce` | [Bruce](https://github.com/BruceDevices/firmware) firmware with its full history (AGPL-3.0), imported from upstream `main`; it builds with its own instructions, not this guide's | No |
 
 Each application branch is a complete PlatformIO project at the repository root, with its own copy of the shared display and touch driver in `components/cyd_display`. Switch with `git switch <branch>`.
 
@@ -169,7 +180,7 @@ An application can also run on its own, without the launcher: `& $pio run --targ
 
 ## 8. Publish a new or changed application
 
-Push the branch. Its `.github/workflows/build.yml` runs on GitHub Actions: it installs PlatformIO with `pip`, runs `pio run`, and uploads the result as `firmware.bin` to the release tagged with the branch name, creating the release the first time. On its next start, the launcher shows the new build as an update.
+Push the branch. Its `.github/workflows/build.yml` runs on GitHub Actions: it installs PlatformIO with `pip`, runs `pio run`, and uploads the result as `firmware.bin` to the release tagged with the branch name, creating the release the first time, and moves the release's tag to the commit it built. Pushes that change only Markdown files don't rebuild. On its next start, the launcher shows the new build as an update.
 
 To add a new application, copy an existing app branch (for example `screen_check`, or `stopwatch` for LVGL), change `project(...)` in `CMakeLists.txt` and `build_dir` in `platformio.ini`, write the app in `main/`, and push. The `project(...)` name must be exactly the branch name, case included: the launcher compares the name in a slot's image with the branch it came from, and on a mismatch it keeps offering the app as an update. Then add the branch to the tables in this branch's `README.md` and `INSTALL.md`. Boot images must stay under 1.31 MB, the slot size, and must never contain credentials, because their binaries are public.
 
