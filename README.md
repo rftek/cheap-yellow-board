@@ -1,4 +1,27 @@
-# ESP32 CYD BirdNET Display
+# ESP32 Cheap Yellow Display applications
+
+Applications for the ESP32 Cheap Yellow Display (CYD, ESP32-2432S028R), written in ESP-IDF C with PlatformIO. **Each application lives on its own branch.** The `bootloader` branch is a launcher with two image slots: it lists the applications published on this repository's releases and downloads the one you tap. GitHub Actions builds each application branch and publishes its `firmware.bin` on a release with the branch's name.
+
+**To build or install anything, start with [INSTALL.md on the `How_to_Build` branch](https://github.com/rftek/cheap-yellow-board/blob/How_to_Build/INSTALL.md).**
+
+| Branch | Application |
+|---|---|
+| [`bootloader`](https://github.com/rftek/cheap-yellow-board/tree/bootloader) | Launcher: a boot menu with two image slots, a custom bootloader and the partition table |
+| [`wifi_checker`](https://github.com/rftek/cheap-yellow-board/tree/wifi_checker) | Wi-Fi, Bluetooth LE and LAN scanner |
+| [`birdnet_viewer`](https://github.com/rftek/cheap-yellow-board/tree/birdnet_viewer) | BirdNET bird photo viewer |
+| [`screen_check`](https://github.com/rftek/cheap-yellow-board/tree/screen_check) | Screen color test |
+| [`touchscreen_cal`](https://github.com/rftek/cheap-yellow-board/tree/touchscreen_cal) | Touchscreen calibration |
+| [`stopwatch`](https://github.com/rftek/cheap-yellow-board/tree/stopwatch) | LVGL stopwatch |
+| [`gear_roll`](https://github.com/rftek/cheap-yellow-board/tree/gear_roll) | LVGL gear demo |
+| [`Datalogger`](https://github.com/rftek/cheap-yellow-board/tree/Datalogger) | Voltage logger on GPIO35 |
+| [`CatMouse`](https://github.com/rftek/cheap-yellow-board/tree/CatMouse) | Maze game: a mouse, cheese and three cats |
+| [`bluetooth_diag`](https://github.com/rftek/cheap-yellow-board/tree/bluetooth_diag) | Bluetooth Classic and LE scanner and connection tester |
+| [`How_to_Build`](https://github.com/rftek/cheap-yellow-board/tree/How_to_Build) | Build environment and installation guide |
+| `main` | This branch: the original BirdNET viewer, described below |
+
+## This branch: the original BirdNET viewer
+
+This branch keeps the first version of the BirdNET viewer, a standalone image that doesn't use the launcher. It is superseded by `birdnet_viewer`.
 
 This PlatformIO/ESP-IDF application targets the 320x240 display and resistive touchscreen on the ESP32 Cheap Yellow Display (CYD), following the [board documentation](https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display).
 
