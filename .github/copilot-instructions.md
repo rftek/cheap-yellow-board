@@ -1,6 +1,6 @@
 # ESP32 CYD Wi-Fi and Bluetooth Scanner
 
-- PlatformIO project using native ESP-IDF C for an ESP32 Cheap Yellow Display. Each application has its own branch: `bootloader`, `wifi_checker` (this), `birdnet_viewer`, `screen_check`.
+- PlatformIO project using native ESP-IDF C for an ESP32 Cheap Yellow Display. Each application has its own branch: `bootloader`, `wifi_checker` (this), `birdnet_viewer`, `screen_check`, `touchscreen_cal`, `stopwatch`, `gear_roll`, `Datalogger`, `CatMouse`, `bluetooth_diag`, `f1_race`; docs on `How_to_Build`.
 - On boot it scans Wi-Fi networks and BLE devices (NimBLE, observer role only), then joins your network with `wifi_ssid`/`wifi_pass` from NVS namespace `cyd_config` (written by the launcher) and ARP-sweeps the /24 in two passes. Three lists: WI-FI, BLE, LAN. Never compile credentials in: the binary is published by GitHub Actions.
 - Touch UI: entry rows open detail pages (the joined AP shows board IP, gateway, DNS), header arrows page each list, header titles rescan.
 - lwIP calls (etharp_*) must run in the TCP/IP thread: use `esp_netif_tcpip_exec`.
