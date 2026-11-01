@@ -48,10 +48,26 @@ jobs:
 
       - run: pip install platformio
 
-      - run: pio run
+      - name: Build
+        run: |
+          set -o pipefail
+          pio run 2>&1 | tee "$RUNNER_TEMP/build.log"
         env:
           # build_dir in platformio.ini is under USERPROFILE, which Linux lacks.
           USERPROFILE: ${{ runner.temp }}
+
+      # Actions logs need a sign-in to read; a release asset does not. On a
+      # failed build, publish the full log so it can be inspected. Delete the
+      # ci-log release once the build is green.
+      - name: Upload build log on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp "$RUNNER_TEMP/build.log" build.log
+          gh release view ci-log >/dev/null 2>&1 \
+            || gh release create ci-log --title "CI build log" --notes "Transient debug log"
+          gh release upload ci-log build.log --clobber
 
       - name: Publish firmware.bin
         env:
