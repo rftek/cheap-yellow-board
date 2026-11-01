@@ -10,15 +10,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 
-#define CYD_LCD_WIDTH 320
-#define CYD_LCD_HEIGHT 240
-
-/* 5x7 glyphs in 6x8 cells, scaled up: 17 columns x 10 rows at 3x. */
-#define CYD_FONT_SCALE 3
-#define CYD_FONT_WIDTH (6 * CYD_FONT_SCALE)
-#define CYD_FONT_HEIGHT (8 * CYD_FONT_SCALE)
-#define CYD_TEXT_COLUMNS (CYD_LCD_WIDTH / CYD_FONT_WIDTH)
-#define CYD_TEXT_ROWS (CYD_LCD_HEIGHT / CYD_FONT_HEIGHT)
+/* CYD_LCD_WIDTH/HEIGHT, CYD_FONT_SCALE/WIDTH/HEIGHT, CYD_TEXT_COLUMNS/ROWS. */
+#include "cyd_board.h"
 
 #define CYD_COLOR_BLACK 0x0000
 #define CYD_COLOR_WHITE 0xFFFF
@@ -59,6 +52,23 @@ typedef struct {
 #define CYD_BRIGHTNESS_STEP 20
 #define CYD_CONFIG_NAMESPACE "cyd_config"
 #define CYD_CONFIG_BRIGHTNESS "brightness"
+
+/* The board's size, at run time: the same values as the CYD_* macros, for
+   code that should work unchanged on more than one board. */
+int cyd_display_width(void);
+int cyd_display_height(void);
+int cyd_text_columns(void);
+int cyd_text_rows(void);
+int cyd_font_scale(void);
+
+/* Which board this build is for ("esp32-cyd") and its chip target ("esp32"). */
+const char *cyd_board_id(void);
+const char *cyd_board_target(void);
+
+/* What the board has, so shared code can adapt without #if. */
+bool cyd_touch_is_capacitive(void);
+int cyd_touch_max_points(void);
+bool cyd_has_psram(void);
 
 /* Initializes the LCD, clears it to black and turns on the backlight at the
    brightness saved in NVS (full brightness if none). */
