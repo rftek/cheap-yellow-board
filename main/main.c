@@ -285,7 +285,7 @@ static void draw_test_screen(const controller_state_t *state)
         {"Sh", g->misc_buttons & MISC_BUTTON_CAPTURE},
     };
 
-    snprintf(line, sizeof(line), " %s", state->name);
+    snprintf(line, sizeof(line), " %.16s", state->name);
     ESP_ERROR_CHECK(cyd_text_row(0, CYD_COLOR_CYAN, CYD_COLOR_BLACK, line));
 
     draw_tokens(1, face, 6);
