@@ -46,20 +46,17 @@ Each control turns **green** when it is active and stays grey when it is not:
 
 This is a native ESP-IDF project built with PlatformIO. Bluepad32 does not use the ESP-IDF Bluedroid host; it runs on **BTstack** talking straight to the ESP32 Bluetooth controller (`CONFIG_BT_CONTROLLER_ONLY=y` in `sdkconfig.defaults`).
 
-Bluepad32 and its BTstack copy are vendored as a git submodule at `external/bluepad32` (BTstack is nested at `external/bluepad32/external/btstack`). The CI workflow:
+Bluepad32 and its BTstack copy are vendored as a git submodule at `external/bluepad32` (BTstack is nested at `external/bluepad32/external/btstack`). Integration follows Bluepad32's own esp32 example: the root `CMakeLists.txt` points `EXTRA_COMPONENT_DIRS` at `$BLUEPAD32_ROOT/src/components` and includes BTstack's `BTstack_project.cmake`, which turns BTstack into an ESP-IDF component. Two environment variables must be set — `BLUEPAD32_ROOT` and `BTSTACK_ROOT` — which the CI workflow exports at job scope.
 
-1. checks out submodules recursively,
-2. applies Bluepad32's BTstack patch (`external/bluepad32/external/patches/*.patch`),
-3. runs BTstack's `integrate_btstack.py` to expose its ESP32 port as a component,
-4. builds with `pio run`.
+The CI workflow checks out submodules recursively, applies Bluepad32's BTstack patch (`$BLUEPAD32_ROOT/external/patches/*.patch`, an l2cap fix for incoming controller connections), then builds with `pio run`. If a future Bluepad32 version changes this, follow its current [ESP-IDF instructions](https://bluepad32.readthedocs.io/en/latest/plat_esp32).
 
-The root `CMakeLists.txt` points `EXTRA_COMPONENT_DIRS` at the Bluepad32 and BTstack components. Those last two integration steps are version-specific to Bluepad32; if a future Bluepad32 version changes them, follow its current [ESP-IDF instructions](https://bluepad32.readthedocs.io/en/latest/plat_esp32).
-
-To build and run locally:
+To build locally:
 
 ```
 git submodule update --init --recursive
-# apply the BTstack patch + run integrate_btstack.py as above
+export BLUEPAD32_ROOT="$PWD/external/bluepad32"
+export BTSTACK_ROOT="$BLUEPAD32_ROOT/external/btstack"
+git -C "$BTSTACK_ROOT" apply "$BLUEPAD32_ROOT"/external/patches/*.patch
 pio run
 ```
 

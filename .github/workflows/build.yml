@@ -19,6 +19,10 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PLATFORMIO_BUILD_DIR: ${{ github.workspace }}/build
+      # Bluepad32's CMake integration reads these; they must be set for the
+      # cmake configure that `pio run` triggers, so keep them at job scope.
+      BLUEPAD32_ROOT: ${{ github.workspace }}/external/bluepad32
+      BTSTACK_ROOT: ${{ github.workspace }}/external/bluepad32/external/btstack
     steps:
       - uses: actions/checkout@v4
         with:
@@ -29,15 +33,13 @@ jobs:
         with:
           python-version: "3.12"
 
-      # Bluepad32 ships a patch for its BTstack copy, and BTstack's ESP32 port
-      # has to be turned into a component before the build can see it. Both are
-      # version-specific; the commands below follow the current Bluepad32 docs.
-      - name: Prepare Bluepad32 / BTstack
+      # Bluepad32 ships a patch for its BTstack copy (an l2cap fix for incoming
+      # controller connections). The component wiring itself is done in CMake.
+      - name: Patch Bluepad32's BTstack
         run: |
-          cd external/bluepad32/external/btstack
-          git apply ../patches/*.patch || echo "BTstack patch already applied"
-          cd port/esp32
-          python integrate_btstack.py
+          cd "$BTSTACK_ROOT"
+          git apply "$BLUEPAD32_ROOT"/external/patches/*.patch \
+            || echo "BTstack patch already applied or not needed"
 
       - uses: actions/cache@v4
         with:
