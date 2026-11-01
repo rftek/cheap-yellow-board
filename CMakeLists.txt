@@ -9,6 +9,9 @@ set(EXTRA_COMPONENT_DIRS
     "${CMAKE_CURRENT_LIST_DIR}/components"
     "$ENV{BLUEPAD32_ROOT}/src/components")
 
-include($ENV{BTSTACK_ROOT}/port/esp32/components/btstack/cmake/BTstack_project.cmake)
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+# BTstack_project.cmake appends BTstack's esp32 port to EXTRA_COMPONENT_DIRS and
+# uses idf_build_get_property, so it must be included after project.cmake (which
+# defines that helper) but before project() reads the component dirs.
+include($ENV{BTSTACK_ROOT}/port/esp32/components/btstack/cmake/BTstack_project.cmake)
 project(xbox_controller)
