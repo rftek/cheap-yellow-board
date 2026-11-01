@@ -1,7 +1,9 @@
+/* The ESP32 Cheap Yellow Display backend of cyd_display: ILI9341 over
+   SPI, PWM backlight and XPT2046 resistive touch. */
+
 #include "cyd_display.h"
 
-#include <string.h>
-
+#include "cyd_display_backend.h"
 #include "driver/gpio.h"
 #include "driver/ledc.h"
 #include "driver/spi_master.h"
@@ -45,88 +47,33 @@
 #define TOUCH_SAMPLES 9
 #define TOUCH_TRIM 2
 
-/* A run of full-height display columns of one text line. */
-#define TEXT_CHUNK_COLUMNS 40
-
 static const char *TAG = "cyd_display";
 static spi_device_handle_t lcd_spi;
 static spi_device_handle_t touch_spi;
 static QueueHandle_t touch_queue;
 static int brightness = CYD_BRIGHTNESS_MAX;
 static cyd_touch_calibration_t touch_calibration;
-static uint8_t text_chunk[TEXT_CHUNK_COLUMNS * CYD_FONT_HEIGHT * 2];
+/* One SPI transfer of pixels: a 40-column run of a text row. */
+static uint8_t pixel_chunk[40 * CYD_FONT_HEIGHT * 2];
 
-/* Classic 5x7 ASCII font, 0x20-0x7E, then the up, down and backspace
-   arrows; one byte per column, LSB at the top. */
-static const uint8_t font5x7[98][5] = {
-    {0x00, 0x00, 0x00, 0x00, 0x00}, {0x00, 0x00, 0x5F, 0x00, 0x00},
-    {0x00, 0x07, 0x00, 0x07, 0x00}, {0x14, 0x7F, 0x14, 0x7F, 0x14},
-    {0x24, 0x2A, 0x7F, 0x2A, 0x12}, {0x23, 0x13, 0x08, 0x64, 0x62},
-    {0x36, 0x49, 0x55, 0x22, 0x50}, {0x00, 0x05, 0x03, 0x00, 0x00},
-    {0x00, 0x1C, 0x22, 0x41, 0x00}, {0x00, 0x41, 0x22, 0x1C, 0x00},
-    {0x08, 0x2A, 0x1C, 0x2A, 0x08}, {0x08, 0x08, 0x3E, 0x08, 0x08},
-    {0x00, 0x50, 0x30, 0x00, 0x00}, {0x08, 0x08, 0x08, 0x08, 0x08},
-    {0x00, 0x60, 0x60, 0x00, 0x00}, {0x20, 0x10, 0x08, 0x04, 0x02},
-    {0x3E, 0x51, 0x49, 0x45, 0x3E}, {0x00, 0x42, 0x7F, 0x40, 0x00},
-    {0x42, 0x61, 0x51, 0x49, 0x46}, {0x21, 0x41, 0x45, 0x4B, 0x31},
-    {0x18, 0x14, 0x12, 0x7F, 0x10}, {0x27, 0x45, 0x45, 0x45, 0x39},
-    {0x3C, 0x4A, 0x49, 0x49, 0x30}, {0x01, 0x71, 0x09, 0x05, 0x03},
-    {0x36, 0x49, 0x49, 0x49, 0x36}, {0x06, 0x49, 0x49, 0x29, 0x1E},
-    {0x00, 0x36, 0x36, 0x00, 0x00}, {0x00, 0x56, 0x36, 0x00, 0x00},
-    {0x08, 0x14, 0x22, 0x41, 0x00}, {0x14, 0x14, 0x14, 0x14, 0x14},
-    {0x00, 0x41, 0x22, 0x14, 0x08}, {0x02, 0x01, 0x51, 0x09, 0x06},
-    {0x32, 0x49, 0x79, 0x41, 0x3E}, {0x7E, 0x11, 0x11, 0x11, 0x7E},
-    {0x7F, 0x49, 0x49, 0x49, 0x36}, {0x3E, 0x41, 0x41, 0x41, 0x22},
-    {0x7F, 0x41, 0x41, 0x22, 0x1C}, {0x7F, 0x49, 0x49, 0x49, 0x41},
-    {0x7F, 0x09, 0x09, 0x01, 0x01}, {0x3E, 0x41, 0x41, 0x51, 0x32},
-    {0x7F, 0x08, 0x08, 0x08, 0x7F}, {0x00, 0x41, 0x7F, 0x41, 0x00},
-    {0x20, 0x40, 0x41, 0x3F, 0x01}, {0x7F, 0x08, 0x14, 0x22, 0x41},
-    {0x7F, 0x40, 0x40, 0x40, 0x40}, {0x7F, 0x02, 0x04, 0x02, 0x7F},
-    {0x7F, 0x04, 0x08, 0x10, 0x7F}, {0x3E, 0x41, 0x41, 0x41, 0x3E},
-    {0x7F, 0x09, 0x09, 0x09, 0x06}, {0x3E, 0x41, 0x51, 0x21, 0x5E},
-    {0x7F, 0x09, 0x19, 0x29, 0x46}, {0x46, 0x49, 0x49, 0x49, 0x31},
-    {0x01, 0x01, 0x7F, 0x01, 0x01}, {0x3F, 0x40, 0x40, 0x40, 0x3F},
-    {0x1F, 0x20, 0x40, 0x20, 0x1F}, {0x7F, 0x20, 0x18, 0x20, 0x7F},
-    {0x63, 0x14, 0x08, 0x14, 0x63}, {0x03, 0x04, 0x78, 0x04, 0x03},
-    {0x61, 0x51, 0x49, 0x45, 0x43}, {0x00, 0x00, 0x7F, 0x41, 0x41},
-    {0x02, 0x04, 0x08, 0x10, 0x20}, {0x41, 0x41, 0x7F, 0x00, 0x00},
-    {0x04, 0x02, 0x01, 0x02, 0x04}, {0x40, 0x40, 0x40, 0x40, 0x40},
-    {0x00, 0x01, 0x02, 0x04, 0x00}, {0x20, 0x54, 0x54, 0x54, 0x78},
-    {0x7F, 0x48, 0x44, 0x44, 0x38}, {0x38, 0x44, 0x44, 0x44, 0x20},
-    {0x38, 0x44, 0x44, 0x48, 0x7F}, {0x38, 0x54, 0x54, 0x54, 0x18},
-    {0x08, 0x7E, 0x09, 0x01, 0x02}, {0x08, 0x14, 0x54, 0x54, 0x3C},
-    {0x7F, 0x08, 0x04, 0x04, 0x78}, {0x00, 0x44, 0x7D, 0x40, 0x00},
-    {0x20, 0x40, 0x44, 0x3D, 0x00}, {0x00, 0x7F, 0x10, 0x28, 0x44},
-    {0x00, 0x41, 0x7F, 0x40, 0x00}, {0x7C, 0x04, 0x18, 0x04, 0x78},
-    {0x7C, 0x08, 0x04, 0x04, 0x78}, {0x38, 0x44, 0x44, 0x44, 0x38},
-    {0x7C, 0x14, 0x14, 0x14, 0x08}, {0x08, 0x14, 0x14, 0x18, 0x7C},
-    {0x7C, 0x08, 0x04, 0x04, 0x08}, {0x48, 0x54, 0x54, 0x54, 0x20},
-    {0x04, 0x3F, 0x44, 0x40, 0x20}, {0x3C, 0x40, 0x40, 0x20, 0x7C},
-    {0x1C, 0x20, 0x40, 0x20, 0x1C}, {0x3C, 0x40, 0x30, 0x40, 0x3C},
-    {0x44, 0x28, 0x10, 0x28, 0x44}, {0x0C, 0x50, 0x50, 0x50, 0x3C},
-    {0x44, 0x64, 0x54, 0x4C, 0x44}, {0x00, 0x08, 0x36, 0x41, 0x00},
-    {0x00, 0x00, 0x7F, 0x00, 0x00}, {0x00, 0x41, 0x36, 0x08, 0x00},
-    {0x02, 0x01, 0x02, 0x04, 0x02},
-    {0x20, 0x38, 0x3E, 0x38, 0x20}, {0x02, 0x0E, 0x3E, 0x0E, 0x02},
-    {0x08, 0x1C, 0x3E, 0x08, 0x08},
-};
-
-static const uint8_t *glyph_for(char character)
+const char *cyd_board_id(void)
 {
-    unsigned char code = (unsigned char)character;
-    if (character == CYD_GLYPH_UP) {
-        return font5x7[95];
-    }
-    if (character == CYD_GLYPH_DOWN) {
-        return font5x7[96];
-    }
-    if (character == CYD_GLYPH_BACKSPACE) {
-        return font5x7[97];
-    }
-    if (code < 0x20 || code > 0x7E) {
-        code = '?';
-    }
-    return font5x7[code - 0x20];
+    return CYD_BOARD_ID;
+}
+
+bool cyd_touch_is_capacitive(void)
+{
+    return false;
+}
+
+int cyd_touch_max_points(void)
+{
+    return 1;
+}
+
+bool cyd_has_psram(void)
+{
+    return false;
 }
 
 static esp_err_t lcd_write(uint8_t dc_level, const uint8_t *data, size_t size)
@@ -164,11 +111,8 @@ static esp_err_t lcd_set_window(int x, int y, int width, int height)
     return lcd_command(0x2C);
 }
 
-esp_err_t cyd_fill_rect(int x, int y, int width, int height, uint16_t color)
+esp_err_t cyd_backend_fill_rect(int x, int y, int width, int height, uint16_t color)
 {
-    ESP_RETURN_ON_FALSE(x >= 0 && y >= 0 && width > 0 && height > 0 &&
-                        x + width <= CYD_LCD_WIDTH && y + height <= CYD_LCD_HEIGHT,
-                        ESP_ERR_INVALID_ARG, TAG, "rectangle outside display");
     ESP_RETURN_ON_ERROR(lcd_set_window(x, y, width, height), TAG, "set fill window");
 
     uint8_t *line = heap_caps_malloc(width * 2, MALLOC_CAP_DMA);
@@ -186,42 +130,17 @@ esp_err_t cyd_fill_rect(int x, int y, int width, int height, uint16_t color)
     return result;
 }
 
-esp_err_t cyd_draw_pattern(int x, int y, int width, int height,
-                           cyd_pixel_fn pixel, void *context)
+esp_err_t cyd_backend_blit(int x, int y, int width, int height, const uint16_t *pixels)
 {
-    ESP_RETURN_ON_FALSE(x >= 0 && y >= 0 && width > 0 && height > 0 &&
-                        x + width <= CYD_LCD_WIDTH && y + height <= CYD_LCD_HEIGHT,
-                        ESP_ERR_INVALID_ARG, TAG, "pattern outside display");
-    ESP_RETURN_ON_ERROR(lcd_set_window(x, y, width, height), TAG, "set pattern window");
-    /* Column-major, like text: whole columns are packed into text_chunk. */
-    size_t columns_per_chunk = sizeof(text_chunk) / ((size_t)height * 2);
-    size_t used = 0;
-    for (int column = 0; column < width; ++column) {
-        for (int row = 0; row < height; ++row) {
-            uint16_t color = pixel(x + column, y + row, context);
-            text_chunk[used++] = (uint8_t)(color >> 8);
-            text_chunk[used++] = (uint8_t)color;
-        }
-        if ((column + 1) % columns_per_chunk == 0 || column == width - 1) {
-            ESP_RETURN_ON_ERROR(lcd_data(text_chunk, used), TAG, "send pattern chunk");
-            used = 0;
-        }
-    }
-    return ESP_OK;
-}
-
-esp_err_t cyd_draw_bitmap(int x, int y, int width, int height, const uint16_t *pixels)
-{
-    ESP_RETURN_ON_FALSE(x >= 0 && y >= 0 && width > 0 && height > 0 &&
-                        x + width <= CYD_LCD_WIDTH && y + height <= CYD_LCD_HEIGHT,
-                        ESP_ERR_INVALID_ARG, TAG, "bitmap outside display");
     ESP_RETURN_ON_ERROR(lcd_set_window(x, y, width, height), TAG, "set bitmap window");
-    /* Column-major and big-endian, a chunk of whole columns at a time. */
-    size_t columns_per_chunk = sizeof(text_chunk) / ((size_t)height * 2);
+    /* The panel fills a window column by column (top to bottom, then left to
+       right), so pixels are sent column-major and big-endian, a chunk of
+       whole columns at a time. */
+    size_t columns_per_chunk = sizeof(pixel_chunk) / ((size_t)height * 2);
     for (int column = 0; column < width; column += columns_per_chunk) {
         int columns = width - column < (int)columns_per_chunk ? width - column
                                                               : (int)columns_per_chunk;
-        uint8_t *out = text_chunk;
+        uint8_t *out = pixel_chunk;
         for (int c = 0; c < columns; ++c) {
             const uint16_t *in = pixels + column + c;
             for (int row = 0; row < height; ++row, in += width) {
@@ -229,60 +148,10 @@ esp_err_t cyd_draw_bitmap(int x, int y, int width, int height, const uint16_t *p
                 *out++ = (uint8_t)*in;
             }
         }
-        ESP_RETURN_ON_ERROR(lcd_data(text_chunk, (size_t)columns * height * 2), TAG,
+        ESP_RETURN_ON_ERROR(lcd_data(pixel_chunk, (size_t)columns * height * 2), TAG,
                             "send bitmap chunk");
     }
     return ESP_OK;
-}
-
-esp_err_t cyd_draw_cells(int row, const char *text,
-                         const uint16_t *foreground, const uint16_t *background)
-{
-    ESP_RETURN_ON_FALSE(row >= 0 && row < CYD_TEXT_ROWS, ESP_ERR_INVALID_ARG, TAG,
-                        "text row outside display");
-    ESP_RETURN_ON_ERROR(lcd_set_window(0, row * CYD_FONT_HEIGHT, CYD_LCD_WIDTH,
-                                       CYD_FONT_HEIGHT),
-                        TAG, "set text window");
-    size_t length = strnlen(text, CYD_TEXT_COLUMNS);
-    /* The panel fills a window column by column (top to bottom, then left to
-       right), so pixels are sent column-major, a chunk of columns at a time. */
-    for (int chunk_x = 0; chunk_x < CYD_LCD_WIDTH; chunk_x += TEXT_CHUNK_COLUMNS) {
-        for (int dx = 0; dx < TEXT_CHUNK_COLUMNS; ++dx) {
-            int x = chunk_x + dx;
-            size_t cell = (size_t)x / CYD_FONT_WIDTH;
-            int glyph_x = (x % CYD_FONT_WIDTH) / CYD_FONT_SCALE;
-            /* The 14 pixels right of the last full cell take its colors. */
-            size_t color_cell = cell < CYD_TEXT_COLUMNS ? cell : CYD_TEXT_COLUMNS - 1;
-            uint8_t glyph_bits = cell < length && glyph_x < 5
-                                     ? glyph_for(text[cell])[glyph_x]
-                                     : 0;
-            for (int y = 0; y < CYD_FONT_HEIGHT; ++y) {
-                uint16_t color = background[color_cell];
-                int glyph_y = (y - 1) / CYD_FONT_SCALE;
-                if (y == CYD_FONT_HEIGHT - 1) {
-                    color = CYD_COLOR_BLACK;
-                } else if (y >= 1 && glyph_y < 7 && (glyph_bits & (1U << glyph_y))) {
-                    color = foreground[color_cell];
-                }
-                size_t index = ((size_t)dx * CYD_FONT_HEIGHT + y) * 2;
-                text_chunk[index] = (uint8_t)(color >> 8);
-                text_chunk[index + 1] = (uint8_t)color;
-            }
-        }
-        ESP_RETURN_ON_ERROR(lcd_data(text_chunk, sizeof(text_chunk)), TAG, "send text chunk");
-    }
-    return ESP_OK;
-}
-
-esp_err_t cyd_text_row(int row, uint16_t foreground, uint16_t background, const char *text)
-{
-    uint16_t foregrounds[CYD_TEXT_COLUMNS];
-    uint16_t backgrounds[CYD_TEXT_COLUMNS];
-    for (int i = 0; i < CYD_TEXT_COLUMNS; ++i) {
-        foregrounds[i] = foreground;
-        backgrounds[i] = background;
-    }
-    return cyd_draw_cells(row, text, foregrounds, backgrounds);
 }
 
 static esp_err_t lcd_init(void)
@@ -396,7 +265,7 @@ esp_err_t cyd_display_init(void)
         .sclk_io_num = LCD_PIN_SCLK,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = sizeof(text_chunk),
+        .max_transfer_sz = sizeof(pixel_chunk),
     };
     ESP_RETURN_ON_ERROR(spi_bus_initialize(LCD_HOST, &display_bus, SPI_DMA_CH_AUTO),
                         TAG, "initialize display SPI bus");
