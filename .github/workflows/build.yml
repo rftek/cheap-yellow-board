@@ -1,14 +1,10 @@
 # Builds this branch's boot image and publishes it as firmware.bin on a
 # release tagged with the branch name, which is where the launcher on the
-# bootloader branch looks for it. Pushes that change only Markdown files
-# don't rebuild.
+# bootloader branch looks for it.
 name: Build boot image
 
 on:
   push:
-    branches: ["**"]
-    paths-ignore:
-      - "**.md"
   workflow_dispatch:
 
 permissions:
@@ -25,10 +21,23 @@ jobs:
       PLATFORMIO_BUILD_DIR: ${{ github.workspace }}/build
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Bluepad32 and its nested BTstack submodule live under external/.
+          submodules: recursive
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      # Bluepad32 ships a patch for its BTstack copy, and BTstack's ESP32 port
+      # has to be turned into a component before the build can see it. Both are
+      # version-specific; the commands below follow the current Bluepad32 docs.
+      - name: Prepare Bluepad32 / BTstack
+        run: |
+          cd external/bluepad32/external/btstack
+          git apply ../patches/*.patch || echo "BTstack patch already applied"
+          cd port/esp32
+          python integrate_btstack.py
 
       - uses: actions/cache@v4
         with:
@@ -51,9 +60,6 @@ jobs:
           notes="Boot image built from ${GITHUB_SHA::7} on branch $TAG."
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --notes "$notes"
-            # Move the release's tag to the commit this image was built from.
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" \
-              -f sha="$GITHUB_SHA" -F force=true >/dev/null
           else
             gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --notes "$notes"
           fi

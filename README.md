@@ -1,6 +1,6 @@
-# ESP32 CYD Bluetooth Diagnostics
+# ESP32 CYD XBOX Controller Test
 
-A Bluetooth diagnostic tool for the ESP32 Cheap Yellow Display (CYD), following the [board documentation](https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display). On start it scans for Classic (BR/EDR) and Bluetooth LE devices, tries to connect to each one that might accept a connection, and shows which ones do. A configuration screen shows the ESP32 Bluetooth controller's and host's settings and changes the ones that can be changed while running.
+A controller test tool for the ESP32 Cheap Yellow Display (CYD), following the [board documentation](https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display). It pairs with an Xbox wireless controller over Bluetooth using the [Bluepad32](https://github.com/ricardoquesada/bluepad32) library, then shows a live screen that lights up each button, D-pad direction, stick and trigger as you press it — a quick way to check that every control on a controller works.
 
 Each application lives on its own branch of this repository:
 
@@ -15,69 +15,58 @@ Each application lives on its own branch of this repository:
 | `gear_roll` | LVGL gear demo |
 | `Datalogger` | Voltage logger on GPIO35 |
 | `CatMouse` | PAC-MAN-style maze game |
-| `bluetooth_diag` | This Bluetooth diagnostic tool |
+| `bluetooth_diag` | Bluetooth Classic and LE scanner and connection tester |
 | `f1_race` | F1 racing game |
+| `xbox_controller` | This Xbox controller test |
 | `How_to_Build` | Build environment and installation guide |
 
-## What it does
+## Pairing
 
-1. **Scans.** A Classic inquiry (6.4 s by default), with name requests for devices that sent no name, then an active LE scan (6 s by default). The screen counts devices as they are found.
-2. **Tests connections.** Every device that might accept one is tried in list order, and its row turns green or red. Tap anywhere to stop.
-   - **Classic:** the board pages the device and asks for its SDP service list. A completed ACL connection means it accepts connections. If the device sent no name, its name is read too.
-   - **LE:** only devices that advertise as connectable (`ADV_IND`) are tried. The board connects as a GATT client, requests an MTU of 517, lists the GATT services, reads Device Name, Manufacturer Name and Model Number if the device allows it, then disconnects. Devices that advertise as beacons, scannable-only or directed to another device are marked not connectable without trying.
-   - The tool never pairs. It refuses every pairing or security request, so a connection test can't bond with anything.
-3. **Lists the results.** Tap a device for its details.
+1. Power on the CYD. It shows **Searching…** and is ready to pair straight away.
+2. Put the controller into pairing mode: turn it on with the Xbox button, then press and hold the small **pair button** on the top edge (next to the USB port) until the Xbox light **blinks quickly**.
+3. The board connects within a few seconds and switches to the test screen. An Xbox One S / Series controller connects over Bluetooth LE; older Bluetooth Classic pads work too.
+4. The board remembers the controller, so next time it reconnects on its own — just turn the controller on.
+5. To pair a different controller, tap **Forget & re-pair** at the bottom of the screen. The board clears the stored pairing and reboots back into searching mode.
 
-## The screens
+> Some early Xbox One controllers need a firmware update before they expose Bluetooth, and a few firmware versions are known to be unreliable over BLE. If a controller will not connect, update it with the Xbox Accessories app first.
 
-**Device list**
+## The test screen
 
-| Part | What it does |
-|---|---|
-| `BT12` (top left) | Device count. Tap it to scan again. |
-| `CFG` | Opens the configuration pages |
-| ▲ ▼ | Page through the list, eight devices at a time |
-| Device rows | `C-72 name`: the radio (`C` Classic, `L` LE, `D` LE from a dual-mode device), the signal in dBm, then the name, or the address if there is none |
-| Row color | Green: connects. Red: the test failed. Gray: not connectable, or unnamed and not tested yet. White: not tested. Yellow: being tested. |
-| Bottom row | `OK 5 FAIL 2` and a `TEST` button that tests every device again |
+Each control turns **green** when it is active and stays grey when it is not:
 
-**Device detail:** radio, name, address, signal (and the advertised TX power), the address kind (public, static random, or private) and advertising type for LE, or the device class for Classic. Then the test result: the time to connect, and for LE the MTU, connection interval, slave latency and supervision timeout, or for Classic the number of SDP services. A failure shows its reason, such as `PAGE TIMEOUT`, `NO RESPONSE`, `CONN FAILED` or `REJECTED`. `TEST` tests this device again; `SVCS` lists the services by UUID with their names, the manufacturer and the model.
+- **A B X Y** — face buttons
+- **LB RB** — bumpers; **L3 R3** — stick clicks
+- **Up Dn Lf Rt** — D-pad
+- **View Menu Xbox Sh** — View (select), Menu (start), the Xbox guide button, and Share/Capture
+- **LT / RT** — triggers, drawn as a ten-segment bar from the analog value (0–1023)
+- **LS / RS** — left and right sticks, shown as X/Y numbers (−512…511)
+- **Battery** — the controller's reported level, when it sends one
 
-Everything is also printed to the serial log (115200 baud): each scan's devices, and each test's result with its services.
+## How it is built
 
-## Configuration pages
+This is a native ESP-IDF project built with PlatformIO. Bluepad32 does not use the ESP-IDF Bluedroid host; it runs on **BTstack** talking straight to the ESP32 Bluetooth controller (`CONFIG_BT_CONTROLLER_ONLY=y` in `sdkconfig.defaults`).
 
-`CFG` opens five pages; `<` and `>` move between them. Rows with `-` and `+` buttons are settings. They take effect at once and are saved in NVS (namespace `bt_diag`), so they last across restarts. The other rows show what the controller and host report.
+Bluepad32 and its BTstack copy are vendored as a git submodule at `external/bluepad32` (BTstack is nested at `external/bluepad32/external/btstack`). The CI workflow:
 
-| Page | Shows | Settings |
-|---|---|---|
-| 1 Controller | Status, mode (dual), maximum LE connections, maximum ACL and SCO links, modem sleep, controller task priority and core, minimum encryption key size, duplicate filter list size | |
-| 2 Host | Bluedroid status, the board's Bluetooth address and name, Secure Simple Pairing and Secure Connections, open ACL links, the page timeout read back from the controller | `VISIBLE`: makes the board discoverable and connectable over Classic, for testing it from a phone |
-| 3 TX power (dBm) | The LE and BR/EDR levels the controller reports now, and its inquiry and page TX levels | `LE ADV`, `LE SCAN`, `LE CONN`: −12 to +9 dBm. `BR/EDR LO`, `BR/EDR HI`: the BR/EDR power range. |
-| 4 Scan and test | | `INQUIRY s` (Classic inquiry, 1.3–13 s), `LE SCAN s` (2–30 s), `LE ACTIVE` (active scans ask for scan responses, which often carry the name), `LE INT ms` and `LE DUTY %` (scan interval, and how much of it the radio listens), `LE CONN s` (LE connection timeout), `PAGE TO s` (Classic page timeout, 1.3–41 s), `AUTO TEST` (test after every scan) |
-| 5 Build | ESP-IDF version, LE 4.2 and 5.0 features, GATT client and server, SMP, GATT cache, local MTU, BTC task stack, free and minimum free heap | |
+1. checks out submodules recursively,
+2. applies Bluepad32's BTstack patch (`external/bluepad32/external/patches/*.patch`),
+3. runs BTstack's `integrate_btstack.py` to expose its ESP32 port as a component,
+4. builds with `pio run`.
 
-On the first start the TX power settings begin at the controller's own levels. The ESP32 applies a new BR/EDR power range only before its radio has transmitted, so a change shows in `BR NOW` after the next restart.
+The root `CMakeLists.txt` points `EXTRA_COMPONENT_DIRS` at the Bluepad32 and BTstack components. Those last two integration steps are version-specific to Bluepad32; if a future Bluepad32 version changes them, follow its current [ESP-IDF instructions](https://bluepad32.readthedocs.io/en/latest/plat_esp32).
 
-The settings fixed when the firmware is built are in `sdkconfig.defaults`: a dual-mode controller (`CONFIG_BTDM_CTRL_MODE_BTDM`) with the Bluedroid host, Classic with SSP, LE 4.2 features, and the GATT client without the GATT server.
+To build and run locally:
 
-## Build and flash
-
-Install the PlatformIO IDE extension or PlatformIO Core (see the `How_to_Build` branch). The project path must be short: builds fail on Windows when source paths pass 260 characters.
-
-```powershell
-$pio = "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe"
-& $pio run
+```
+git submodule update --init --recursive
+# apply the BTstack patch + run integrate_btstack.py as above
+pio run
 ```
 
-The app binary (about 850 KB, mostly the Bluedroid dual-mode stack) is `%USERPROFILE%\.platformio\cyd-bt-diag-build\esp32dev\firmware.bin`. Use it in one of two ways:
+## Architecture
 
-- **As a launcher image** (board runs the `bootloader` branch): every push to this branch runs `.github/workflows/build.yml`, which builds the app and publishes it as `firmware.bin` on the release tagged `bluetooth_diag`. The launcher lists the branch and downloads that file. You can also write it to a slot over USB, as described in the `bootloader` README.
-- **On its own:** `& $pio run --target upload --upload-port COM11`. This replaces everything on the board, including the launcher.
+`btstack_run_loop_execute()` never returns, so `app_main` ends by handing its task to BTstack. The Bluepad32 callbacks therefore run on that task, and the user interface runs on a second FreeRTOS task. `on_controller_data` copies the latest `uni_gamepad_t` and battery level into one struct that the UI task reads, guarded by a `portMUX` spinlock. `components/cyd_display` provides the display, text and touch helpers shared by every image in this repository.
 
-To watch the log: `& $pio device monitor --port COM11 --baud 115200`. Ctrl+] exits.
+## Storage and CPU
 
-## Hardware
-
-Display pins: MOSI GPIO13, SCLK GPIO14, CS GPIO15, D/C GPIO2, backlight GPIO21, PWM-dimmed to the brightness saved by the launcher.
-Touch pins: MOSI GPIO32, MISO GPIO39, SCLK GPIO25, CS GPIO33, IRQ GPIO36 (XPT2046).
+The binary also runs as a launcher boot image, so it must fit in a **1.31 MB** OTA slot (1,376,256 bytes). Bluepad32 on BTstack is comparable in size to the Bluedroid dual-mode app on the `bluetooth_diag` branch (~850 KB), so it is expected to fit, though with less headroom. The authoritative size is the `firmware.bin` produced by the CI build. BTstack is event-driven: steady-state CPU use while a controller streams input (~100 Hz) is low, dominated by the Bluetooth controller and the periodic screen redraw.
