@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "cyd_display.h"
+#include "cyd_gamepad.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "freertos/FreeRTOS.h"
@@ -989,6 +990,36 @@ static void read_touch(void)
     }
 }
 
+/* Lets an Xbox controller steer too: the d-pad, or the left stick past a dead
+   zone, sets the way to go. Touch still works when the pad is idle. */
+#define PAD_DEAD_ZONE 200 /* of the stick's -512..511 range */
+static void read_gamepad(void)
+{
+    cyd_gamepad_state_t pad;
+    if (!cyd_gamepad_read(&pad)) {
+        return;
+    }
+    int dir = DIR_NONE;
+    if (pad.up) {
+        dir = DIR_UP;
+    } else if (pad.down) {
+        dir = DIR_DOWN;
+    } else if (pad.left) {
+        dir = DIR_LEFT;
+    } else if (pad.right) {
+        dir = DIR_RIGHT;
+    } else if (abs(pad.lx) > PAD_DEAD_ZONE || abs(pad.ly) > PAD_DEAD_ZONE) {
+        if (abs(pad.lx) > abs(pad.ly)) {
+            dir = pad.lx < 0 ? DIR_LEFT : DIR_RIGHT;
+        } else {
+            dir = pad.ly < 0 ? DIR_UP : DIR_DOWN;
+        }
+    }
+    if (dir != DIR_NONE) {
+        wanted_dir = dir;
+    }
+}
+
 static void redraw_actors(void)
 {
     for (int i = 0; i < CAT_COUNT; ++i) {
@@ -1029,6 +1060,7 @@ static bool play_level(void)
     while (true) {
         ++frame_count;
         read_touch();
+        read_gamepad();
         move_mouse();
         for (int i = 0; i < CAT_COUNT; ++i) {
             move_cat(i);
@@ -1091,6 +1123,7 @@ void app_main(void)
 {
     ESP_ERROR_CHECK(cyd_display_init());
     ESP_ERROR_CHECK(cyd_touch_init());
+    cyd_gamepad_start();
     BaseType_t result = xTaskCreate(game_task, "game", 6144, NULL, 5, NULL);
     ESP_ERROR_CHECK(result == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
 }
