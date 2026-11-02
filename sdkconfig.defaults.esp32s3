@@ -1,0 +1,15 @@
+# ESP32-S3-Touch-LCD-7: 16 MB flash and 8 MB octal PSRAM. ESP-IDF adds this
+# file to sdkconfig.defaults when building for esp32s3. Prepared for the S3
+# board; CI builds it only once esp32s3 is listed in supported-targets.txt.
+CONFIG_IDF_TARGET="esp32s3"
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.esp32s3.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.esp32s3.csv"
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+
+# The S3's Bluetooth controller is BLE only, so the esp32 dual-mode (BTDM)
+# settings in sdkconfig.defaults don't apply to it.

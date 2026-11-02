@@ -74,7 +74,7 @@ $pio = "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe"
 ```powershell
 $py = "$env:USERPROFILE\.platformio\penv\Scripts\python.exe"
 $esptool = "$env:USERPROFILE\.platformio\packages\tool-esptoolpy\esptool.py"
-$L = "$env:USERPROFILE\.platformio\cyd-launcher-build\esp32dev"
+$L = "$env:USERPROFILE\.platformio\cyd-launcher-build\esp32"
 & $py $esptool --chip esp32 -p COM11 erase_flash
 & $py $esptool --chip esp32 -p COM11 -b 230400 write_flash `
     0x1000 "$L\bootloader.bin" 0x8000 "$L\partitions.bin" `
@@ -88,7 +88,7 @@ To put an application into a slot over USB, build it on its branch and write its
 & $py $esptool --chip esp32 -p COM11 -b 230400 write_flash 0x150000 path\to\firmware.bin
 ```
 
-Change `COM11` to the board's serial port. The monitor exits with Ctrl+]. If you change `sdkconfig.defaults`, delete the generated `sdkconfig.esp32dev` so the new defaults apply.
+Change `COM11` to the board's serial port. The monitor exits with Ctrl+]. If you change `sdkconfig.defaults`, delete the generated `sdkconfig.esp32` so the new defaults apply.
 
 ## Hardware
 
