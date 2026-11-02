@@ -146,7 +146,7 @@ What to expect:
 - **First build of each branch:** about 7 to 17 minutes, because each branch has its own build folder (`%USERPROFILE%\.platformio\cyd-*-build`) and compiles all of ESP-IDF. LVGL branches take the longest. Later builds take seconds to a couple of minutes.
 - **LVGL branches** (`stopwatch`, `gear_roll`) download LVGL into `managed_components/`, which is git-ignored, at the exact version in `dependencies.lock`.
 - **Output:** `firmware.bin` in that branch's build folder. The launcher also produces `bootloader.bin`, `partitions.bin` and `ota_data_initial.bin`.
-- **After editing `sdkconfig.defaults`:** delete the generated `sdkconfig.esp32dev` in the repository root, so the new defaults apply. Expect a full rebuild.
+- **After editing `sdkconfig.defaults`:** delete the generated `sdkconfig.esp32` in the repository root, so the new defaults apply. Expect a full rebuild.
 
 ## 7. Flash a new board (once)
 
@@ -155,7 +155,7 @@ The launcher setup needs its own bootloader, partition table and a blank `otadat
 ```powershell
 $py = "$env:USERPROFILE\.platformio\penv\Scripts\python.exe"
 $esptool = "$env:USERPROFILE\.platformio\packages\tool-esptoolpy\esptool.py"
-$L = "$env:USERPROFILE\.platformio\cyd-launcher-build\esp32dev"
+$L = "$env:USERPROFILE\.platformio\cyd-launcher-build\esp32"
 & $py $esptool --chip esp32 -p COM11 erase_flash
 & $py $esptool --chip esp32 -p COM11 -b 230400 write_flash `
     0x1000 "$L\bootloader.bin" 0x8000 "$L\partitions.bin" `
@@ -194,7 +194,7 @@ The workflow needs the repository's Actions to have **read and write** permissio
 | esptool: `The chip stopped responding` | Retry at a lower baud rate, such as `-b 115200`. Use a short, good USB cable. |
 | esptool can't open the port | Close any serial monitor, or other program, using the COM port. |
 | `git checkout <branch>` lands on an old commit | A release tag with the same name won. Set `remote.origin.tagOpt --no-tags`, delete local tags (`git tag -d <name>`), and use `git switch`. |
-| A `sdkconfig.defaults` change has no effect | Delete `sdkconfig.esp32dev` and rebuild. |
+| A `sdkconfig.defaults` change has no effect | Delete `sdkconfig.esp32` and rebuild. |
 | Build stops asking for `wifi_credentials.h` | Create it as in step 5. Only the `bootloader` branch needs it. |
 | CI build fails on size | The workflow checks against the default 1 MB app partition. Keep standalone builds under 1 MB, or point the check at the launcher's partition table. |
 | Touches land in the wrong place | Run the `touchscreen_cal` app from the launcher. Every app uses the saved calibration. |
