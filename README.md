@@ -70,7 +70,7 @@ $pio = "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe"
 & $pio run
 ```
 
-The app binary (about 850 KB, mostly the Bluedroid dual-mode stack) is `%USERPROFILE%\.platformio\cyd-bt-diag-build\esp32dev\firmware.bin`. Use it in one of two ways:
+The app binary (about 850 KB, mostly the Bluedroid dual-mode stack) is `%USERPROFILE%\.platformio\cyd-bt-diag-build\esp32\firmware.bin`. Use it in one of two ways:
 
 - **As a launcher image** (board runs the `bootloader` branch): every push to this branch runs `.github/workflows/build.yml`, which builds the app and publishes it as `firmware.bin` on the release tagged `bluetooth_diag`. The launcher lists the branch and downloads that file. You can also write it to a slot over USB, as described in the `bootloader` README.
 - **On its own:** `& $pio run --target upload --upload-port COM11`. This replaces everything on the board, including the launcher.
