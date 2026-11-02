@@ -1,7 +1,14 @@
-# Builds this branch's boot image and publishes it as firmware.bin on a
-# release tagged with the branch name, which is where the launcher on the
-# bootloader branch looks for it. Pushes that change only Markdown files
-# don't rebuild.
+# Builds this branch's boot image once per chip target listed in
+# supported-targets.txt and publishes each on a release tagged with the
+# branch name, which is where the launcher on the bootloader branch looks for
+# it. Pushes that change only Markdown files don't rebuild.
+#
+# Asset names: the esp32 image is published as firmware.bin, the name the
+# launchers in the field download; other targets as firmware-<target>.bin.
+# The esp32 image doesn't also go up as firmware-esp32.bin yet: the CYD
+# launcher reads the whole releases list into a 64 KB buffer, and a second
+# asset on every release would overflow it. Add it once the launcher looks
+# for firmware-<target>.bin.
 name: Build boot image
 
 on:
@@ -21,40 +28,81 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [esp32, esp32s3]
     env:
+      TARGET: ${{ matrix.target }}
       PLATFORMIO_BUILD_DIR: ${{ github.workspace }}/build
+      # Read by the CMake of branches that vendor Bluepad32 under external/;
+      # unused elsewhere.
+      BLUEPAD32_ROOT: ${{ github.workspace }}/external/bluepad32
+      BTSTACK_ROOT: ${{ github.workspace }}/external/bluepad32/external/btstack
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check supported-targets.txt
+        id: target
+        run: |
+          if tr -d '\r' < supported-targets.txt | grep -qx "$TARGET"; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::$TARGET is not in supported-targets.txt; skipping."
+          fi
+
+      - name: Check out submodules
+        if: steps.target.outputs.build == 'true' && hashFiles('.gitmodules') != ''
+        run: git submodule update --init --recursive
+
+      # Bluepad32 ships a patch for its BTstack copy (an l2cap fix for incoming
+      # controller connections). The component wiring itself is done in CMake.
+      - name: Patch Bluepad32's BTstack
+        if: steps.target.outputs.build == 'true' && hashFiles('external/bluepad32/external/patches/*.patch') != ''
+        run: |
+          cd "$BTSTACK_ROOT"
+          git apply "$BLUEPAD32_ROOT"/external/patches/*.patch \
+            || echo "BTstack patch already applied or not needed"
+
       - uses: actions/setup-python@v5
+        if: steps.target.outputs.build == 'true'
         with:
           python-version: "3.12"
 
       - uses: actions/cache@v4
+        if: steps.target.outputs.build == 'true'
         with:
           path: ~/.platformio
-          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          key: pio-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('platformio.ini') }}
 
-      - run: pip install platformio
+      - if: steps.target.outputs.build == 'true'
+        run: pip install platformio
 
-      - run: pio run
+      - if: steps.target.outputs.build == 'true'
+        run: pio run -e "$TARGET"
         env:
           # build_dir in platformio.ini is under USERPROFILE, which Linux lacks.
           USERPROFILE: ${{ runner.temp }}
 
-      - name: Publish firmware.bin
+      - name: Publish the image
+        if: steps.target.outputs.build == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
-          cp build/esp32dev/firmware.bin firmware.bin
-          notes="Boot image built from ${GITHUB_SHA::7} on branch $TAG."
-          if gh release view "$TAG" >/dev/null 2>&1; then
+          if [ "$TARGET" = esp32 ]; then asset=firmware.bin; else asset="firmware-$TARGET.bin"; fi
+          cp "build/$TARGET/firmware.bin" "$asset"
+          notes="Boot images built from ${GITHUB_SHA::7} on branch $TAG."
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            # The other target's job may have created it in the meantime.
+            gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --notes "$notes" \
+              || gh release view "$TAG" >/dev/null
+          elif [ "$TARGET" = esp32 ]; then
+            # One job only, so the jobs don't race: move the release's tag to
+            # the commit these images were built from.
             gh release edit "$TAG" --notes "$notes"
-            # Move the release's tag to the commit this image was built from.
             gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" \
               -f sha="$GITHUB_SHA" -F force=true >/dev/null
-          else
-            gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --notes "$notes"
           fi
-          gh release upload "$TAG" firmware.bin --clobber
+          gh release upload "$TAG" "$asset" --clobber
