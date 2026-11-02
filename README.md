@@ -73,7 +73,7 @@ $pio = "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe"
 & $pio run
 ```
 
-The app binary is `%USERPROFILE%\.platformio\cyd-f1race-build\esp32dev\firmware.bin`. Use it in one of two ways:
+The app binary is `%USERPROFILE%\.platformio\cyd-f1race-build\esp32\firmware.bin`. Use it in one of two ways:
 
 - **As a launcher image** (board runs the `bootloader` branch): every push to this branch runs `.github/workflows/build.yml`, which builds the app and publishes it as `firmware.bin` on the release tagged `f1_race`. The launcher lists the branch and downloads that file. You can also write it to a slot over USB, as described in the `bootloader` README.
 - **On its own:** `& $pio run --target upload --upload-port COM11`. This replaces everything on the board, including the launcher.
