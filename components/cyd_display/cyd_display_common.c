@@ -163,7 +163,9 @@ esp_err_t cyd_draw_cells(int row, const char *text,
 {
     ESP_RETURN_ON_FALSE(row >= 0 && row < CYD_TEXT_ROWS, ESP_ERR_INVALID_ARG, TAG,
                         "text row outside display");
-    size_t length = strnlen(text, CYD_TEXT_COLUMNS);
+    /* NULL is an empty row: apps size their row tables by CYD_TEXT_ROWS, so
+       on a board with more rows the extra entries are NULL. */
+    size_t length = text != NULL ? strnlen(text, CYD_TEXT_COLUMNS) : 0;
     for (int chunk_x = 0; chunk_x < CYD_LCD_WIDTH; chunk_x += TEXT_CHUNK_COLUMNS) {
         int columns = CYD_LCD_WIDTH - chunk_x < TEXT_CHUNK_COLUMNS ? CYD_LCD_WIDTH - chunk_x
                                                                    : TEXT_CHUNK_COLUMNS;
