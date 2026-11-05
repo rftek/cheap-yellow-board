@@ -15,6 +15,7 @@
 static const char *TAG = "cyd_display";
 static uint16_t chunk[TEXT_CHUNK_COLUMNS * CYD_FONT_HEIGHT];
 
+#if !CYD_FONT_SMOOTH
 /* Classic 5x7 ASCII font, 0x20-0x7E, then the up, down and backspace
    arrows; one byte per column, LSB at the top. */
 static const uint8_t font5x7[98][5] = {
@@ -69,6 +70,7 @@ static const uint8_t font5x7[98][5] = {
     {0x20, 0x38, 0x3E, 0x38, 0x20}, {0x02, 0x0E, 0x3E, 0x0E, 0x02},
     {0x08, 0x1C, 0x3E, 0x08, 0x08},
 };
+#endif
 
 int cyd_display_width(void)
 {
@@ -100,23 +102,47 @@ const char *cyd_board_target(void)
     return CONFIG_IDF_TARGET;
 }
 
-static const uint8_t *glyph_for(char character)
+/* The glyph's index in either font: 0x20-0x7E, then the three arrows. */
+static int glyph_index(char character)
 {
     unsigned char code = (unsigned char)character;
     if (character == CYD_GLYPH_UP) {
-        return font5x7[95];
+        return 95;
     }
     if (character == CYD_GLYPH_DOWN) {
-        return font5x7[96];
+        return 96;
     }
     if (character == CYD_GLYPH_BACKSPACE) {
-        return font5x7[97];
+        return 97;
     }
     if (code < 0x20 || code > 0x7E) {
         code = '?';
     }
-    return font5x7[code - 0x20];
+    return code - 0x20;
 }
+
+#if CYD_FONT_SMOOTH
+/* One glyph per text cell, 4-bit coverage, two pixels per byte. */
+static const uint8_t smooth_font[98][CYD_FONT_HEIGHT][CYD_FONT_WIDTH / 2] = {
+#include "smooth_font.inc"
+};
+
+/* Mixes background and foreground by coverage 0-15, channel by channel. */
+static uint16_t blend565(uint16_t background, uint16_t foreground, unsigned coverage)
+{
+    if (coverage == 0) {
+        return background;
+    }
+    if (coverage == 15) {
+        return foreground;
+    }
+    unsigned rest = 15 - coverage;
+    unsigned red = ((background >> 11) * rest + (foreground >> 11) * coverage + 7) / 15;
+    unsigned green = (((background >> 5) & 0x3F) * rest + ((foreground >> 5) & 0x3F) * coverage + 7) / 15;
+    unsigned blue = ((background & 0x1F) * rest + (foreground & 0x1F) * coverage + 7) / 15;
+    return (uint16_t)(red << 11 | green << 5 | blue);
+}
+#endif
 
 static bool inside_display(int x, int y, int width, int height)
 {
@@ -172,11 +198,26 @@ esp_err_t cyd_draw_cells(int row, const char *text,
         for (int dx = 0; dx < columns; ++dx) {
             int x = chunk_x + dx;
             size_t cell = (size_t)x / CYD_FONT_WIDTH;
-            int glyph_x = (x % CYD_FONT_WIDTH) / CYD_FONT_SCALE;
             /* The pixels right of the last full cell take its colors. */
             size_t color_cell = cell < CYD_TEXT_COLUMNS ? cell : CYD_TEXT_COLUMNS - 1;
+#if CYD_FONT_SMOOTH
+            int cell_x = x % CYD_FONT_WIDTH;
+            int shift = cell_x % 2 == 0 ? 4 : 0;
+            for (int y = 0; y < CYD_FONT_HEIGHT; ++y) {
+                unsigned coverage = 0;
+                if (cell < length && cell < CYD_TEXT_COLUMNS) {
+                    coverage = (smooth_font[glyph_index(text[cell])][y][cell_x / 2] >> shift) & 0x0F;
+                }
+                uint16_t color = y == CYD_FONT_HEIGHT - 1
+                                     ? CYD_COLOR_BLACK
+                                     : blend565(background[color_cell], foreground[color_cell],
+                                                coverage);
+                chunk[y * columns + dx] = color;
+            }
+#else
+            int glyph_x = (x % CYD_FONT_WIDTH) / CYD_FONT_SCALE;
             uint8_t glyph_bits = cell < length && glyph_x < 5
-                                     ? glyph_for(text[cell])[glyph_x]
+                                     ? font5x7[glyph_index(text[cell])][glyph_x]
                                      : 0;
             for (int y = 0; y < CYD_FONT_HEIGHT; ++y) {
                 uint16_t color = background[color_cell];
@@ -188,6 +229,7 @@ esp_err_t cyd_draw_cells(int row, const char *text,
                 }
                 chunk[y * columns + dx] = color;
             }
+#endif
         }
         ESP_RETURN_ON_ERROR(cyd_backend_blit(chunk_x, row * CYD_FONT_HEIGHT, columns,
                                              CYD_FONT_HEIGHT, chunk),
