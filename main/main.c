@@ -13,11 +13,38 @@
 #define DRAW_BUFFER_ROWS 24
 #define UPDATE_PERIOD_MS 33
 
-#define DIAL_SIZE 176
-#define TICK_RING_SIZE 160
-#define BUTTON_WIDTH 96
-#define BUTTON_HEIGHT 44
-#define BUTTON_GAP 8
+/* The face is laid out for the CYD's 320x240 and drawn UI_SCALE times
+   larger on the S3 board's 800x480 (480 / 240 rows). LVGL's Montserrat
+   fonts stop at 48, so the time gets 48 there rather than 2 x 28. */
+#if CONFIG_IDF_TARGET_ESP32S3
+#define UI_SCALE 2
+#define TIME_FONT lv_font_montserrat_48
+#define BUTTON_FONT lv_font_montserrat_40
+#define STATE_FONT lv_font_montserrat_28
+#else
+#define UI_SCALE 1
+#define TIME_FONT lv_font_montserrat_28
+#define BUTTON_FONT lv_font_montserrat_20
+#define STATE_FONT lv_font_montserrat_14
+#endif
+#define SCALED(px) ((px) * UI_SCALE)
+
+#define DIAL_SIZE SCALED(176)
+#define DIAL_TOP SCALED(4)
+#define DIAL_ARC_WIDTH SCALED(6)
+#define TICK_RING_SIZE SCALED(160)
+#define MAJOR_TICK_LENGTH SCALED(10)
+#define MINOR_TICK_LENGTH SCALED(5)
+#define MAJOR_TICK_WIDTH SCALED(3)
+#define MINOR_TICK_WIDTH SCALED(1)
+/* Label centers relative to the dial's center, and their inset width. */
+#define TIME_OFFSET_Y SCALED(-6)
+#define STATE_OFFSET_Y SCALED(24)
+#define LABEL_INSET SCALED(24)
+#define BUTTON_WIDTH SCALED(96)
+#define BUTTON_HEIGHT SCALED(44)
+#define BUTTON_GAP SCALED(8)
+#define BUTTON_BOTTOM SCALED(6)
 
 static const char *TAG = "stopwatch";
 
@@ -180,13 +207,13 @@ static lv_obj_t *make_button(lv_obj_t *parent, const char *text, lv_palette_t pa
 {
     lv_obj_t *button = lv_button_create(parent);
     lv_obj_set_size(button, BUTTON_WIDTH, BUTTON_HEIGHT);
-    lv_obj_align(button, LV_ALIGN_BOTTOM_MID, x_offset, -6);
+    lv_obj_align(button, LV_ALIGN_BOTTOM_MID, x_offset, -BUTTON_BOTTOM);
     lv_obj_set_style_bg_color(button, lv_palette_main(palette), 0);
     lv_obj_set_style_bg_color(button, lv_palette_darken(palette, 4), LV_STATE_DISABLED);
     lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, NULL);
     lv_obj_t *label = lv_label_create(button);
     lv_label_set_text(label, text);
-    lv_obj_set_style_text_font(label, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(label, &BUTTON_FONT, 0);
     lv_obj_set_style_text_color(label, lv_color_white(), 0);
     lv_obj_set_style_text_color(label, lv_palette_main(LV_PALETTE_GREY), LV_STATE_DISABLED);
     lv_obj_center(label);
@@ -201,15 +228,15 @@ static void build_face(void)
     /* Seconds arc around the outside of the dial. */
     second_arc = lv_arc_create(screen);
     lv_obj_set_size(second_arc, DIAL_SIZE, DIAL_SIZE);
-    lv_obj_align(second_arc, LV_ALIGN_TOP_MID, 0, 4);
+    lv_obj_align(second_arc, LV_ALIGN_TOP_MID, 0, DIAL_TOP);
     lv_arc_set_rotation(second_arc, 270);
     lv_arc_set_bg_angles(second_arc, 0, 360);
     lv_arc_set_range(second_arc, 0, 599);
     lv_arc_set_value(second_arc, 0);
     lv_obj_remove_style(second_arc, NULL, LV_PART_KNOB);
     lv_obj_set_clickable(second_arc, false);
-    lv_obj_set_style_arc_width(second_arc, 6, LV_PART_MAIN);
-    lv_obj_set_style_arc_width(second_arc, 6, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_width(second_arc, DIAL_ARC_WIDTH, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(second_arc, DIAL_ARC_WIDTH, LV_PART_INDICATOR);
     lv_obj_set_style_arc_color(second_arc, lv_color_hex(0x303030), LV_PART_MAIN);
     lv_obj_set_style_arc_color(second_arc, lv_palette_main(LV_PALETTE_ORANGE),
                                LV_PART_INDICATOR);
@@ -226,22 +253,22 @@ static void build_face(void)
     lv_scale_set_major_tick_every(ticks, 5);
     lv_scale_set_label_show(ticks, false);
     lv_obj_set_style_arc_width(ticks, 0, LV_PART_MAIN);
-    lv_obj_set_style_length(ticks, 10, LV_PART_INDICATOR);
-    lv_obj_set_style_length(ticks, 5, LV_PART_ITEMS);
-    lv_obj_set_style_line_width(ticks, 3, LV_PART_INDICATOR);
-    lv_obj_set_style_line_width(ticks, 1, LV_PART_ITEMS);
+    lv_obj_set_style_length(ticks, MAJOR_TICK_LENGTH, LV_PART_INDICATOR);
+    lv_obj_set_style_length(ticks, MINOR_TICK_LENGTH, LV_PART_ITEMS);
+    lv_obj_set_style_line_width(ticks, MAJOR_TICK_WIDTH, LV_PART_INDICATOR);
+    lv_obj_set_style_line_width(ticks, MINOR_TICK_WIDTH, LV_PART_ITEMS);
     lv_obj_set_style_line_color(ticks, lv_color_white(), LV_PART_INDICATOR);
     lv_obj_set_style_line_color(ticks, lv_color_hex(0x808080), LV_PART_ITEMS);
 
     time_label = lv_label_create(screen);
-    lv_obj_set_style_text_font(time_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_font(time_label, &TIME_FONT, 0);
     lv_obj_set_style_text_color(time_label, lv_color_white(), 0);
-    lv_obj_align_to(time_label, second_arc, LV_ALIGN_CENTER, 0, -6);
+    lv_obj_align_to(time_label, second_arc, LV_ALIGN_CENTER, 0, TIME_OFFSET_Y);
 
     state_label = lv_label_create(screen);
-    lv_obj_set_style_text_font(state_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(state_label, &STATE_FONT, 0);
     lv_obj_set_style_text_color(state_label, lv_palette_main(LV_PALETTE_GREY), 0);
-    lv_obj_align_to(state_label, second_arc, LV_ALIGN_CENTER, 0, 24);
+    lv_obj_align_to(state_label, second_arc, LV_ALIGN_CENTER, 0, STATE_OFFSET_Y);
 
     start_button = make_button(screen, "START", LV_PALETTE_GREEN,
                                -(BUTTON_WIDTH + BUTTON_GAP), start_clicked);
@@ -249,12 +276,12 @@ static void build_face(void)
     make_button(screen, "CLEAR", LV_PALETTE_GREY, BUTTON_WIDTH + BUTTON_GAP, clear_clicked);
 
     /* Keep the time centered as its width changes. */
-    lv_obj_set_width(time_label, DIAL_SIZE - 24);
+    lv_obj_set_width(time_label, DIAL_SIZE - LABEL_INSET);
     lv_obj_set_style_text_align(time_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align_to(time_label, second_arc, LV_ALIGN_CENTER, 0, -6);
-    lv_obj_set_width(state_label, DIAL_SIZE - 24);
+    lv_obj_align_to(time_label, second_arc, LV_ALIGN_CENTER, 0, TIME_OFFSET_Y);
+    lv_obj_set_width(state_label, DIAL_SIZE - LABEL_INSET);
     lv_obj_set_style_text_align(state_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align_to(state_label, second_arc, LV_ALIGN_CENTER, 0, 24);
+    lv_obj_align_to(state_label, second_arc, LV_ALIGN_CENTER, 0, STATE_OFFSET_Y);
 
     show_state();
     lv_timer_create(tick, UPDATE_PERIOD_MS, NULL);

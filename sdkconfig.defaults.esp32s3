@@ -23,3 +23,8 @@ CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
 
 # The S3's Bluetooth controller is BLE only, so the esp32 dual-mode (BTDM)
 # settings in sdkconfig.defaults don't apply to it.
+
+# The face at twice the CYD size: 40 for the buttons and 48 for the time
+# (14 and 28, also used here, are in sdkconfig.defaults).
+CONFIG_LV_FONT_MONTSERRAT_40=y
+CONFIG_LV_FONT_MONTSERRAT_48=y
