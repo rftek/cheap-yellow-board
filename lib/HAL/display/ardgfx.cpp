@@ -7,8 +7,15 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 static SemaphoreHandle_t tftMutex;
+// Created on first use: nothing else creates it, and taking a NULL mutex asserts in FreeRTOS
+// (the first fillScreen in setup() boot-looped the Waveshare S3 LCD-7). The first draw happens
+// in setup(), before other tasks draw, so lazy creation doesn't race.
+static inline SemaphoreHandle_t tftLock() {
+    if (!tftMutex) tftMutex = xSemaphoreCreateRecursiveMutex();
+    return tftMutex;
+}
 #define RUN_ON_MUTEX(fn)                                                                                     \
-    xSemaphoreTakeRecursive(tftMutex, portMAX_DELAY);                                                        \
+    xSemaphoreTakeRecursive(tftLock(), portMAX_DELAY);                                                       \
     fn;                                                                                                      \
     xSemaphoreGiveRecursive(tftMutex);
 
@@ -394,7 +401,7 @@ size_t tft_display::write(uint8_t c) {
 size_t tft_display::write(const uint8_t *buffer, size_t size) {
     if (!_gfx || !buffer) return 0;
     size_t written = 0;
-    xSemaphoreTakeRecursive(tftMutex, portMAX_DELAY);
+    xSemaphoreTakeRecursive(tftLock(), portMAX_DELAY);
     for (size_t i = 0; i < size; ++i) { written += _gfx->write(buffer[i]); }
     xSemaphoreGiveRecursive(tftMutex);
     return written;
