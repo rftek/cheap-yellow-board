@@ -49,11 +49,24 @@ tft_display::tft_display(int16_t _W, int16_t _H) : _height(_H), _width(_W) {
         TFT_VSYNC_BACK_PORCH,
         TFT_PCLK_ACTIVE_NEG,
         TFT_PREF_SPEED
+    #if defined(TFT_RGB_BOUNCE_BUFFER_PX)
+        ,
+        false, // useBigEndian
+        0,     // de_idle_high
+        0,     // pclk_idle_high
+        TFT_RGB_BOUNCE_BUFFER_PX
+    #endif
     );
     #if !defined(TFT_WIDTH) || !defined(TFT_HEIGHT)
         #error "Missing Macros definitions of: TFT_WIDTH, TFT_HEIGHT"
     #endif
+    // Panels that scan out landscape natively give their own size; TFT_WIDTH/TFT_HEIGHT keep
+    // Bruce's portrait convention and TFT_ROTATION_OFFSET lines the two up.
+    #if defined(TFT_RGB_NATIVE_WIDTH) && defined(TFT_RGB_NATIVE_HEIGHT)
+    _gfx = new TFT_DISPLAY_DRIVER(TFT_RGB_NATIVE_WIDTH, TFT_RGB_NATIVE_HEIGHT, bus, 0, true);
+    #else
     _gfx = new TFT_DISPLAY_DRIVER(TFT_WIDTH, TFT_HEIGHT, bus, 0, true);
+    #endif
 #endif
 #if TFT_DATABUS_N == 0
     bus = new TFT_DATABUS(TFT_DC, TFT_CS, TFT_SCLK, TFT_MOSI, TFT_MISO, &SPI);
@@ -67,7 +80,9 @@ tft_display::tft_display(int16_t _W, int16_t _H) : _height(_H), _width(_W) {
     bus = new TFT_DATABUS(TFT_HSYNC_PULSE_WIDTH, TFT_HSYNC_BACK_PORCH, TFT_HSYNC_FRONT_PORCH,
                           TFT_VSYNC_PULSE_WIDTH, TFT_VSYNC_BACK_PORCH, TFT_VSYNC_FRONT_PORCH, TFT_PREF_SPEED);
 #endif
-#if TFT_DISPLAY_DRIVER_N == 50
+#if TFT_DISPLAY_DRIVER_N == 49
+    // Arduino_RGB_Display: constructed with its Arduino_ESP32RGBPanel bus above.
+#elif TFT_DISPLAY_DRIVER_N == 50
     #if !defined(TFT_RST) || !defined(TFT_WIDTH) || !defined(TFT_HEIGHT) || !defined(TFT_DSI_INIT)
         #error "Missing Macros definitions of: TFT_RST, TFT_WIDTH, TFT_HEIGHT"
     #endif
@@ -144,8 +159,11 @@ void tft_display::init(uint8_t tc) {
     begin();
 }
 
+#ifndef TFT_ROTATION_OFFSET
+#define TFT_ROTATION_OFFSET 0
+#endif
 void tft_display::setRotation(uint8_t r) {
-    if (_gfx) _gfx->setRotation(r);
+    if (_gfx) _gfx->setRotation((r + TFT_ROTATION_OFFSET) & 3);
     _rotation = r;
 }
 

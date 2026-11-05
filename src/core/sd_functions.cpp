@@ -1013,6 +1013,12 @@ void viewFile(FS &fs, const String &filepath) {
 **  Check if there are more then 4096 bytes available for storage
 **********************************************************************/
 bool checkLittleFsSize() {
+    if (LittleFS.totalBytes() == 0) {
+        // Not mounted (e.g. no spiffs partition, as under the cheap-yellow-board launcher).
+        // Don't wait for a key: this also runs during boot, before the input task exists.
+        displayError("LittleFS not available", false);
+        return false;
+    }
     if ((LittleFS.totalBytes() - LittleFS.usedBytes()) < 4096) {
         displayError("LittleFS is Full", true);
         return false;

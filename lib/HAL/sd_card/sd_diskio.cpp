@@ -68,6 +68,19 @@ typedef struct {
 
 static ardu_sdcard_t *s_cards[FF_VOLUMES] = {NULL};
 
+// A card whose CS isn't a GPIO (sdcard_init() given cs = 0xFF, e.g. SDCARD_CS=-1 on a board whose
+// CS sits on an I/O expander) has it driven by the board's sdExternalCS(), if it has one.
+#define SD_EXTERNAL_CS 0xFF
+void sdExternalCS(bool high) __attribute__((weak));
+
+static void sdSetCS(ardu_sdcard_t *card, bool high) {
+  if (card->ssPin == SD_EXTERNAL_CS) {
+    if (sdExternalCS) sdExternalCS(high);
+  } else {
+    digitalWrite(card->ssPin, high ? HIGH : LOW);
+  }
+}
+
 #if ARDUHAL_LOG_LEVEL >= ARDUHAL_LOG_LEVEL_ERROR
 const char *fferr2str[] = {
   "(0) Succeeded",
@@ -117,16 +130,16 @@ void sdStop(uint8_t pdrv) {
 
 void sdDeselectCard(uint8_t pdrv) {
   ardu_sdcard_t *card = s_cards[pdrv];
-  digitalWrite(card->ssPin, HIGH);
+  sdSetCS(card, true);
 }
 
 bool sdSelectCard(uint8_t pdrv) {
   ardu_sdcard_t *card = s_cards[pdrv];
-  digitalWrite(card->ssPin, LOW);
+  sdSetCS(card, false);
   bool s = sdWait(pdrv, 500);
   if (!s) {
     log_e("Select Failed");
-    digitalWrite(card->ssPin, HIGH);
+    sdSetCS(card, true);
     return false;
   }
   return true;
@@ -474,13 +487,13 @@ DSTATUS ff_sd_initialize(uint8_t pdrv) {
 
   AcquireSPI card_locked(card, 400000);
 
-  digitalWrite(card->ssPin, HIGH);
+  sdSetCS(card, true);
   for (uint8_t i = 0; i < 20; i++) {
     card->spi->transfer(0XFF);
   }
 
   // Fix mount issue - sdWait fail ignored before command GO_IDLE_STATE
-  digitalWrite(card->ssPin, LOW);
+  sdSetCS(card, false);
   if (!sdWait(pdrv, 500)) {
     log_w("sdWait fail ignored, card initialize continues");
   }
@@ -701,15 +714,17 @@ uint8_t sdcard_init(uint8_t cs, SPIClass *spi, int hz) {
   card->base_path = NULL;
   card->frequency = hz;
   card->spi = spi;
-  card->ssPin = digitalPinToGPIONumber(cs);
+  card->ssPin = cs == SD_EXTERNAL_CS ? SD_EXTERNAL_CS : digitalPinToGPIONumber(cs);
 
   card->supports_crc = true;
   card->type = CARD_NONE;
   card->status = STA_NOINIT;
 
-  pinMode(card->ssPin, OUTPUT);
-  digitalWrite(card->ssPin, HIGH);
-  perimanSetPinBusExtraType(card->ssPin, "SD_SS");
+  if (card->ssPin != SD_EXTERNAL_CS) {
+    pinMode(card->ssPin, OUTPUT);
+    perimanSetPinBusExtraType(card->ssPin, "SD_SS");
+  }
+  sdSetCS(card, true);
 
   s_cards[pdrv] = card;
 

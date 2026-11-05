@@ -1,0 +1,111 @@
+# Builds this branch's boot image once per chip target listed in
+# supported-targets.txt and publishes each on a release tagged with the
+# branch name, which is where the launcher on the bootloader branch looks for
+# it. Pushes that change only Markdown files don't rebuild.
+#
+# Adapted from the screen_check branch for Bruce (PlatformIO + Arduino):
+# each target maps to a Bruce env below. Only esp32s3 is supported: the
+# CYD's 1.3 MB OTA slots are too small for Bruce.
+#
+# Asset names: the esp32 image is published as firmware.bin, the name the
+# launchers in the field download; other targets as firmware-<target>.bin.
+name: Build boot image
+
+on:
+  push:
+    branches: ["**"]
+    paths-ignore:
+      - "**.md"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: esp32
+            env: CYD-2432S028
+          - target: esp32s3
+            env: waveshare-s3-lcd7
+    env:
+      TARGET: ${{ matrix.target }}
+      PIO_ENV: ${{ matrix.env }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check supported-targets.txt
+        id: target
+        run: |
+          if tr -d '\r' < supported-targets.txt | grep -qx "$TARGET"; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::$TARGET is not in supported-targets.txt; skipping."
+          fi
+          # The first listed target's job moves the release tag, so the jobs don't race.
+          first=$(tr -d '\r' < supported-targets.txt | grep -v '^\s*$' | head -n1)
+          echo "first=$([ "$first" = "$TARGET" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        if: steps.target.outputs.build == 'true'
+        with:
+          python-version: "3.13"
+
+      # gen_mqjs_headers.py builds a 32-bit host tool when mqjs_stdlib.c changes.
+      - name: Install build deps (multilib)
+        if: steps.target.outputs.build == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-multilib libc6-dev-i386
+
+      - uses: actions/cache@v4
+        if: steps.target.outputs.build == 'true'
+        with:
+          path: |
+            ~/.platformio
+            .pio/libdeps
+          key: pio-${{ runner.os }}-${{ matrix.env }}-${{ hashFiles('platformio.ini', 'boards/**/*.ini') }}
+          restore-keys: |
+            pio-${{ runner.os }}-${{ matrix.env }}-
+
+      - if: steps.target.outputs.build == 'true'
+        run: pip install platformio
+
+      - if: steps.target.outputs.build == 'true'
+        run: pio run -e "$PIO_ENV"
+
+      - name: Publish the image
+        if: steps.target.outputs.build == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          FIRST: ${{ steps.target.outputs.first }}
+        run: |
+          if [ "$TARGET" = esp32 ]; then asset=firmware.bin; else asset="firmware-$TARGET.bin"; fi
+          cp ".pio/build/$PIO_ENV/firmware.bin" "$asset"
+          size=$(stat -c %s "$asset")
+          # The launcher writes the image into a 4 MB OTA slot.
+          if [ "$size" -gt $((0x400000)) ]; then
+            echo "::error::$asset is $size bytes, over the 4 MB OTA slot"; exit 1
+          fi
+          notes="Boot images built from ${GITHUB_SHA::7} on branch $TAG."
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            # The other target's job may have created it in the meantime.
+            gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --notes "$notes" \
+              || gh release view "$TAG" >/dev/null
+          elif [ "$FIRST" = true ]; then
+            # Move the release's tag to the commit these images were built from.
+            gh release edit "$TAG" --notes "$notes"
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" \
+              -f sha="$GITHUB_SHA" -F force=true >/dev/null
+          fi
+          gh release upload "$TAG" "$asset" --clobber

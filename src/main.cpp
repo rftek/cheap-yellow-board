@@ -9,6 +9,7 @@
 #include "current_year.h"
 #include "esp32-hal-psram.h"
 #include "esp_heap_caps.h"
+#include "esp_partition.h"
 #include "esp_task_wdt.h"
 #include "esp_wifi.h"
 #include <functional>
@@ -188,8 +189,14 @@ volatile int tftHeight = VECTOR_DISPLAY_DEFAULT_WIDTH;
  *********************************************************************/
 void begin_storage() {
     if (!setupLittleFS()) {
-        LittleFS.format();
-        setupLittleFS();
+        // Only format a partition that exists: some partition tables have none, and Bruce then
+        // keeps its files on the SD card.
+        if (esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, "spiffs")) {
+            LittleFS.format();
+            setupLittleFS();
+        } else {
+            Serial.println("No spiffs partition: LittleFS disabled, using the SD card only");
+        }
     }
     RAM_LOG("after LittleFS");
     bool checkFS = setupSdCard();
