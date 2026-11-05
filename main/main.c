@@ -16,16 +16,29 @@
 #define DRAW_BUFFER_ROWS 80
 #define FRAME_PERIOD_MS 33
 
+/* The labels and margins are laid out for the CYD's 320x240 and drawn
+   UI_SCALE times larger on the S3 board's 800x480 (480 / 240 rows). */
+#if CONFIG_IDF_TARGET_ESP32S3
+#define UI_SCALE 2
+#define LABEL_FONT lv_font_montserrat_28
+#else
+#define UI_SCALE 1
+#define LABEL_FONT lv_font_montserrat_14
+#endif
+#define SCALED(px) ((px) * UI_SCALE)
+
 #define MIN_TEETH 8
 #define MAX_TEETH 36
 /* The gears fill the screen between the two label rows. */
-#define LABEL_HEIGHT 22
+#define LABEL_HEIGHT SCALED(22)
+#define LABEL_INSET SCALED(3) /* label distance from the screen edge */
 #define GEAR_AREA_TOP LABEL_HEIGHT
 #define GEAR_AREA_HEIGHT (CYD_LCD_HEIGHT - 2 * LABEL_HEIGHT)
-#define GEAR_MARGIN 6
-/* Surface speed along the pitch circles, chosen at random per pair. */
-#define MIN_PITCH_SPEED 25.0f
-#define MAX_PITCH_SPEED 70.0f
+#define GEAR_MARGIN SCALED(6)
+/* Surface speed along the pitch circles, chosen at random per pair; scaled
+   with the gears so they turn as fast as on the CYD. */
+#define MIN_PITCH_SPEED (25.0f * UI_SCALE)
+#define MAX_PITCH_SPEED (70.0f * UI_SCALE)
 
 #define TWO_PI 6.28318531f
 
@@ -305,15 +318,15 @@ static void build_scene(void)
     lv_obj_add_event_cb(gear_layer, gear_pressed, LV_EVENT_PRESSED, NULL);
 
     info_label = lv_label_create(screen);
-    lv_obj_set_style_text_font(info_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(info_label, &LABEL_FONT, 0);
     lv_obj_set_style_text_color(info_label, lv_color_white(), 0);
-    lv_obj_align(info_label, LV_ALIGN_TOP_MID, 0, 3);
+    lv_obj_align(info_label, LV_ALIGN_TOP_MID, 0, LABEL_INSET);
 
     lv_obj_t *hint = lv_label_create(screen);
     lv_label_set_text(hint, "tap a gear to re-cut its teeth");
-    lv_obj_set_style_text_font(hint, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(hint, &LABEL_FONT, 0);
     lv_obj_set_style_text_color(hint, lv_palette_main(LV_PALETTE_GREY), 0);
-    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -3);
+    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -LABEL_INSET);
 
     /* A random pair, direction and speed every launch. */
     new_gear(&gears[0]);
