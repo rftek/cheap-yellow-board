@@ -27,13 +27,19 @@
 
 /* Each branch of this repository is one application. GitHub Actions on the
    branch publishes its build as IMAGE_ASSET_NAME on a release tagged with
-   the branch name; branches without one are not offered. */
+   the branch name; branches without one are not offered. CI names the
+   esp32 image firmware.bin, which launchers in the field download, and the
+   other targets' images firmware-<target>.bin. */
 #ifndef IMAGE_REPO
 #define IMAGE_REPO "rftek/cheap-yellow-board"
 #endif
 #define BRANCHES_URL "https://api.github.com/repos/" IMAGE_REPO "/branches?per_page=100"
 #define RELEASES_URL "https://api.github.com/repos/" IMAGE_REPO "/releases?per_page=100"
+#if CONFIG_IDF_TARGET_ESP32
 #define IMAGE_ASSET_NAME "firmware.bin"
+#else
+#define IMAGE_ASSET_NAME "firmware-" CONFIG_IDF_TARGET ".bin"
+#endif
 
 /* Settings this launcher stores in NVS for the boot images, which are
    published publicly and so carry no credentials of their own. The
@@ -43,7 +49,13 @@
 /* Countdown before the default image boots; each tap off an entry adds as much again. */
 #define MENU_TIMEOUT_US (20LL * 1000 * 1000)
 #define WIFI_CONNECT_TIMEOUT_MS 10000
+/* The releases list grows with every asset. Boards with PSRAM, where
+   malloc puts large buffers, can hold more of it. */
+#if CONFIG_SPIRAM
+#define GITHUB_JSON_LIMIT (256 * 1024)
+#else
 #define GITHUB_JSON_LIMIT (64 * 1024)
+#endif
 #define DOWNLOAD_CHUNK_SIZE 4096
 #define MAX_REDIRECTS 5
 
