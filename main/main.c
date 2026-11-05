@@ -21,7 +21,13 @@
    Everything is drawn straight to the panel without a frame buffer. The
    maze is 20x14 tiles of 16 pixels under a 16-pixel score bar, and each
    frame redraws only the small boxes around the mouse and the cats,
-   composed in RAM first so nothing flickers. */
+   composed in RAM first so nothing flickers.
+
+   The game itself always counts in those 16-pixel tiles ("maze pixels").
+   On a bigger panel each maze pixel is drawn as PX x PX screen pixels: the
+   round shapes are worked out at the finer grid and the sprites are
+   smoothed with Scale2x, so the S3's 800x480 panel shows the same maze
+   twice as fine, 640x448 under a 32-pixel score bar, centered. */
 
 static const char *TAG = "catmouse";
 
@@ -33,6 +39,19 @@ static const char *TAG = "catmouse";
 #define HUD_HEIGHT 16
 #define MAZE_WIDTH (COLS * TILE)
 #define MAZE_HEIGHT (ROWS * TILE)
+
+/* Screen pixels per maze pixel, along each axis: 1 or 2. */
+#if CONFIG_IDF_TARGET_ESP32S3
+#define PX 2
+#else
+#define PX 1
+#endif
+#define FINE_TILE (TILE * PX)
+#define HUD_PX (HUD_HEIGHT * PX)
+#define MAZE_LEFT ((CYD_LCD_WIDTH - MAZE_WIDTH * PX) / 2)
+_Static_assert(PX == 1 || PX == 2, "the sprite smoothing doubles at most");
+_Static_assert(HUD_PX + MAZE_HEIGHT * PX <= CYD_LCD_HEIGHT && MAZE_LEFT >= 0,
+               "the maze must fit the screen");
 
 #define FRAME_MS 40 /* 25 frames per second */
 #define FRAMES(seconds) ((int)((seconds) * 1000 / FRAME_MS))
@@ -180,18 +199,60 @@ static const char *const CAT_SPRITE[TILE] = {
     "................",
 };
 
-/* The mouse sprite's pixel at (x, y) when facing dir. */
+/* The sprites at screen resolution, FINE_TILE pixels square. */
+static char mouse_fine[FINE_TILE][FINE_TILE];
+static char cat_fine[FINE_TILE][FINE_TILE];
+
+#if PX == 2
+static char sprite_char(const char *const *sprite, int x, int y)
+{
+    return x < 0 || x >= TILE || y < 0 || y >= TILE ? '.' : sprite[y][x];
+}
+#endif
+
+/* Copies a sprite at PX times its size. Doubling uses Scale2x (EPX): each
+   pixel becomes four, and a corner takes a neighbor's color where two
+   neighbors agree, which rounds off the stair steps of diagonal edges. It
+   treats every direction alike, so turning the result still works. */
+static void smooth_sprite(const char *const *sprite, char fine[FINE_TILE][FINE_TILE])
+{
+    for (int y = 0; y < TILE; ++y) {
+        for (int x = 0; x < TILE; ++x) {
+            char p = sprite[y][x];
+#if PX == 1
+            fine[y][x] = p;
+#else
+            char a = sprite_char(sprite, x, y - 1); /* above */
+            char b = sprite_char(sprite, x + 1, y); /* right */
+            char c = sprite_char(sprite, x - 1, y); /* left */
+            char d = sprite_char(sprite, x, y + 1); /* below */
+            fine[2 * y][2 * x] = c == a && c != d && a != b ? a : p;
+            fine[2 * y][2 * x + 1] = a == b && a != c && b != d ? b : p;
+            fine[2 * y + 1][2 * x] = d == c && d != b && c != a ? c : p;
+            fine[2 * y + 1][2 * x + 1] = b == d && b != a && d != c ? d : p;
+#endif
+        }
+    }
+}
+
+static void prepare_sprites(void)
+{
+    smooth_sprite(MOUSE_SPRITE, mouse_fine);
+    smooth_sprite(CAT_SPRITE, cat_fine);
+}
+
+/* The mouse sprite's pixel at screen-resolution (x, y) when facing dir. */
 static char mouse_sprite_at(int dir, int x, int y)
 {
     switch (dir) {
     case DIR_LEFT:
-        return MOUSE_SPRITE[y][TILE - 1 - x];
+        return mouse_fine[y][FINE_TILE - 1 - x];
     case DIR_UP:
-        return MOUSE_SPRITE[x][TILE - 1 - y];
+        return mouse_fine[x][FINE_TILE - 1 - y];
     case DIR_DOWN:
-        return MOUSE_SPRITE[TILE - 1 - x][y];
+        return mouse_fine[FINE_TILE - 1 - x][y];
     default:
-        return MOUSE_SPRITE[y][x];
+        return mouse_fine[y][x];
     }
 }
 
@@ -214,9 +275,10 @@ static bool mouse_pixel(int dir, int x, int y, uint16_t *color)
     }
 }
 
+/* The cat's pixel at screen-resolution (x, y). */
 static bool cat_pixel(const cat_t *cat, int x, int y, uint16_t *color)
 {
-    char c = CAT_SPRITE[y][x];
+    char c = cat_fine[y][x];
     if (c == '.') {
         return false;
     }
@@ -264,46 +326,49 @@ static bool passable(int col, int row)
     return row >= 0 && row < ROWS && maze[row][col] != '#' && maze[row][col] != '-';
 }
 
+/* The big cheese's pixel at screen-resolution (x, y) in its tile. */
 static uint16_t big_cheese_pixel(int x, int y)
 {
     /* A round cheese with two holes, in half-pixel units from the center. */
-    int dx = 2 * x - (TILE - 1);
-    int dy = 2 * y - (TILE - 1);
-    if (dx * dx + dy * dy > 11 * 11) {
+    int dx = 2 * x - (FINE_TILE - 1);
+    int dy = 2 * y - (FINE_TILE - 1);
+    if (dx * dx + dy * dy > 11 * 11 * PX * PX) {
         return COLOR_BLACK;
     }
-    if ((dx - 4) * (dx - 4) + (dy + 3) * (dy + 3) <= 9 ||
-        (dx + 4) * (dx + 4) + (dy - 4) * (dy - 4) <= 6) {
+    if ((dx - 4 * PX) * (dx - 4 * PX) + (dy + 3 * PX) * (dy + 3 * PX) <= 9 * PX * PX ||
+        (dx + 4 * PX) * (dx + 4 * PX) + (dy - 4 * PX) * (dy - 4 * PX) <= 6 * PX * PX) {
         return COLOR_CHEESE_HOLE;
     }
     return COLOR_BIG_CHEESE;
 }
 
-/* The maze's own pixel at (x, y), without the mouse or cats. */
+/* The maze's own pixel at screen-resolution (x, y), counted from the
+   maze's corner, without the mouse or cats. */
 static uint16_t maze_pixel(int x, int y)
 {
-    int col = x / TILE;
-    int row = y / TILE;
-    int lx = x % TILE;
-    int ly = y % TILE;
+    int col = x / FINE_TILE;
+    int row = y / FINE_TILE;
+    int lx = x % FINE_TILE;
+    int ly = y % FINE_TILE;
     switch (maze[row][col]) {
     case '#': {
         if (walls_flash) {
             return COLOR_WHITE;
         }
-        /* A lighter rim along the sides that face a corridor. */
-        bool rim = (ly < 3 && !layout_wall(col, row - 1)) ||
-                   (ly > TILE - 4 && !layout_wall(col, row + 1)) ||
-                   (lx < 3 && !layout_wall(col - 1, row)) ||
-                   (lx > TILE - 4 && !layout_wall(col + 1, row));
+        /* A lighter rim, 3 maze pixels wide, along the sides that face a corridor. */
+        bool rim = (ly < 3 * PX && !layout_wall(col, row - 1)) ||
+                   (ly >= FINE_TILE - 3 * PX && !layout_wall(col, row + 1)) ||
+                   (lx < 3 * PX && !layout_wall(col - 1, row)) ||
+                   (lx >= FINE_TILE - 3 * PX && !layout_wall(col + 1, row));
         return rim ? COLOR_WALL_EDGE : COLOR_WALL;
     }
     case '.':
-        return lx >= 6 && lx <= 9 && ly >= 6 && ly <= 9 ? COLOR_CHEESE : COLOR_BLACK;
+        return lx >= 6 * PX && lx < 10 * PX && ly >= 6 * PX && ly < 10 * PX ? COLOR_CHEESE
+                                                                             : COLOR_BLACK;
     case 'o':
         return big_cheese_shown ? big_cheese_pixel(lx, ly) : COLOR_BLACK;
     case '-':
-        return ly >= 6 && ly <= 9 ? COLOR_DOOR : COLOR_BLACK;
+        return ly >= 6 * PX && ly < 10 * PX ? COLOR_DOOR : COLOR_BLACK;
     default:
         return COLOR_BLACK;
     }
@@ -316,11 +381,11 @@ static uint16_t maze_pixel(int x, int y)
    dead zone pushes it the way it moved most. A small indicator in the score
    bar shows the push, for debugging. */
 
-#define STICK_DEAD_ZONE 12 /* pixels from the center before it pushes */
+#define STICK_DEAD_ZONE (12 * PX) /* screen pixels from the center before it pushes */
 /* Frames without a touch before the finger counts as lifted, so a resistive
    panel's brief dropouts don't move the center. */
 #define STICK_RELEASE_FRAMES 2
-#define STICK_X 96 /* the indicator's place in the score bar */
+#define STICK_X 96 /* the indicator's place in the score bar, in maze pixels */
 #define COLOR_STICK_IDLE RGB565(70, 70, 90)
 #define COLOR_STICK_HELD RGB565(60, 220, 90)
 
@@ -339,20 +404,21 @@ static bool glyph_pixel(uint16_t glyph, int scale, int x, int y)
     return (bits >> (2 - x / scale)) & 1;
 }
 
-/* The indicator's pixel at (x, y): an arrowhead for each way, lit for the
-   way the stick is pushed, and a dot in the middle while a finger is down. */
+/* The indicator's pixel at screen-resolution (x, y): an arrowhead for each
+   way, lit for the way the stick is pushed, and a dot in the middle while a
+   finger is down. */
 static uint16_t stick_pixel(int x, int y)
 {
     /* In half-pixel units from the center. */
-    int dx = 2 * x - (TILE - 1);
-    int dy = 2 * y - (TILE - 1);
-    if (dx * dx + dy * dy <= 16) {
+    int dx = 2 * x - (FINE_TILE - 1);
+    int dy = 2 * y - (FINE_TILE - 1);
+    if (dx * dx + dy * dy <= 16 * PX * PX) {
         return stick_held ? COLOR_STICK_HELD : COLOR_STICK_IDLE;
     }
     for (int dir = 0; dir < 4; ++dir) {
         int along = dx * DX[dir] + dy * DY[dir];
         int across = abs(dx * DY[dir] - dy * DX[dir]);
-        if (along >= 7 && across <= 17 - along) {
+        if (along >= 7 * PX && across <= 17 * PX - along) {
             return dir == stick_dir ? COLOR_CHEESE : COLOR_STICK_IDLE;
         }
     }
@@ -361,8 +427,11 @@ static uint16_t stick_pixel(int x, int y)
 
 /* ---- Drawing ---- */
 
+/* Regions are at most REGION_SIZE maze pixels square, composed at screen
+   resolution. */
 #define REGION_SIZE 32
-static uint16_t region[REGION_SIZE * REGION_SIZE];
+#define REGION_PX (REGION_SIZE * PX)
+static uint16_t region[REGION_PX * REGION_PX];
 
 static bool overlaps(int x0, int y0, int x1, int y1, const actor_t *actor)
 {
@@ -390,9 +459,14 @@ static void draw_region(int x0, int y0, int x1, int y1)
         draw_region(middle_x, middle_y, x1, y1);
         return;
     }
-    for (int y = y0; y < y1; ++y) {
-        for (int x = x0; x < x1; ++x) {
-            region[(y - y0) * width + (x - x0)] = maze_pixel(x, y);
+    /* From here on in screen pixels, counted from the maze's corner. */
+    int fx0 = x0 * PX;
+    int fy0 = y0 * PX;
+    int fine_width = width * PX;
+    int fine_height = height * PX;
+    for (int y = 0; y < fine_height; ++y) {
+        for (int x = 0; x < fine_width; ++x) {
+            region[y * fine_width + x] = maze_pixel(fx0 + x, fy0 + y);
         }
     }
     for (int i = 0; i <= CAT_COUNT; ++i) {
@@ -401,23 +475,24 @@ static void draw_region(int x0, int y0, int x1, int y1)
         if (!overlaps(x0, y0, x1, y1, actor)) {
             continue;
         }
-        for (int y = y0; y < y1; ++y) {
-            for (int x = x0; x < x1; ++x) {
-                int sx = x - actor->x;
-                int sy = y - actor->y;
+        for (int y = 0; y < fine_height; ++y) {
+            for (int x = 0; x < fine_width; ++x) {
+                int sx = fx0 + x - actor->x * PX;
+                int sy = fy0 + y - actor->y * PX;
                 uint16_t color;
-                if (sx < 0 || sx >= TILE || sy < 0 || sy >= TILE) {
+                if (sx < 0 || sx >= FINE_TILE || sy < 0 || sy >= FINE_TILE) {
                     continue;
                 }
                 bool drawn = i < CAT_COUNT ? cat_pixel(&cats[i], sx, sy, &color)
                                            : mouse_pixel(mouse_facing, sx, sy, &color);
                 if (drawn) {
-                    region[(y - y0) * width + (x - x0)] = color;
+                    region[y * fine_width + x] = color;
                 }
             }
         }
     }
-    ESP_ERROR_CHECK(cyd_draw_bitmap(x0, HUD_HEIGHT + y0, width, height, region));
+    ESP_ERROR_CHECK(cyd_draw_bitmap(MAZE_LEFT + fx0, HUD_PX + fy0, fine_width, fine_height,
+                                    region));
 }
 
 static void draw_tile(int col, int row)
@@ -459,35 +534,42 @@ static const uint16_t DIGITS[10] = {
     075557, 026227, 071747, 071717, 055711, 074717, 074757, 071111, 075757, 075717,
 };
 
+/* x and left in screen pixels from the maze's left edge, y in the bar. */
 static bool digit_pixel(const char *text, int left, int x, int y)
 {
-    int index = (x - left) / 8;
-    int cx = (x - left) % 8;
-    int cy = y - 3;
+    int index = (x - left) / (8 * PX);
+    int cx = (x - left) % (8 * PX);
+    int cy = y - 3 * PX;
     if (x < left || index >= (int)strlen(text)) {
         return false;
     }
-    return glyph_pixel(DIGITS[text[index] - '0'], 2, cx, cy);
+    return glyph_pixel(DIGITS[text[index] - '0'], 2 * PX, cx, cy);
 }
 
 #define LEVEL_ICON_X 136
 #define LEVEL_TEXT_X (LEVEL_ICON_X + TILE + 2)
 
-/* The score at the left, the level by a big cheese, the lives at the right. */
+/* The score bar's pixel at screen (x, y): the score at the left, the level by
+   a big cheese, the lives at the right, all lined up with the maze. */
 static uint16_t hud_pixel(int x, int y, const char *score_text, const char *level_text)
 {
-    if (digit_pixel(score_text, 4, x, y) || digit_pixel(level_text, LEVEL_TEXT_X, x, y)) {
+    int mx = x - MAZE_LEFT;
+    if (digit_pixel(score_text, 4 * PX, mx, y) ||
+        digit_pixel(level_text, LEVEL_TEXT_X * PX, mx, y)) {
         return COLOR_WHITE;
     }
-    if (x >= LEVEL_ICON_X && x < LEVEL_ICON_X + TILE) {
-        return big_cheese_pixel(x - LEVEL_ICON_X, y);
+    if (mx >= LEVEL_ICON_X * PX && mx < LEVEL_ICON_X * PX + FINE_TILE) {
+        return big_cheese_pixel(mx - LEVEL_ICON_X * PX, y);
     }
-    if (x >= STICK_X && x < STICK_X + TILE) {
-        return stick_pixel(x - STICK_X, y);
+    if (mx >= STICK_X * PX && mx < STICK_X * PX + FINE_TILE) {
+        return stick_pixel(mx - STICK_X * PX, y);
     }
-    int from_right = CYD_LCD_WIDTH - 1 - x;
-    int life = from_right / (TILE + 2);
-    int lx = TILE - 1 - from_right % (TILE + 2);
+    int from_right = MAZE_WIDTH * PX - 1 - mx;
+    if (from_right < 0) {
+        return COLOR_BLACK;
+    }
+    int life = from_right / (FINE_TILE + 2 * PX);
+    int lx = FINE_TILE - 1 - from_right % (FINE_TILE + 2 * PX);
     uint16_t color;
     if (life < lives && lx >= 0 && mouse_pixel(DIR_RIGHT, lx, y, &color)) {
         return color;
@@ -501,24 +583,25 @@ static void draw_hud(void)
     char level_text[12];
     snprintf(score_text, sizeof(score_text), "%u", (unsigned)(score % 1000000));
     snprintf(level_text, sizeof(level_text), "%d", level % 100);
-    for (int left = 0; left < CYD_LCD_WIDTH; left += REGION_SIZE) {
-        for (int y = 0; y < HUD_HEIGHT; ++y) {
-            for (int x = 0; x < REGION_SIZE; ++x) {
-                region[y * REGION_SIZE + x] = hud_pixel(left + x, y, score_text, level_text);
+    for (int left = 0; left < CYD_LCD_WIDTH; left += REGION_PX) {
+        int width = CYD_LCD_WIDTH - left < REGION_PX ? CYD_LCD_WIDTH - left : REGION_PX;
+        for (int y = 0; y < HUD_PX; ++y) {
+            for (int x = 0; x < width; ++x) {
+                region[y * width + x] = hud_pixel(left + x, y, score_text, level_text);
             }
         }
-        ESP_ERROR_CHECK(cyd_draw_bitmap(left, 0, REGION_SIZE, HUD_HEIGHT, region));
+        ESP_ERROR_CHECK(cyd_draw_bitmap(left, 0, width, HUD_PX, region));
     }
 }
 
 static void draw_stick(void)
 {
-    for (int y = 0; y < HUD_HEIGHT; ++y) {
-        for (int x = 0; x < TILE; ++x) {
-            region[y * TILE + x] = stick_pixel(x, y);
+    for (int y = 0; y < HUD_PX; ++y) {
+        for (int x = 0; x < FINE_TILE; ++x) {
+            region[y * FINE_TILE + x] = stick_pixel(x, y);
         }
     }
-    ESP_ERROR_CHECK(cyd_draw_bitmap(STICK_X, 0, TILE, HUD_HEIGHT, region));
+    ESP_ERROR_CHECK(cyd_draw_bitmap(MAZE_LEFT + STICK_X * PX, 0, FINE_TILE, HUD_PX, region));
 }
 
 static void draw_big_cheeses(void)
@@ -552,18 +635,18 @@ static void clear_screen(void)
 /* Draws the mouse, or a cat, on a black background anywhere on the screen. */
 static void draw_sprite(int x, int y, const cat_t *cat)
 {
-    for (int sy = 0; sy < TILE; ++sy) {
-        for (int sx = 0; sx < TILE; ++sx) {
+    for (int sy = 0; sy < FINE_TILE; ++sy) {
+        for (int sx = 0; sx < FINE_TILE; ++sx) {
             uint16_t color = COLOR_BLACK;
             if (cat != NULL) {
                 cat_pixel(cat, sx, sy, &color);
             } else {
                 mouse_pixel(DIR_RIGHT, sx, sy, &color);
             }
-            region[sy * TILE + sx] = color;
+            region[sy * FINE_TILE + sx] = color;
         }
     }
-    ESP_ERROR_CHECK(cyd_draw_bitmap(x, y, TILE, TILE, region));
+    ESP_ERROR_CHECK(cyd_draw_bitmap(x, y, FINE_TILE, FINE_TILE, region));
 }
 
 /* Waits for a finger to land and lift. */
@@ -597,8 +680,8 @@ static void show_title(void)
     text_row(8, CYD_COLOR_GRAY, high);
     text_row(9, CYD_COLOR_YELLOW, "tap to play");
     /* A mouse running from a cat, either side of the title. */
-    draw_sprite(12, CYD_FONT_HEIGHT + 4, NULL);
-    draw_sprite(CYD_LCD_WIDTH - 12 - TILE, CYD_FONT_HEIGHT + 4, &title_cat);
+    draw_sprite(12 * PX, CYD_FONT_HEIGHT + 4 * PX, NULL);
+    draw_sprite(CYD_LCD_WIDTH - 12 * PX - FINE_TILE, CYD_FONT_HEIGHT + 4 * PX, &title_cat);
     wait_for_tap();
 }
 
@@ -1121,6 +1204,7 @@ static void game_task(void *argument)
 
 void app_main(void)
 {
+    prepare_sprites();
     ESP_ERROR_CHECK(cyd_display_init());
     ESP_ERROR_CHECK(cyd_touch_init());
     cyd_gamepad_start();
