@@ -2,10 +2,12 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "cota_track.h"
 #include "cyd_display.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_timer.h"
@@ -24,16 +26,21 @@
    slows for corners.
 
    There is no frame buffer. Over the horizon, the screen is composed in
-   20-row strips, each sent with cyd_draw_bitmap; the road strips are redrawn
-   every frame, the sky only when the background scrolls or a message
-   changes. On the map, only small boxes around the cars are redrawn, from
-   1-bit masks of the road and its edges.
+   strips of STRIP rows, each sent with cyd_draw_bitmap; the road strips are
+   redrawn every frame, the sky only when the background scrolls or a
+   message changes. On the map, only small boxes around the cars are
+   redrawn, from 1-bit masks of the road and its edges.
+
+   The game is laid out for the CYD's 320x240 screen. On a bigger screen
+   everything is drawn GAME_SCALE times larger (twice on the 800x480 S3
+   board), and the extra width shows more scenery either side of the road
+   and more grass either side of the map.
 
    An unlabelled tap target in the top-right corner toggles Hamilton's
    auto-win. With it on (the default), Hamilton, Kimi and Verstappen always
    finish first, second and third; with it off they race at their own pace
-   and the result depends on the player's driving. A 2x2 dot in the corner
-   shows when it is off. */
+   and the result depends on the player's driving. A small dot in the
+   corner shows when it is off. */
 
 static const char *TAG = "f1_race";
 
@@ -41,28 +48,35 @@ static const char *TAG = "f1_race";
 
 #define SCREEN_W CYD_LCD_WIDTH
 #define SCREEN_H CYD_LCD_HEIGHT
-#define STRIP 20                /* rows per cyd_draw_bitmap call */
-#define HORIZON 100             /* the first road row */
+/* Sizes on screen are given in CYD pixels and scaled with PX(): 1 on the
+   CYD, so its build is unchanged, and 2 on the 800x480 S3 board. */
+#define GAME_SCALE (SCREEN_H / 240)
+#define PX(v) ((v) * GAME_SCALE)
+#define STRIP PX(20)            /* rows per cyd_draw_bitmap call */
+#define HORIZON PX(100)         /* the first road row */
 #define CENTER_X (SCREEN_W / 2)
 
 #define FRAME_MS 40 /* 25 frames per second at most */
 
 /* The world: x across the road (the road is -1..1), s along it. The camera
    sits CAMERA_HEIGHT above the road; a road row dy pixels below the
-   horizon (dy = 1 for the first) shows the road at depth DRAW_DISTANCE / dy. */
+   horizon (dy = 1 for the first) shows the road at depth DRAW_DISTANCE / dy.
+   On a bigger screen the first rows reach past FAR_DISTANCE, the CYD's
+   farthest, and are drawn in full fog. */
 #define CAMERA_HEIGHT 0.7f
-#define FOCAL 160.0f
+#define FOCAL (160.0f * GAME_SCALE)
 #define DRAW_DISTANCE (CAMERA_HEIGHT * FOCAL)
+#define FAR_DISTANCE (CAMERA_HEIGHT * 160.0f)
 #define ROAD_HALF 1.0f
 #define RUMBLE 0.14f
 #define LANE_LINE 0.03f
 #define SEGMENT 4.0f /* stripes alternate every segment */
 #define OFFSET_STEP 0.5f
-#define OFFSET_COUNT 226 /* DRAW_DISTANCE / OFFSET_STEP + 2 */
+#define OFFSET_COUNT 226 /* FAR_DISTANCE / OFFSET_STEP + 2 */
 #define FOG_START 8.0f
 
-/* The player's car is drawn this far ahead of the camera: 80 pixels wide,
-   twice the sprite's size. */
+/* The player's car is drawn this far ahead of the camera: PX(80) pixels
+   wide, twice the sprite's size on the CYD. */
 #define PLAYER_Z 0.9f
 #define CAR_WIDTH 0.45f
 #define CAR_LENGTH 1.0f
@@ -85,7 +99,7 @@ static const char *TAG = "f1_race";
 #define CENTRIFUGAL 0.34f /* the push at top speed, per unit of curvature */
 #define GRIP (CENTRIFUGAL / TOP_SPEED)
 #define DRIFT_MAX 1.0f
-#define PARALLAX 25.0f /* background pixels per unit of curvature and speed */
+#define PARALLAX (25.0f * GAME_SCALE) /* background pixels per unit of curvature and speed */
 #define GRASS_EDGE 2.2f
 #define RIVAL_STEER 0.9f   /* rivals' sideways speed, half the player's */
 #define PASS_REACTION 0.7f /* seconds a rival keeps to the side it picked */
@@ -99,16 +113,25 @@ static const char *TAG = "f1_race";
 #define HORIZON_SECONDS 5.0f /* then the top-down map */
 #define FINISH_SECONDS 2.5f
 
-/* The map: the whole circuit under a 20-row bar, the road drawn ROAD_PX
+/* The map: the whole circuit under a STRIP-row bar, the road drawn ROAD_PX
    either side of the centerline. A car's place across the road maps to the
-   same scale, so the edge of the drawn road is the edge of the track. */
+   same scale, so the edge of the drawn road is the edge of the track. The
+   track's positions are in CYD pixels; on a bigger screen they are scaled
+   up and the map is centered across the screen. Shapes on the map (cars,
+   the start line, labels) are drawn in CYD pixels, MAP_UNIT of one per
+   screen pixel. */
 #define MAP_TOP STRIP
-#define ROAD_PX 3
-#define MAP_BOX 7 /* half the side of the box redrawn around a car */
+#define MAP_X0 ((SCREEN_W - PX(320)) / 2)
+#define MAP_POSITION_SCALE (COTA_POSITION_SCALE / GAME_SCALE)
+#define MAP_UNIT (1.0f / GAME_SCALE)
+#define MAP_ROAD 3 /* CYD pixels */
+#define ROAD_PX PX(MAP_ROAD)
+#define MAP_BOX PX(7) /* half the side of the box redrawn around a car */
 /* The map's touch zones: gas and brake left of CENTER_X, split at
-   PEDAL_SPLIT_Y; steering right of it, split at STEER_SPLIT_X. */
-#define PEDAL_SPLIT_Y 130
-#define STEER_SPLIT_X 240
+   PEDAL_SPLIT_Y; steering right of it, split at STEER_SPLIT_X, halfway
+   across the right half. */
+#define PEDAL_SPLIT_Y PX(130)
+#define STEER_SPLIT_X ((CENTER_X + SCREEN_W) / 2)
 #define COAST_DRAG 3.0f /* slowing with neither pedal, units/s^2 */
 #define COLOR_MAP_GUIDE RGB565(0, 95, 0)
 #define COLOR_MAP_GRASS RGB565(0, 130, 0)
@@ -126,10 +149,10 @@ static const char *TAG = "f1_race";
 #define RIG_SQUEEZE 0.75f
 
 /* The secret corner. */
-#define SECRET_SIZE 40
-#define INDICATOR_X 316
-#define INDICATOR_Y 1
-#define INDICATOR_SIZE 2
+#define SECRET_SIZE PX(40)
+#define INDICATOR_X (SCREEN_W - PX(4))
+#define INDICATOR_Y PX(1)
+#define INDICATOR_SIZE PX(2)
 
 /* Touch readings drop out now and then while a finger is held. */
 #define RELEASE_FRAMES 3
@@ -199,6 +222,18 @@ static const char CAR_SPRITE[SPRITE_H][SPRITE_W + 1] = {
 };
 #define NUMBER_ROW 9
 
+/* The sprite as drawn: on a bigger screen it is first smoothed up with
+   Scale2x, ART_DOUBLINGS times, so the cars are drawn from 160x80 art (the
+   player's car's size there) rather than blown up into blocks. On the CYD
+   it is drawn as is. */
+#if GAME_SCALE > 1
+#define ART_DOUBLINGS 2
+#else
+#define ART_DOUBLINGS 0
+#endif
+#define ART_W (SPRITE_W << ART_DOUBLINGS)
+#define ART_H (SPRITE_H << ART_DOUBLINGS)
+
 enum { HAMILTON, KIMI, VERSTAPPEN, PLAYER, CAR_COUNT };
 
 typedef struct {
@@ -215,6 +250,7 @@ typedef struct {
     float pass_timer;
     float finish_time; /* seconds, or negative before the finish */
     uint16_t pixels[SPRITE_H * SPRITE_W];
+    const uint16_t *art; /* ART_W x ART_H, as drawn */
 } car_t;
 
 static car_t cars[CAR_COUNT] = {
@@ -267,13 +303,29 @@ static bool sky_dirty = true;
 
 static uint16_t strip[STRIP * SCREEN_W];
 static uint16_t sky_colors[HORIZON];
-static uint8_t far_heights[512];
-static uint8_t near_heights[512];
+/* The mountains and hills, repeating every BG_PERIOD pixels, and where
+   they start in each column of the screen this frame. */
+#define BG_PERIOD PX(512)
+static uint8_t far_heights[BG_PERIOD];
+static uint8_t near_heights[BG_PERIOD];
+static int16_t hill_tops[SCREEN_W];
+static int16_t peak_tops[SCREEN_W];
+static int16_t snow_bottoms[SCREEN_W];
+
+/* What each road row shows, fixed by its height below the horizon. */
+typedef struct {
+    float z;     /* depth */
+    float scale; /* pixels per road unit across */
+    float index; /* z in OFFSET_STEPs */
+    int fog;     /* 0 to 230, toward COLOR_HAZE */
+} road_row_t;
+
+static road_row_t road_rows[SCREEN_H - HORIZON];
 
 typedef struct {
     int x, y, w, h; /* screen rectangle, top-left */
     float z;
-    const uint16_t *pixels;
+    const uint16_t *pixels; /* ART_W x ART_H */
 } sprite_t;
 
 static sprite_t sprites[CAR_COUNT];
@@ -313,6 +365,73 @@ static float lap_position(float s)
 
 /* ---- Setup ---- */
 
+#if ART_DOUBLINGS > 0
+/* Scale2x (EPX): each pixel becomes four, each corner taking the color of
+   the two neighbors that meet there when they match, so diagonal edges come
+   out smooth rather than in steps. */
+static void scale2x(const uint16_t *in, int w, int h, uint16_t *out)
+{
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            uint16_t p = in[y * w + x];
+            uint16_t a = y > 0 ? in[(y - 1) * w + x] : p;     /* above */
+            uint16_t b = x < w - 1 ? in[y * w + x + 1] : p; /* right */
+            uint16_t c = x > 0 ? in[y * w + x - 1] : p;     /* left */
+            uint16_t d = y < h - 1 ? in[(y + 1) * w + x] : p; /* below */
+            uint16_t *o = out + (2 * y) * (2 * w) + 2 * x;
+            o[0] = c == a && c != d && a != b ? a : p;
+            o[1] = a == b && a != c && b != d ? b : p;
+            o[2 * w] = d == c && d != b && c != a ? c : p;
+            o[2 * w + 1] = b == d && b != a && d != c ? d : p;
+        }
+    }
+}
+
+/* The sprite smoothed up to ART_W x ART_H, in PSRAM when there is some. */
+static const uint16_t *smooth_art(const uint16_t *pixels)
+{
+    static uint16_t between[ART_W * ART_H / 4];
+    size_t size = ART_W * ART_H * sizeof(uint16_t);
+    uint16_t *art = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (art == NULL) {
+        art = malloc(size);
+    }
+    ESP_ERROR_CHECK(art != NULL ? ESP_OK : ESP_ERR_NO_MEM);
+    /* Doubling alternates between the two buffers, ending in art. */
+    const uint16_t *from = pixels;
+    int w = SPRITE_W;
+    int h = SPRITE_H;
+    for (int i = 0; i < ART_DOUBLINGS; ++i) {
+        uint16_t *to = (ART_DOUBLINGS - 1 - i) % 2 == 0 ? art : between;
+        scale2x(from, w, h, to);
+        from = to;
+        w *= 2;
+        h *= 2;
+    }
+    return art;
+}
+#endif
+
+/* The car's number on its engine cover: one digit centered, or two either
+   side of the middle. */
+static void draw_number(car_t *car)
+{
+    char digits[4];
+    snprintf(digits, sizeof(digits), "%d", car->number % 100);
+    int count = (int)strlen(digits);
+    for (int d = 0; d < count; ++d) {
+        int left = count == 1 ? 18 : 16 + d * 5;
+        const uint8_t *glyph = FONT[(int)digits[d]];
+        for (int gy = 0; gy < 5; ++gy) {
+            for (int gx = 0; gx < 3; ++gx) {
+                if (glyph[gy] & (4 >> gx)) {
+                    car->pixels[(NUMBER_ROW + gy) * SPRITE_W + left + gx] = car->numeral;
+                }
+            }
+        }
+    }
+}
+
 static void build_sprites(void)
 {
     for (int i = 0; i < CAR_COUNT; ++i) {
@@ -332,24 +451,14 @@ static void build_sprites(void)
                 car->pixels[y * SPRITE_W + x] = color;
             }
         }
-        if (car->number == 0) {
-            continue;
+        if (car->number != 0) {
+            draw_number(car);
         }
-        /* One digit centered, or two either side of the middle. */
-        char digits[4];
-        snprintf(digits, sizeof(digits), "%d", car->number % 100);
-        int count = (int)strlen(digits);
-        for (int d = 0; d < count; ++d) {
-            int left = count == 1 ? 18 : 16 + d * 5;
-            const uint8_t *glyph = FONT[(int)digits[d]];
-            for (int gy = 0; gy < 5; ++gy) {
-                for (int gx = 0; gx < 3; ++gx) {
-                    if (glyph[gy] & (4 >> gx)) {
-                        car->pixels[(NUMBER_ROW + gy) * SPRITE_W + left + gx] = car->numeral;
-                    }
-                }
-            }
-        }
+#if ART_DOUBLINGS > 0
+        car->art = smooth_art(car->pixels);
+#else
+        car->art = car->pixels;
+#endif
     }
 }
 
@@ -358,11 +467,26 @@ static void build_scenery(void)
     for (int y = 0; y < HORIZON; ++y) {
         sky_colors[y] = blend(COLOR_SKY_TOP, COLOR_HAZE, y * 256 / HORIZON);
     }
-    const float tau = 6.2831853f / 512;
-    for (int x = 0; x < 512; ++x) {
-        far_heights[x] = (uint8_t)(22 + 10 * sinf(tau * 2 * x) + 7 * sinf(tau * 5 * x + 1.3f) +
-                                   3 * sinf(tau * 11 * x + 0.4f));
-        near_heights[x] = (uint8_t)(8 + 4 * sinf(tau * 3 * x + 2) + 3 * sinf(tau * 7 * x));
+    const float tau = 6.2831853f / BG_PERIOD;
+    for (int x = 0; x < BG_PERIOD; ++x) {
+        far_heights[x] =
+            (uint8_t)(GAME_SCALE * (22 + 10 * sinf(tau * 2 * x) + 7 * sinf(tau * 5 * x + 1.3f) +
+                                    3 * sinf(tau * 11 * x + 0.4f)));
+        near_heights[x] =
+            (uint8_t)(GAME_SCALE * (8 + 4 * sinf(tau * 3 * x + 2) + 3 * sinf(tau * 7 * x)));
+    }
+    /* Each road row's depth, scale and fog. Rows past FAR_DISTANCE (only on
+       a bigger screen) are fogged as at FAR_DISTANCE. */
+    for (int k = 0; k < SCREEN_H - HORIZON; ++k) {
+        road_row_t *row = &road_rows[k];
+        int dy = k + 1;
+        row->z = DRAW_DISTANCE / dy;
+        row->scale = FOCAL / row->z;
+        row->index = row->z / OFFSET_STEP;
+        row->fog = row->z <= FOG_START
+                       ? 0
+                       : (int)(230 * (fminf(row->z, FAR_DISTANCE) - FOG_START) /
+                               (FAR_DISTANCE - FOG_START));
     }
 }
 
@@ -399,10 +523,10 @@ static void build_track(void)
         }
     }
     for (int i = 0; i < COTA_LENGTH; ++i) {
-        int x = (int)lroundf(COTA_X[i] / COTA_POSITION_SCALE);
-        int y = (int)lroundf(COTA_Y[i] / COTA_POSITION_SCALE);
+        int x = (int)lroundf(COTA_X[i] / MAP_POSITION_SCALE) + MAP_X0;
+        int y = (int)lroundf(COTA_Y[i] / MAP_POSITION_SCALE);
         stamp_disc(road_mask, x, y, ROAD_PX);
-        stamp_disc(edge_mask, x, y, ROAD_PX + 1);
+        stamp_disc(edge_mask, x, y, ROAD_PX + PX(1));
     }
     ESP_LOGI(TAG, "COTA: %d units of %.2f m, grid %d units back", COTA_LENGTH,
              COTA_METERS_PER_UNIT, COTA_GRID_BACK);
@@ -528,11 +652,10 @@ static void strip_sprites(int y0)
         int left = sprite->x > 0 ? sprite->x : 0;
         int right = sprite->x + sprite->w < SCREEN_W ? sprite->x + sprite->w : SCREEN_W;
         for (int y = top; y < bottom; ++y) {
-            const uint16_t *source =
-                sprite->pixels + (y - sprite->y) * SPRITE_H / sprite->h * SPRITE_W;
+            const uint16_t *source = sprite->pixels + (y - sprite->y) * ART_H / sprite->h * ART_W;
             uint16_t *row = strip + (y - y0) * SCREEN_W;
             for (int x = left; x < right; ++x) {
-                uint16_t color = source[(x - sprite->x) * SPRITE_W / sprite->w];
+                uint16_t color = source[(x - sprite->x) * ART_W / sprite->w];
                 if (color != TRANSPARENT) {
                     row[x] = color;
                 }
@@ -562,26 +685,32 @@ static int car_place(const car_t *car)
 static void strip_hud(bool on_map)
 {
     char text[16];
+    const int text_scale = PX(2);
+    const int text_y = PX(5);
     snprintf(text, sizeof(text), "P%d/%d", car_place(&cars[PLAYER]), CAR_COUNT);
-    strip_label(0, 6, 5, 2, CYD_COLOR_WHITE, text);
+    strip_label(0, PX(6), text_y, text_scale, CYD_COLOR_WHITE, text);
     int kmh = (int)(cars[PLAYER].v * KMH_PER_SPEED + 0.5f);
     snprintf(text, sizeof(text), "%d KMH", kmh % 1000);
-    strip_label(0, SCREEN_W - 10 - text_width(text, 2), 5, 2, CYD_COLOR_WHITE, text);
+    strip_label(0, SCREEN_W - PX(10) - text_width(text, text_scale), text_y, text_scale,
+                CYD_COLOR_WHITE, text);
     if (on_map && shown_pedal != PEDAL_NONE) {
         bool gas = shown_pedal == PEDAL_GAS;
-        strip_label(0, 44, 5, 2, gas ? COLOR_GREEN : CYD_COLOR_RED, gas ? "GAS" : "BRAKE");
+        strip_label(0, PX(44), text_y, text_scale, gas ? COLOR_GREEN : CYD_COLOR_RED,
+                    gas ? "GAS" : "BRAKE");
     }
     if (on_map && message != NULL) {
-        strip_label(0, (SCREEN_W - text_width(message, 2)) / 2, 5, 2, message_color, message);
+        strip_label(0, (SCREEN_W - text_width(message, text_scale)) / 2, text_y, text_scale,
+                    message_color, message);
     } else {
         /* A mark for each car; the player's on top. */
-        const int bar_x = 100, bar_w = 120;
-        strip_rect(0, bar_x + 1, 10, bar_w, 2, COLOR_SHADOW);
-        strip_rect(0, bar_x, 9, bar_w, 2, RGB565(230, 230, 230));
+        const int bar_w = PX(120), bar_x = CENTER_X - bar_w / 2;
+        strip_rect(0, bar_x + PX(1), PX(10), bar_w, PX(2), COLOR_SHADOW);
+        strip_rect(0, bar_x, PX(9), bar_w, PX(2), RGB565(230, 230, 230));
         for (int i = 0; i < CAR_COUNT; ++i) {
             float progress = fminf(1, fmaxf(0, cars[i].s / track_length));
-            int x = bar_x + (int)(progress * (bar_w - 3));
-            strip_rect(0, x, 6, 3, 8, i == PLAYER ? CYD_COLOR_YELLOW : cars[i].label);
+            int x = bar_x + (int)(progress * (bar_w - PX(3)));
+            strip_rect(0, x, PX(6), PX(3), PX(8),
+                       i == PLAYER ? CYD_COLOR_YELLOW : cars[i].label);
         }
     }
     if (!rigged) {
@@ -589,28 +718,38 @@ static void strip_hud(bool on_map)
     }
 }
 
+/* Where the hills, the mountains and their snow start in each column, for
+   the background scrolled to far and near. */
+static void place_scenery(int far, int near)
+{
+    for (int x = 0; x < SCREEN_W; ++x) {
+        int peak = HORIZON - far_heights[(x + far) & (BG_PERIOD - 1)];
+        hill_tops[x] = (int16_t)(HORIZON - near_heights[(x + near) & (BG_PERIOD - 1)]);
+        peak_tops[x] = (int16_t)peak;
+        snow_bottoms[x] = (int16_t)(peak < HORIZON - PX(30) ? peak + PX(3) : peak);
+    }
+}
+
 static void draw_sky_strip(int y0)
 {
-    int far = (int)floorf(bg_scroll * 0.5f);
-    int near = (int)floorf(bg_scroll);
     for (int r = 0; r < STRIP; ++r) {
         int y = y0 + r;
         uint16_t *row = strip + r * SCREEN_W;
         uint16_t sky = sky_colors[y];
         for (int x = 0; x < SCREEN_W; ++x) {
             uint16_t color = sky;
-            int peak = HORIZON - far_heights[(x + far) & 511];
-            if (y >= HORIZON - near_heights[(x + near) & 511]) {
+            if (y >= hill_tops[x]) {
                 color = COLOR_HILLS;
-            } else if (y >= peak) {
-                color = y < peak + 3 && peak < HORIZON - 30 ? COLOR_SNOW : COLOR_MOUNTAIN;
+            } else if (y >= peak_tops[x]) {
+                color = y < snow_bottoms[x] ? COLOR_SNOW : COLOR_MOUNTAIN;
             }
             row[x] = color;
         }
     }
 
     if (message != NULL) {
-        strip_label(y0, (SCREEN_W - text_width(message, 6)) / 2, 30, 6, message_color, message);
+        strip_label(y0, (SCREEN_W - text_width(message, PX(6))) / 2, PX(30), PX(6),
+                    message_color, message);
     }
     if (y0 == 0) {
         strip_hud(false);
@@ -629,11 +768,43 @@ static void strip_mirror(int y0)
         if (behind < PLAYER_Z - 0.35f || behind > MIRROR_RANGE) {
             continue; /* on screen, or far back */
         }
-        int w = behind < 4 ? 24 : 14;
+        int w = behind < 4 ? PX(24) : PX(14);
         int x = CENTER_X + (int)((car->x - player->x) * FOCAL / PLAYER_Z) - w / 2;
-        x = x < 2 ? 2 : x > SCREEN_W - 2 - w ? SCREEN_W - 2 - w : x;
-        strip_rect(y0, x - 1, SCREEN_H - 7, w + 2, 6, COLOR_SHADOW);
-        strip_rect(y0, x, SCREEN_H - 6, w, 4, car->label);
+        x = x < PX(2) ? PX(2) : x > SCREEN_W - PX(2) - w ? SCREEN_W - PX(2) - w : x;
+        strip_rect(y0, x - PX(1), SCREEN_H - PX(7), w + PX(2), PX(6), COLOR_SHADOW);
+        strip_rect(y0, x, SCREEN_H - PX(6), w, PX(4), car->label);
+    }
+}
+
+/* Which tenth of the road's width (0 at the left edge) pixel x is in. */
+static int checker_cell(int x, float center, float half)
+{
+    return (int)floorf(((float)x - center) / half * 5 + 5);
+}
+
+/* The start line's chequers across [left, right) of a row: each cell is
+   filled as a span, its end found from the cell's width and then stepped to
+   the exact pixel, so it comes out as if checker_cell were taken for every
+   pixel. */
+static void fill_checkers(uint16_t *row, int left, int right, float center, float half, int band,
+                          int fog)
+{
+    const uint16_t colors[2] = {blend(CYD_COLOR_BLACK, COLOR_HAZE, fog),
+                                blend(CYD_COLOR_WHITE, COLOR_HAZE, fog)};
+    for (int x = left; x < right;) {
+        int cell = checker_cell(x, center, half);
+        float edge = center + (cell - 4) * half / 5; /* where cell + 1 starts */
+        int end = edge >= right ? right : edge <= x + 1 ? x + 1 : (int)ceilf(edge);
+        while (end > x + 1 && checker_cell(end - 1, center, half) > cell) {
+            --end;
+        }
+        while (end < right && checker_cell(end, center, half) == cell) {
+            ++end;
+        }
+        uint16_t color = colors[(cell + band) & 1];
+        for (; x < end; ++x) {
+            row[x] = color;
+        }
     }
 }
 
@@ -642,10 +813,11 @@ static void draw_road_strip(int y0)
     float player_x = cars[PLAYER].x;
     for (int r = 0; r < STRIP; ++r) {
         uint16_t *row = strip + r * SCREEN_W;
-        int dy = y0 + r - HORIZON + 1;
-        float z = DRAW_DISTANCE / dy;
-        float scale = FOCAL / z;
-        float index = z / OFFSET_STEP;
+        const road_row_t *road_row = &road_rows[y0 + r - HORIZON];
+        float z = road_row->z;
+        float scale = road_row->scale;
+        float index = road_row->index;
+        int fog = road_row->fog;
         int i = (int)index;
         float offset = i + 1 < OFFSET_COUNT
                            ? offsets[i] + (offsets[i + 1] - offsets[i]) * (index - i)
@@ -655,11 +827,12 @@ static void draw_road_strip(int y0)
         float rumble = RUMBLE * scale;
         float s = camera_s + z;
         bool light = ((int)floorf(s / SEGMENT)) & 1;
-        int fog = z <= FOG_START ? 0
-                                 : (int)(230 * (z - FOG_START) / (DRAW_DISTANCE - FOG_START));
 
-        fill_span(row, 0, SCREEN_W,
-                  blend(light ? COLOR_GRASS_LIGHT : COLOR_GRASS_DARK, COLOR_HAZE, fog));
+        /* Grass either side; the rumble strips and the road between them
+           cover the rest of the row. */
+        uint16_t grass = blend(light ? COLOR_GRASS_LIGHT : COLOR_GRASS_DARK, COLOR_HAZE, fog);
+        fill_span(row, 0, center - half - rumble, grass);
+        fill_span(row, center + half + rumble, SCREEN_W, grass);
         uint16_t rumble_color =
             blend(light ? COLOR_RUMBLE_LIGHT : COLOR_RUMBLE_DARK, COLOR_HAZE, fog);
         fill_span(row, center - half - rumble, center - half, rumble_color);
@@ -671,11 +844,7 @@ static void draw_road_strip(int y0)
             int right = (int)floorf(center + half + 0.5f);
             left = left < 0 ? 0 : left;
             right = right > SCREEN_W ? SCREEN_W : right;
-            int band = (int)floorf(s * 1.5f);
-            for (int x = left; x < right; ++x) {
-                int cell = (int)floorf(((float)x - center) / half * 5 + 5) + band;
-                row[x] = blend(cell & 1 ? CYD_COLOR_WHITE : CYD_COLOR_BLACK, COLOR_HAZE, fog);
-            }
+            fill_checkers(row, left, right, center, half, (int)floorf(s * 1.5f), fog);
             continue;
         }
         fill_span(row, center - half, center + half,
@@ -718,7 +887,7 @@ static void place_sprites(void)
     for (int i = 0; i < CAR_COUNT; ++i) {
         const car_t *car = &cars[i];
         float z = car->s - camera_s;
-        if (z < 0.35f || z > DRAW_DISTANCE) {
+        if (z < 0.35f || z > FAR_DISTANCE) {
             continue;
         }
         float scale = FOCAL / z;
@@ -738,10 +907,10 @@ static void place_sprites(void)
                                 0.5f);
         sprite->y = HORIZON - 1 + (int)(DRAW_DISTANCE / z + 0.5f) - sprite->h + 1;
         if (i == PLAYER && fabsf(car->x) > OFFROAD_EDGE && car->v > 1) {
-            sprite->y -= (frame_count & 1) * 2; /* bumping over the grass */
+            sprite->y -= (frame_count & 1) * PX(2); /* bumping over the grass */
         }
         sprite->z = z;
-        sprite->pixels = car->pixels;
+        sprite->pixels = car->art;
     }
     /* Far to near. */
     for (int i = 1; i < sprite_count; ++i) {
@@ -774,8 +943,8 @@ static void place_map_cars(void)
         int k = track_index(car->s);
         int next = (k + 1) % COTA_LENGTH;
         float f = car->s - floorf(car->s);
-        float cx = (COTA_X[k] + (COTA_X[next] - COTA_X[k]) * f) / COTA_POSITION_SCALE;
-        float cy = (COTA_Y[k] + (COTA_Y[next] - COTA_Y[k]) * f) / COTA_POSITION_SCALE;
+        float cx = (COTA_X[k] + (COTA_X[next] - COTA_X[k]) * f) / MAP_POSITION_SCALE + MAP_X0;
+        float cy = (COTA_Y[k] + (COTA_Y[next] - COTA_Y[k]) * f) / MAP_POSITION_SCALE;
         float heading = COTA_HEADING[k] / COTA_HEADING_SCALE;
         map_car_t *m = &map_cars[i];
         m->cos = cosf(heading);
@@ -788,12 +957,15 @@ static void place_map_cars(void)
     }
 }
 
-/* A car seen from above: a 7x4 body pointing along its heading, with a
-   narrower nose, outlined. */
+/* A car seen from above: a 7x4 body (in CYD pixels) pointing along its
+   heading, with a narrower nose, outlined. */
 static bool map_car_pixel(const map_car_t *m, int x, int y, uint16_t *color)
 {
-    float dx = x + 0.5f - m->x;
-    float dy = y + 0.5f - m->y;
+    float dx = (x + 0.5f - m->x) * MAP_UNIT;
+    float dy = (y + 0.5f - m->y) * MAP_UNIT;
+    if (fabsf(dx) > 5.5f || fabsf(dy) > 5.5f) {
+        return false; /* well clear of the car's corners, 5.41 away */
+    }
     float along = dx * m->cos + dy * m->sin;
     float across = -dx * m->sin + dy * m->cos;
     if (fabsf(along) > 4.5f || fabsf(across) > 3.0f) {
@@ -807,15 +979,15 @@ static bool map_car_pixel(const map_car_t *m, int x, int y, uint16_t *color)
 /* The chequered start line across the road at the first table entry. */
 static bool finish_pixel(int x, int y, uint16_t *color)
 {
-    float dx = x + 0.5f - COTA_X[0] / COTA_POSITION_SCALE;
-    float dy = y + 0.5f - COTA_Y[0] / COTA_POSITION_SCALE;
+    float dx = (x + 0.5f - MAP_X0) * MAP_UNIT - COTA_X[0] / COTA_POSITION_SCALE;
+    float dy = (y + 0.5f) * MAP_UNIT - COTA_Y[0] / COTA_POSITION_SCALE;
     if (fabsf(dx) > 6 || fabsf(dy) > 6) {
         return false;
     }
     float heading = COTA_HEADING[0] / COTA_HEADING_SCALE;
     float along = dx * cosf(heading) + dy * sinf(heading);
     float across = -dx * sinf(heading) + dy * cosf(heading);
-    if (fabsf(along) >= 1.5f || fabsf(across) >= ROAD_PX + 0.5f) {
+    if (fabsf(along) >= 1.5f || fabsf(across) >= MAP_ROAD + 0.5f) {
         return false;
     }
     *color = ((int)floorf(along + 2) + (int)floorf(across + 8)) & 1 ? CYD_COLOR_WHITE
@@ -824,7 +996,8 @@ static bool finish_pixel(int x, int y, uint16_t *color)
 }
 
 /* Labels for the touch zones, on grass in each zone (the spots were found
-   against the road mask, keeping clear of the secret corner). */
+   against the road mask, keeping clear of the secret corner), in CYD map
+   pixels. */
 typedef struct {
     const char *text;
     int x, y, scale;
@@ -834,32 +1007,43 @@ static const map_label_t MAP_LABELS[] = {
     {"GAS", 78, 54, 2}, {"BRAKE", 60, 179, 2}, {"<", 194, 90, 4}, {">", 273, 129, 4},
 };
 
-static bool label_glyph(const map_label_t *label, int dx, int dy)
+static bool label_glyph(const char *text, int scale, int dx, int dy)
 {
-    int advance = 4 * label->scale;
-    if (dx < 0 || dy < 0 || dy >= 5 * label->scale ||
-        dx / advance >= (int)strlen(label->text)) {
+    int advance = 4 * scale;
+    if (dx < 0 || dy < 0 || dy >= 5 * scale || dx / advance >= (int)strlen(text)) {
         return false;
     }
-    int gx = dx % advance / label->scale;
-    int gy = dy / label->scale;
-    return gx < 3 && (FONT[label->text[dx / advance] & 0x7F][gy] & (4 >> gx));
+    int gx = dx % advance / scale;
+    int gy = dy / scale;
+    return gx < 3 && (FONT[text[dx / advance] & 0x7F][gy] & (4 >> gx));
 }
 
 static bool label_pixel(int x, int y, uint16_t *color)
 {
     for (size_t i = 0; i < sizeof(MAP_LABELS) / sizeof(MAP_LABELS[0]); ++i) {
         const map_label_t *label = &MAP_LABELS[i];
-        if (label_glyph(label, x - label->x, y - label->y)) {
+        int scale = PX(label->scale);
+        int dx = x - (MAP_X0 + PX(label->x));
+        int dy = y - PX(label->y);
+        if (dy < 0 || dy >= 5 * scale + PX(1)) {
+            continue; /* above or below the label and its shadow */
+        }
+        if (label_glyph(label->text, scale, dx, dy)) {
             *color = CYD_COLOR_WHITE;
             return true;
         }
-        if (label_glyph(label, x - label->x - 1, y - label->y - 1)) {
+        if (label_glyph(label->text, scale, dx - PX(1), dy - PX(1))) {
             *color = COLOR_SHADOW;
             return true;
         }
     }
     return false;
+}
+
+/* Whether v is on the line of the zone borders at at, GAME_SCALE wide. */
+static bool on_border(int v, int at)
+{
+    return v >= at && v < at + GAME_SCALE;
 }
 
 static uint16_t map_pixel(int x, int y)
@@ -883,9 +1067,9 @@ static uint16_t map_pixel(int x, int y)
         return color;
     }
     /* Dotted borders between the touch zones, on the grass only. */
-    bool border = x == CENTER_X || (x > CENTER_X && x == STEER_SPLIT_X) ||
-                  (x < CENTER_X && y == PEDAL_SPLIT_Y);
-    return border && ((x + y) & 2) ? COLOR_MAP_GUIDE : COLOR_MAP_GRASS;
+    bool border = on_border(x, CENTER_X) || (x > CENTER_X && on_border(x, STEER_SPLIT_X)) ||
+                  (x < CENTER_X && on_border(y, PEDAL_SPLIT_Y));
+    return border && ((x / GAME_SCALE + y / GAME_SCALE) & 2) ? COLOR_MAP_GUIDE : COLOR_MAP_GRASS;
 }
 
 static void draw_map_hud(void)
@@ -964,6 +1148,7 @@ static void render(void)
     place_sprites();
     int far = (int)floorf(bg_scroll * 0.5f);
     int near = (int)floorf(bg_scroll);
+    place_scenery(far, near);
     draw_sky_strip(0);
     if (sky_dirty || far != drawn_far || near != drawn_near || message != drawn_message) {
         for (int y0 = STRIP; y0 < HORIZON; y0 += STRIP) {
@@ -1267,15 +1452,21 @@ static void centered_row(int row, uint16_t color, const char *text)
     cyd_text_row(row, color, CYD_COLOR_BLACK, line);
 }
 
-/* A red italic F1 mark for the splash screen, drawn from shapes. */
-#define LOGO_W 150
+/* A red italic F1 mark for the splash screen, drawn from shapes. The splash
+   is laid out around the text rows, so the logo and the car there grow
+   with the board's text (5/3 the CYD's on the S3). */
+#define SPLASH_SCALE (CYD_FONT_SCALE / 3.0f)
+#define LOGO_W 150 /* before SPLASH_SCALE */
 #define LOGO_H 40
-#define LOGO_X ((SCREEN_W - LOGO_W) / 2)
-#define LOGO_Y 6
+#define LOGO_DRAWN_W ((int)(LOGO_W * SPLASH_SCALE))
+#define LOGO_DRAWN_H ((int)(LOGO_H * SPLASH_SCALE))
+#define LOGO_X ((SCREEN_W - LOGO_DRAWN_W) / 2)
+#define LOGO_Y (6 * CYD_FONT_SCALE / 3)
 #define LOGO_SLANT 0.45f
 #define COLOR_LOGO RGB565(225, 6, 0)
 
-static bool logo_pixel(int x, int y)
+/* Whether the logo covers (x, y), in unscaled logo pixels. */
+static bool logo_pixel(float x, float y)
 {
     if (x < 0 || x >= LOGO_W || y < 0 || y >= LOGO_H) {
         return false;
@@ -1295,22 +1486,26 @@ static bool logo_pixel(int x, int y)
     return stem || top_bar || middle_bar || one;
 }
 
+/* Each screen pixel takes the logo at its center; on the CYD, unscaled,
+   that is exactly the pixel's own (x, y). */
 static void draw_logo(void)
 {
-    for (int y0 = LOGO_Y; y0 < LOGO_Y + LOGO_H; y0 += STRIP) {
+    for (int y0 = LOGO_Y; y0 < LOGO_Y + LOGO_DRAWN_H; y0 += STRIP) {
         for (int r = 0; r < STRIP; ++r) {
+            float ly = (y0 + r - LOGO_Y + 0.5f) / SPLASH_SCALE - 0.5f;
             for (int x = 0; x < SCREEN_W; ++x) {
-                strip[r * SCREEN_W + x] =
-                    logo_pixel(x - LOGO_X, y0 + r - LOGO_Y) ? COLOR_LOGO : CYD_COLOR_BLACK;
+                float lx = (x - LOGO_X + 0.5f) / SPLASH_SCALE - 0.5f;
+                strip[r * SCREEN_W + x] = logo_pixel(lx, ly) ? COLOR_LOGO : CYD_COLOR_BLACK;
             }
         }
         cyd_draw_bitmap(0, y0, SCREEN_W, STRIP, strip);
     }
 }
 
+/* The START button: seven text cells, centered (columns 5 to 11 on the CYD). */
 #define START_ROW 9
-#define START_FIRST 5
-#define START_LAST 11
+#define START_FIRST ((CYD_TEXT_COLUMNS - 7) / 2)
+#define START_LAST (START_FIRST + 6)
 
 static void show_splash(void)
 {
@@ -1318,11 +1513,14 @@ static void show_splash(void)
     draw_logo();
     centered_row(2, CYD_COLOR_WHITE, "COTA GRAND PRIX");
 
-    /* The player's car at three times its size. */
-    sprites[0] = (sprite_t){.x = (SCREEN_W - 3 * SPRITE_W) / 2, .y = 80, .w = 3 * SPRITE_W,
-                            .h = 3 * SPRITE_H, .pixels = cars[PLAYER].pixels};
+    /* The player's car at three times its size on the CYD, five on the S3. */
+    const int car_w = SPRITE_W * CYD_FONT_SCALE;
+    const int car_h = SPRITE_H * CYD_FONT_SCALE;
+    const int car_y = 80 * CYD_FONT_SCALE / 3;
+    sprites[0] = (sprite_t){.x = (SCREEN_W - car_w) / 2, .y = car_y, .w = car_w, .h = car_h,
+                            .pixels = cars[PLAYER].art};
     sprite_count = 1;
-    for (int y0 = 80; y0 < 80 + 3 * SPRITE_H; y0 += STRIP) {
+    for (int y0 = car_y; y0 < car_y + car_h; y0 += STRIP) {
         memset(strip, 0, sizeof(strip));
         strip_sprites(y0);
         cyd_draw_bitmap(0, y0, SCREEN_W, STRIP, strip);
@@ -1351,7 +1549,7 @@ static void show_splash(void)
             draw_indicator();
             continue;
         }
-        const int slop = 12;
+        const int slop = CYD_FONT_HEIGHT / 2;
         if (tap.x >= START_FIRST * CYD_FONT_WIDTH - slop &&
             tap.x < (START_LAST + 1) * CYD_FONT_WIDTH + slop &&
             tap.y >= START_ROW * CYD_FONT_HEIGHT - slop) {
@@ -1463,6 +1661,12 @@ void app_main(void)
 {
     ESP_ERROR_CHECK(cyd_display_init());
     ESP_ERROR_CHECK(cyd_touch_init());
+#if CONFIG_IDF_TARGET_ESP32S3
+    /* Off core 0, where the RGB panel's interrupt copies the frame buffer
+       out of PSRAM to the panel 39 times a second. */
+    BaseType_t result = xTaskCreatePinnedToCore(game_task, "game", 6144, NULL, 5, NULL, 1);
+#else
     BaseType_t result = xTaskCreate(game_task, "game", 6144, NULL, 5, NULL);
+#endif
     ESP_ERROR_CHECK(result == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
 }
