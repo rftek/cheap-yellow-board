@@ -2,22 +2,7 @@
 
 PlatformIO/ESP-IDF application for the 320x240 display and resistive touchscreen on the ESP32 Cheap Yellow Display (CYD), following the [board documentation](https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display).
 
-Each application lives on its own branch of this repository:
-
-| Branch | Application |
-|---|---|
-| `bootloader` | Launcher: a boot menu with two image slots |
-| `wifi_checker` | This Wi-Fi and Bluetooth LE scanner |
-| `birdnet_viewer` | BirdNET bird photo viewer |
-| `screen_check` | Screen color test |
-| `touchscreen_cal` | Touchscreen calibration |
-| `stopwatch` | LVGL stopwatch |
-| `gear_roll` | LVGL gear demo |
-| `Datalogger` | Voltage logger on GPIO35 |
-| `CatMouse` | PAC-MAN-style maze game |
-| `bluetooth_diag` | Bluetooth Classic and LE scanner and connection tester |
-| `f1_race` | F1 racing game |
-| `How_to_Build` | Build environment and installation guide |
+This app lives in `apps/wifi_checker`. The [root README](../../README.md) lists every app in this repository.
 
 ## What it does
 
@@ -40,7 +25,7 @@ The full results, including Wi-Fi BSSIDs and LAN MAC addresses, are also printed
 
 ### Joining your network
 
-The scanner has no credentials compiled in, so its published binary is safe. It reads `wifi_ssid` and `wifi_pass` from NVS namespace `cyd_config`, where the launcher on the `bootloader` branch stores them. Without them it only listens, and the LAN header reads `LAN: none`. If joining fails, the header reads `LAN: off`.
+The scanner has no credentials compiled in, so its published binary is safe. It reads `wifi_ssid` and `wifi_pass` from NVS namespace `cyd_config`, where the [launcher](../../launcher) stores them. Without them it only listens, and the LAN header reads `LAN: none`. If joining fails, the header reads `LAN: off`.
 
 The LAN sweep covers the board's /24, 254 hosts, sending ARP requests in batches of eight. Bluetooth requires Wi-Fi modem sleep, which delays some replies, so hosts that miss the first pass get a second pass with a longer wait. A device that ignores ARP, or is asleep through both passes, won't appear.
 
@@ -51,13 +36,14 @@ Classic (BR/EDR) Bluetooth devices are not scanned; only BLE, using the lightwei
 Install the PlatformIO IDE extension or PlatformIO Core. The first build installs the ESP32 platform and ESP-IDF toolchain. The project path must be short: builds fail on Windows when source paths pass 260 characters.
 
 ```powershell
+cd apps\wifi_checker
 $pio = "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe"
-& $pio run
+& $pio run -e esp32
 ```
 
 The app binary is `%USERPROFILE%\.platformio\cyd-build\esp32\firmware.bin`, about 825 KB. Use it in one of two ways:
 
-- **As a launcher image** (board runs the `bootloader` branch): every push to this branch runs `.github/workflows/build.yml`, which builds the app and publishes it as `firmware.bin` on the release tagged `wifi_checker`. The launcher lists the branch and downloads that file. You can also write it to a slot over USB, as described in the `bootloader` README.
+- **As a launcher image** (board runs the [launcher](../../launcher)): when a change to this folder is merged into `main`, `.github/workflows/build.yml` builds the app and publishes it as `firmware.bin` on the release tagged `wifi_checker`, and the ESP32-S3 image as `firmware-esp32s3.bin`. The launcher finds it in the app catalog and downloads that file. You can also write it to a slot over USB, as described in the [launcher README](../../launcher/README.md).
 - **On its own:** `& $pio run --target upload --upload-port COM11`. This replaces everything on the board, including the launcher.
 
 Monitor with `& $pio device monitor --port COM11 --baud 115200`. Ctrl+] exits. If you change `sdkconfig.defaults`, delete the generated `sdkconfig.esp32` so the new defaults apply.

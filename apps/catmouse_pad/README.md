@@ -2,22 +2,9 @@
 
 A small maze game in the manner of PAC-MAN for the ESP32 Cheap Yellow Display (CYD), following the [board documentation](https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display). You are the mouse. Eat every piece of cheese while three cats chase you; a big cheese turns the tables for a few seconds.
 
-Each application lives on its own branch of this repository:
+This is the `catmouse` game with Xbox controller input added through `components/cyd_gamepad` (Bluepad32 on BTstack): the D-pad, or the left stick past a dead zone, steers the mouse, and touch still works while the pad is idle.
 
-| Branch | Application |
-|---|---|
-| `bootloader` | Launcher: a boot menu with two image slots |
-| `wifi_checker` | Wi-Fi, Bluetooth LE and LAN scanner |
-| `birdnet_viewer` | BirdNET bird photo viewer |
-| `screen_check` | Screen color test |
-| `touchscreen_cal` | Touchscreen calibration |
-| `stopwatch` | LVGL stopwatch |
-| `gear_roll` | LVGL gear demo |
-| `Datalogger` | Voltage logger on GPIO35 |
-| `CatMouse` | This maze game |
-| `bluetooth_diag` | Bluetooth Classic and LE scanner and connection tester |
-| `f1_race` | F1 racing game |
-| `How_to_Build` | Build environment and installation guide |
+This app lives in `apps/catmouse_pad`. The [root README](../../README.md) lists every app in this repository.
 
 ## Playing
 
@@ -43,16 +30,17 @@ Each application lives on its own branch of this repository:
 
 ## Build and flash
 
-Install the PlatformIO IDE extension or PlatformIO Core (see the `How_to_Build` branch). The project path must be short: builds fail on Windows when source paths pass 260 characters.
+Install the PlatformIO IDE extension or PlatformIO Core (see [docs/INSTALL.md](../../docs/INSTALL.md)). The project path must be short: builds fail on Windows when source paths pass 260 characters. Like `xbox_controller`, it needs the Bluepad32 submodule, its BTstack patch and the `BLUEPAD32_ROOT` and `BTSTACK_ROOT` environment variables; see [docs/INSTALL.md](../../docs/INSTALL.md#bluepad32-for-xbox_controller-and-catmouse_pad).
 
 ```powershell
+cd apps\catmouse_pad
 $pio = "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe"
-& $pio run
+& $pio run -e esp32
 ```
 
-The app binary is `%USERPROFILE%\.platformio\cyd-catmouse-build\esp32\firmware.bin`. Use it in one of two ways:
+The app binary is `%USERPROFILE%\.platformio\cyd-catmouse-pad-build\esp32\firmware.bin`. Use it in one of two ways:
 
-- **As a launcher image** (board runs the `bootloader` branch): every push to this branch runs `.github/workflows/build.yml`, which builds the app and publishes it as `firmware.bin` on the release tagged `CatMouse`. The launcher lists the branch and downloads that file. You can also write it to a slot over USB, as described in the `bootloader` README.
+- **As a launcher image** (board runs the [launcher](../../launcher)): when a change to this folder is merged into `main`, `.github/workflows/build.yml` builds the app and publishes it as `firmware.bin` on the release tagged `catmouse_pad`, and the ESP32-S3 image as `firmware-esp32s3.bin`. The launcher finds it in the app catalog and downloads that file. You can also write it to a slot over USB, as described in the [launcher README](../../launcher/README.md).
 - **On its own:** `& $pio run --target upload --upload-port COM11`. This replaces everything on the board, including the launcher.
 
 Monitor with `& $pio device monitor --port COM11 --baud 115200`. Ctrl+] exits.

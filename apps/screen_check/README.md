@@ -2,22 +2,7 @@
 
 PlatformIO/ESP-IDF display test for the 320x240 screen and resistive touchscreen on the ESP32 Cheap Yellow Display (CYD), following the [board documentation](https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display).
 
-Each application lives on its own branch of this repository:
-
-| Branch | Application |
-|---|---|
-| `bootloader` | Launcher: a boot menu with two image slots |
-| `wifi_checker` | Wi-Fi, Bluetooth LE and LAN scanner |
-| `birdnet_viewer` | BirdNET bird photo viewer |
-| `screen_check` | This screen color test |
-| `touchscreen_cal` | Touchscreen calibration |
-| `stopwatch` | LVGL stopwatch |
-| `gear_roll` | LVGL gear demo |
-| `Datalogger` | Voltage logger on GPIO35 |
-| `CatMouse` | PAC-MAN-style maze game |
-| `bluetooth_diag` | Bluetooth Classic and LE scanner and connection tester |
-| `f1_race` | F1 racing game |
-| `How_to_Build` | Build environment and installation guide |
+This app lives in `apps/screen_check`. The [root README](../../README.md) lists every app in this repository.
 
 ## What it does
 
@@ -39,13 +24,14 @@ It needs no Wi-Fi or credentials. Patterns are drawn pixel by pixel through `cyd
 Install the PlatformIO IDE extension or PlatformIO Core. The first build installs the ESP32 platform and ESP-IDF toolchain. The project path must be short: builds fail on Windows when source paths pass 260 characters.
 
 ```powershell
+cd apps\screen_check
 $pio = "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe"
-& $pio run
+& $pio run -e esp32
 ```
 
 The app binary is `%USERPROFILE%\.platformio\cyd-screen-check-build\esp32\firmware.bin`, about 180 KB. Use it in one of two ways:
 
-- **As a launcher image** (board runs the `bootloader` branch): every push to this branch runs `.github/workflows/build.yml`, which builds the app and publishes it as `firmware.bin` on the release tagged `screen_check`. The launcher lists the branch and downloads that file. You can also write it to a slot over USB, as described in the `bootloader` README.
+- **As a launcher image** (board runs the [launcher](../../launcher)): when a change to this folder is merged into `main`, `.github/workflows/build.yml` builds the app and publishes it as `firmware.bin` on the release tagged `screen_check`, and the ESP32-S3 image as `firmware-esp32s3.bin`. The launcher finds it in the app catalog and downloads that file. You can also write it to a slot over USB, as described in the [launcher README](../../launcher/README.md).
 - **On its own:** `& $pio run --target upload --upload-port COM11`. This replaces everything on the board, including the launcher.
 
 Monitor with `& $pio device monitor --port COM11 --baud 115200`. Ctrl+] exits.

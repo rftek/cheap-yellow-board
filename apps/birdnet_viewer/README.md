@@ -2,22 +2,7 @@
 
 PlatformIO/ESP-IDF application for the 320x240 display and resistive touchscreen on the ESP32 Cheap Yellow Display (CYD), following the [board documentation](https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display).
 
-Each application lives on its own branch of this repository:
-
-| Branch | Application |
-|---|---|
-| `bootloader` | Launcher: a boot menu with two image slots |
-| `wifi_checker` | Wi-Fi, Bluetooth LE and LAN scanner |
-| `birdnet_viewer` | This BirdNET bird photo viewer |
-| `screen_check` | Screen color test |
-| `touchscreen_cal` | Touchscreen calibration |
-| `stopwatch` | LVGL stopwatch |
-| `gear_roll` | LVGL gear demo |
-| `Datalogger` | Voltage logger on GPIO35 |
-| `CatMouse` | PAC-MAN-style maze game |
-| `bluetooth_diag` | Bluetooth Classic and LE scanner and connection tester |
-| `f1_race` | F1 racing game |
-| `How_to_Build` | Build environment and installation guide |
+This app lives in `apps/birdnet_viewer`. The [root README](../../README.md) lists every app in this repository.
 
 ## What it does
 
@@ -27,9 +12,9 @@ Tap the photo for the bird's details: its name and scientific name, its family (
 
 Until a photo is up, and whenever none is, a status screen shows why the viewer started (marking a crash, watchdog or brownout reset, which boots straight back into the viewer, with what it was doing), the Wi-Fi network and why joining fails (such as `#12 no AP found`), the BirdNET server and its last request (such as `no bird >= 80%` or `visits HTTP 404`), and the free RAM. If the network doesn't join, press EN to open the launcher and choose another. A tap on the status screen refreshes at once.
 
-This is the original viewer from `main`, ported to the shared display component (`components/cyd_display`). That port fixes swapped red and blue and transposed image tiles on this panel.
+This is the original viewer that used to be at the root of `main`, ported to the shared display component (`components/cyd_display` at the repository root). That port fixes swapped red and blue and transposed image tiles on this panel.
 
-The viewer has no credentials compiled in, so its binary is safe to publish. It reads its settings at startup from the board's NVS, namespace `cyd_config`. The launcher on the `bootloader` branch writes them there from its private `wifi_credentials.h`:
+The viewer has no credentials compiled in, so its binary is safe to publish. It reads its settings at startup from the board's NVS, namespace `cyd_config`. The [launcher](../../launcher) writes them there from its private `wifi_credentials.h`:
 
 | Key | Contents |
 |---|---|
@@ -49,13 +34,14 @@ Wikimedia's 1280-pixel thumbnail is streamed over HTTPS straight into the ESP32 
 Install the PlatformIO IDE extension or PlatformIO Core. The first build installs the ESP32 platform and ESP-IDF toolchain. The project path must be short: builds fail on Windows when source paths pass 260 characters.
 
 ```powershell
+cd apps\birdnet_viewer
 $pio = "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe"
-& $pio run
+& $pio run -e esp32
 ```
 
 The app binary is `%USERPROFILE%\.platformio\cyd-birdnet-build\esp32\firmware.bin`, about 1.0 MB. Use it in one of two ways:
 
-- **As a launcher image** (board runs the `bootloader` branch): every push to this branch runs `.github/workflows/build.yml`, which builds the app and publishes it as `firmware.bin` on the release tagged `birdnet_viewer`. The launcher lists the branch and downloads that file. You can also write it to a slot over USB, as described in the `bootloader` README.
+- **As a launcher image** (board runs the [launcher](../../launcher)): when a change to this folder is merged into `main`, `.github/workflows/build.yml` builds the app and publishes it as `firmware.bin` on the release tagged `birdnet_viewer`, and the ESP32-S3 image as `firmware-esp32s3.bin`. The launcher finds it in the app catalog and downloads that file. You can also write it to a slot over USB, as described in the [launcher README](../../launcher/README.md).
 - **On its own:** `& $pio run --target upload --upload-port COM11`. This replaces everything on the board, including the launcher and the settings it stored. The viewer then has no Wi-Fi settings.
 
 Monitor with `& $pio device monitor --port COM11 --baud 115200`. Ctrl+] exits.

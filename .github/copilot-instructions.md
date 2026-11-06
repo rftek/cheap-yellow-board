@@ -1,8 +1,14 @@
-# ESP32 CYD BirdNET Viewer
+# ESP32 CYD applications (monorepo)
 
-- This is a PlatformIO project using native ESP-IDF C for an ESP32 Cheap Yellow Display.
-- Keep Wi-Fi credentials in `%USERPROFILE%\.cyd_private\wifi_credentials.h`; never commit secrets.
-- Build with `pio run`; flash with `pio run --target upload --upload-port COM11`.
-- The 320x240 ILI9341-compatible TFT and XPT2046 touchscreen pin mapping is defined in `main/main.c`.
-- Preserve the image-only screen, 2-minute/touch refresh behavior, and bounded HTTP/JPEG streaming.
-- Verify firmware changes with a PlatformIO build before flashing.
+- PlatformIO projects in native ESP-IDF C for the ESP32 Cheap Yellow Display (`esp32`) and the Waveshare ESP32-S3-Touch-LCD-7 (`esp32s3`).
+- Every app is a self-contained folder `apps/<name>/` with `platformio.ini` (`[env:esp32]`, `[env:esp32s3]`), `supported-targets.txt`, `sdkconfig.defaults*` and `main/`. Build from inside the folder: `cd apps/<name>` then `pio run -e esp32`.
+- `project(...)` in an app's `CMakeLists.txt` must equal its folder name; the release tag and the catalog entry use that name.
+- `launcher/` is the boot menu (project `cyd_launcher`) with a custom second-stage bootloader in `launcher/bootloader_components`.
+- Shared code has one copy at the repository root: `components/cyd_display` (display, fonts, touch) and `components/cyd_gamepad` (Bluepad32 gamepad input). Apps reference them through `EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/../../components/..."`; don't copy them into an app. A change there rebuilds every app in CI.
+- `external/bluepad32` is a git submodule used by `xbox_controller` and `catmouse_pad`. Local builds of those need `BLUEPAD32_ROOT=<repo>/external/bluepad32` and `BTSTACK_ROOT=<repo>/external/bluepad32/external/btstack`, after `git submodule update --init --recursive external/bluepad32` and applying `external/bluepad32/external/patches/*.patch` in the BTstack folder.
+- Wi-Fi credentials live in `%USERPROFILE%\.cyd_private\wifi_credentials.h`. Never commit that file or any other secret. Only the launcher compiles them in; apps read settings from NVS (`cyd_config`) at run time, because their binaries are published.
+- The launcher is never built or published by CI, because it embeds the credentials. Never add it to a workflow or a release.
+- `.github/workflows/build.yml` builds changed apps on pull requests and publishes images and the `catalog` release's `manifest.json` on pushes to `main`. `tools/ci_plan.py` picks the apps; `tools/make_catalog.py` writes the catalog.
+- Flash safety: flash only an app partition (the launcher's `factory` at `0x10000`, or an image slot at `0x150000` / `0x2A0000` on the CYD). Never run `erase_flash`, and never write the bootloader or partition table to a board that is already set up. Ask before flashing.
+- Verify changes with a PlatformIO build of each affected target before flashing. Boot images must fit a 1.31 MB launcher slot on the CYD.
+- `main` is protected. Work on a pull-request branch: `app/<name>-<change>`, `launcher/<change>`, `ci/<change>` or `docs/<change>`.
