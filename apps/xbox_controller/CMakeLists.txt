@@ -6,7 +6,8 @@ cmake_minimum_required(VERSION 3.16)
 # turned into an ESP-IDF component by the CMake file included below (the same
 # way Bluepad32's own esp32 example does it), not by a separate script.
 set(EXTRA_COMPONENT_DIRS
-    "${CMAKE_CURRENT_LIST_DIR}/components"
+    "${CMAKE_CURRENT_LIST_DIR}/../../components/cyd_display"
+    "${CMAKE_CURRENT_LIST_DIR}/../../components/cyd_gamepad"
     "$ENV{BLUEPAD32_ROOT}/src/components")
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)

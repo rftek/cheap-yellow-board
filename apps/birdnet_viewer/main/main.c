@@ -27,7 +27,7 @@
 #define LCD_WIDTH CYD_LCD_WIDTH
 #define LCD_HEIGHT CYD_LCD_HEIGHT
 #define QUERY_INTERVAL_US (120LL * 1000 * 1000)
-/* Settings the launcher (bootloader branch) stores in NVS for boot images,
+/* Settings the launcher (launcher/) stores in NVS for boot images,
    so no credentials are compiled into this published binary. */
 #define CONFIG_NAMESPACE "cyd_config"
 #define DEFAULT_BIRDNET_BASE_URL "http://birdnet.local"

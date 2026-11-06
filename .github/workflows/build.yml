@@ -1,0 +1,139 @@
+# Builds the apps under apps/ once per chip target listed in each app's
+# supported-targets.txt: only the apps a change touches, or all of them when
+# the shared code changes (see tools/ci_plan.py).
+#
+# Pull requests only build. Pushes to main also publish each image on a
+# release tagged with the app's folder name, then refresh the catalog
+# (manifest.json on the "catalog" release) that the launcher reads.
+# The launcher itself is never built here: it embeds Wi-Fi credentials.
+#
+# Asset names: the esp32 image is firmware.bin, other targets
+# firmware-<target>.bin.
+name: Build apps
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**", "launcher/**"]
+  pull_request:
+    paths-ignore: ["**.md", "docs/**", "launcher/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: plan
+        env:
+          # Empty for workflow_dispatch, which rebuilds every app.
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          matrix=$(python3 tools/ci_plan.py "$BASE")
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "Building: $matrix"
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.matrix != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    name: ${{ matrix.app }} (${{ matrix.target }})
+    env:
+      APP: ${{ matrix.app }}
+      TARGET: ${{ matrix.target }}
+      PLATFORMIO_BUILD_DIR: ${{ github.workspace }}/build
+      # Read by the CMake of the apps that use Bluepad32; unused elsewhere.
+      BLUEPAD32_ROOT: ${{ github.workspace }}/external/bluepad32
+      BTSTACK_ROOT: ${{ github.workspace }}/external/bluepad32/external/btstack
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out Bluepad32 if the app uses it
+        run: |
+          if grep -q BLUEPAD32_ROOT "apps/$APP/CMakeLists.txt"; then
+            git submodule update --init --recursive external/bluepad32
+          fi
+
+      # Bluepad32 ships a patch for its BTstack copy (an l2cap fix for incoming
+      # controller connections). The component wiring itself is done in CMake.
+      - name: Patch Bluepad32's BTstack
+        if: hashFiles('external/bluepad32/external/patches/*.patch') != ''
+        run: |
+          cd "$BTSTACK_ROOT"
+          git apply "$BLUEPAD32_ROOT"/external/patches/*.patch \
+            || echo "BTstack patch already applied or not needed"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles(format('apps/{0}/platformio.ini', matrix.app)) }}
+
+      - run: pip install platformio
+
+      - run: pio run -e "$TARGET"
+        working-directory: apps/${{ matrix.app }}
+        env:
+          # build_dir in platformio.ini is under USERPROFILE, which Linux lacks.
+          USERPROFILE: ${{ runner.temp }}
+
+      - name: Publish the image
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ matrix.app }}
+        run: |
+          if [ "$TARGET" = esp32 ]; then asset=firmware.bin; else asset="firmware-$TARGET.bin"; fi
+          cp "build/$TARGET/firmware.bin" "$asset"
+          notes="Boot images of apps/$TAG built from ${GITHUB_SHA::7}."
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            # The other target's job may have created it in the meantime.
+            gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --notes "$notes" \
+              || gh release view "$TAG" >/dev/null
+          elif [ "$TARGET" = esp32 ]; then
+            # One job only, so the jobs don't race: move the release's tag to
+            # the commit these images were built from.
+            gh release edit "$TAG" --notes "$notes"
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" \
+              -f sha="$GITHUB_SHA" -F force=true >/dev/null
+          fi
+          gh release upload "$TAG" "$asset" --clobber
+
+  catalog:
+    needs: build
+    # Also after a partly failed build, so the apps that did build are listed.
+    if: >-
+      !cancelled() && needs.build.result != 'skipped' &&
+      github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 tools/make_catalog.py manifest.json
+      - run: cat manifest.json
+      - name: Publish the catalog
+        run: |
+          if ! gh release view catalog >/dev/null 2>&1; then
+            gh release create catalog --target "$GITHUB_SHA" --title "App catalog" \
+              --notes "manifest.json lists the apps' boot images for the launcher."
+          fi
+          gh release upload catalog manifest.json --clobber

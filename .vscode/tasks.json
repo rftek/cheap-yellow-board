@@ -5,25 +5,75 @@
             "label": "PlatformIO: Build",
             "type": "shell",
             "command": "pio",
-            "args": ["run"],
-            "options": { "cwd": "${workspaceFolder}" },
+            "args": [
+                "run",
+                "-e",
+                "${input:target}"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/${input:project}"
+            },
             "problemMatcher": []
         },
         {
             "label": "PlatformIO: Upload",
             "type": "shell",
             "command": "pio",
-            "args": ["run", "--target", "upload"],
-            "options": { "cwd": "${workspaceFolder}" },
+            "args": [
+                "run",
+                "-e",
+                "${input:target}",
+                "--target",
+                "upload"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/${input:project}"
+            },
             "problemMatcher": []
         },
         {
             "label": "PlatformIO: Monitor",
             "type": "shell",
             "command": "pio",
-            "args": ["device", "monitor"],
-            "options": { "cwd": "${workspaceFolder}" },
+            "args": [
+                "device",
+                "monitor"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/${input:project}"
+            },
             "problemMatcher": []
+        }
+    ],
+    "inputs": [
+        {
+            "id": "project",
+            "type": "pickString",
+            "description": "Project folder",
+            "options": [
+                "apps/birdnet_viewer",
+                "apps/bluetooth_diag",
+                "apps/catmouse",
+                "apps/catmouse_pad",
+                "apps/datalogger",
+                "apps/f1_race",
+                "apps/gear_roll",
+                "apps/screen_check",
+                "apps/stopwatch",
+                "apps/touchscreen_cal",
+                "apps/wifi_checker",
+                "apps/xbox_controller",
+                "launcher"
+            ]
+        },
+        {
+            "id": "target",
+            "type": "pickString",
+            "description": "Chip target",
+            "options": [
+                "esp32",
+                "esp32s3"
+            ]
         }
     ]
 }

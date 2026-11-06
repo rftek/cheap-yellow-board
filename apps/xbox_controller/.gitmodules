@@ -1,4 +1,0 @@
-[submodule "external/bluepad32"]
-	path = external/bluepad32
-	url = https://github.com/ricardoquesada/bluepad32.git
-	branch = main
