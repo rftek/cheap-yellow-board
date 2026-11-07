@@ -25,21 +25,15 @@
 #include "nvs_flash.h"
 #include "wifi_credentials.h"
 
-/* Each branch of this repository is one application. GitHub Actions on the
-   branch publishes its build as IMAGE_ASSET_NAME on a release tagged with
-   the branch name; branches without one are not offered. CI names the
-   esp32 image firmware.bin, which launchers in the field download, and the
-   other targets' images firmware-<target>.bin. */
+/* Each folder under apps/ in this repository is one application. On every
+   push to main, CI publishes the apps' images on releases named after their
+   folders, then the catalog: manifest.json on the "catalog" release, which
+   lists each app's image for each chip target with its URL, size and
+   version (see tools/make_catalog.py). */
 #ifndef IMAGE_REPO
 #define IMAGE_REPO "rftek/cheap-yellow-board"
 #endif
-#define BRANCHES_URL "https://api.github.com/repos/" IMAGE_REPO "/branches?per_page=100"
-#define RELEASES_URL "https://api.github.com/repos/" IMAGE_REPO "/releases?per_page=100"
-#if CONFIG_IDF_TARGET_ESP32
-#define IMAGE_ASSET_NAME "firmware.bin"
-#else
-#define IMAGE_ASSET_NAME "firmware-" CONFIG_IDF_TARGET ".bin"
-#endif
+#define CATALOG_URL "https://github.com/" IMAGE_REPO "/releases/download/catalog/manifest.json"
 
 /* Settings this launcher stores in NVS for the boot images, which are
    published publicly and so carry no credentials of their own. The
@@ -49,20 +43,15 @@
 /* Countdown before the default image boots; each tap off an entry adds as much again. */
 #define MENU_TIMEOUT_US (20LL * 1000 * 1000)
 #define WIFI_CONNECT_TIMEOUT_MS 10000
-/* The releases list grows with every asset. Boards with PSRAM, where
-   malloc puts large buffers, can hold more of it. */
-#if CONFIG_SPIRAM
-#define GITHUB_JSON_LIMIT (256 * 1024)
-#else
-#define GITHUB_JSON_LIMIT (64 * 1024)
-#endif
+/* The catalog is about 300 bytes per app. */
+#define CATALOG_LIMIT (16 * 1024)
 #define DOWNLOAD_CHUNK_SIZE 4096
 #define MAX_REDIRECTS 5
 
 #define SLOT_COUNT 2
 #define MAX_REMOTE_IMAGES 16
 #define MAX_ENTRIES (SLOT_COUNT + MAX_REMOTE_IMAGES)
-#define BRANCH_NAME_SIZE 48
+#define APP_NAME_SIZE 48
 /* The menu fills the columns left of the brightness slider: the title, the
    visible entries, the scroll row, then the info row. */
 #define MENU_COLUMNS (CYD_TEXT_COLUMNS - BRIGHTNESS_COLUMNS)
@@ -111,12 +100,12 @@ static const char *TAG = "cyd_launcher";
 typedef struct {
     const esp_partition_t *partition;
     bool valid;
-    char name[BRANCH_NAME_SIZE];   /* branch name */
+    char name[APP_NAME_SIZE];   /* app folder name */
     char version[VERSION_SIZE];    /* empty when flashed some other way */
 } slot_t;
 
 typedef struct {
-    char name[BRANCH_NAME_SIZE]; /* branch name */
+    char name[APP_NAME_SIZE]; /* app folder name */
     char url[256];
     char version[VERSION_SIZE];
     uint32_t size;
@@ -207,7 +196,7 @@ static void load_slots(void)
         if (!have_nvs || nvs_get_str(nvs, key, slot->version, &version_size) != ESP_OK) {
             slot->version[0] = '\0';
         }
-        /* Images are named after their branch, so a different project name
+        /* Images are named after their app folder, so a different project name
            means the slot was reflashed over USB since the download. */
         if (strcmp(slot->name, description.project_name) != 0) {
             snprintf(slot->name, sizeof(slot->name), "%s", description.project_name);
@@ -221,7 +210,7 @@ static void load_slots(void)
     }
 }
 
-/* Records which branch and version a slot holds; NULL name clears it. */
+/* Records which app and version a slot holds; NULL name clears it. */
 static void save_slot(int slot, const char *name, const char *version)
 {
     nvs_handle_t nvs;
@@ -563,7 +552,7 @@ static int scrolled_offset(int offset, int count, int direction)
     return offset < 0 ? 0 : offset;
 }
 
-/* True when a slot already holds this exact build of the branch. */
+/* True when a slot already holds this exact build of the app. */
 static bool remote_is_stored(const remote_image_t *image)
 {
     for (int i = 0; i < SLOT_COUNT; ++i) {
@@ -575,8 +564,8 @@ static bool remote_is_stored(const remote_image_t *image)
     return false;
 }
 
-/* Stored images first, then branches whose current build is not stored:
-   new branches and newer builds of stored ones. */
+/* Stored images first, then apps whose current build is not stored:
+   new apps and newer builds of stored ones. */
 static void build_entries(void)
 {
     entry_count = 0;
@@ -889,10 +878,14 @@ static esp_err_t http_buffer_handler(esp_http_client_event_t *event)
     if (event->event_id != HTTP_EVENT_ON_DATA || event->data_len <= 0) {
         return ESP_OK;
     }
+    /* perform() follows redirects itself; skip their bodies. */
+    if (esp_http_client_get_status_code(event->client) != 200) {
+        return ESP_OK;
+    }
     http_buffer_t *buffer = event->user_data;
     size_t needed = buffer->length + (size_t)event->data_len + 1;
-    if (needed > GITHUB_JSON_LIMIT) {
-        ESP_LOGE(TAG, "GitHub response exceeds %d bytes", GITHUB_JSON_LIMIT);
+    if (needed > CATALOG_LIMIT) {
+        ESP_LOGE(TAG, "Catalog exceeds %d bytes", CATALOG_LIMIT);
         return ESP_ERR_INVALID_SIZE;
     }
     if (needed > buffer->capacity) {
@@ -934,17 +927,6 @@ static const char *json_value(const char *from, const char *limit, const char *k
     return NULL;
 }
 
-/* Like json_value, but the last match before limit. */
-static const char *json_last_value(const char *from, const char *limit, const char *key)
-{
-    const char *last = NULL;
-    for (const char *value = json_value(from, limit, key); value != NULL;
-         value = json_value(value, limit, key)) {
-        last = value;
-    }
-    return last;
-}
-
 static bool json_copy_string(const char *value, char *output, size_t size)
 {
     if (value == NULL || *value != '"') {
@@ -963,58 +945,28 @@ static bool json_copy_string(const char *value, char *output, size_t size)
     return *value == '"';
 }
 
-/* Branches that are not boot images: the launcher itself, the legacy main
-   branch and the documentation. */
-static bool branch_is_excluded(const char *branch)
+/* Fills image from one app's entry in the catalog, [name, limit): its name
+   and the url, size and version of its image for this chip. An app without
+   one is not offered. */
+static bool catalog_image(const char *name, const char *limit, remote_image_t *image)
 {
-    static const char *const excluded[] = {"bootloader", "main", "How_to_Build"};
-    for (size_t i = 0; i < sizeof(excluded) / sizeof(excluded[0]); ++i) {
-        if (strcmp(branch, excluded[i]) == 0) {
-            return true;
-        }
-    }
-    return false;
-}
-
-/* Finds IMAGE_ASSET_NAME on the release tagged with the branch name. Each
-   asset object ends with its browser_download_url; its name, size and
-   updated_at come earlier in the same object. */
-static bool find_branch_image(const char *json, const char *branch, remote_image_t *image)
-{
-    const char *end = json + strlen(json);
-    for (const char *tag = json_value(json, end, "tag_name"); tag != NULL;
-         tag = json_value(tag, end, "tag_name")) {
-        char tag_name[BRANCH_NAME_SIZE];
-        if (!json_copy_string(tag, tag_name, sizeof(tag_name)) || strcmp(tag_name, branch) != 0) {
-            continue;
-        }
-        const char *release_end = json_value(tag, end, "tag_name");
-        if (release_end == NULL) {
-            release_end = end;
-        }
-        const char *object_start = json_value(tag, release_end, "assets");
-        if (object_start == NULL) {
-            return false;
-        }
-        for (const char *url = json_value(object_start, release_end, "browser_download_url");
-             url != NULL; url = json_value(url, release_end, "browser_download_url")) {
-            char asset_name[48];
-            if (json_copy_string(json_last_value(object_start, url, "name"), asset_name,
-                                 sizeof(asset_name)) &&
-                strcmp(asset_name, IMAGE_ASSET_NAME) == 0 &&
-                json_copy_string(url, image->url, sizeof(image->url)) &&
-                json_copy_string(json_last_value(object_start, url, "updated_at"),
-                                 image->version, sizeof(image->version))) {
-                const char *size = json_last_value(object_start, url, "size");
-                image->size = size != NULL ? (uint32_t)strtoul(size, NULL, 10) : 0;
-                snprintf(image->name, sizeof(image->name), "%s", branch);
-                return true;
-            }
-            object_start = url;
-        }
+    const char *asset = json_value(name, limit, CONFIG_IDF_TARGET);
+    if (asset == NULL || *asset != '{') {
         return false;
     }
-    return false;
+    const char *asset_end = strchr(asset, '}');
+    if (asset_end == NULL || asset_end > limit) {
+        return false;
+    }
+    const char *size = json_value(asset, asset_end, "size");
+    if (size == NULL || !json_copy_string(name, image->name, sizeof(image->name)) ||
+        !json_copy_string(json_value(asset, asset_end, "url"), image->url, sizeof(image->url)) ||
+        !json_copy_string(json_value(asset, asset_end, "version"), image->version,
+                          sizeof(image->version))) {
+        return false;
+    }
+    image->size = (uint32_t)strtoul(size, NULL, 10);
+    return true;
 }
 
 /* GETs url into buffer, reusing the client's connection. */
@@ -1043,16 +995,16 @@ static esp_err_t github_get(esp_http_client_handle_t client, http_buffer_t *buff
     return ESP_OK;
 }
 
-/* Lists the repository's branches and keeps those with a published image. */
-static net_state_t fetch_branch_images(void)
+/* Reads the catalog and keeps the apps with an image for this chip. */
+static net_state_t fetch_catalog(void)
 {
     http_buffer_t buffer = {0};
+    /* The catalog redirects to GitHub's asset host with a long URL. */
     esp_http_client_config_t config = {
-        .url = BRANCHES_URL,
+        .url = CATALOG_URL,
         .timeout_ms = 10000,
-        .buffer_size = 2048,
-        .buffer_size_tx = 1024,
-        .keep_alive_enable = true,
+        .buffer_size = 4096,
+        .buffer_size_tx = 2048,
         .crt_bundle_attach = esp_crt_bundle_attach,
         .event_handler = http_buffer_handler,
         .user_data = &buffer,
@@ -1061,47 +1013,33 @@ static net_state_t fetch_branch_images(void)
     if (client == NULL) {
         return NET_OFFLINE;
     }
-    esp_http_client_set_header(client, "Accept", "application/vnd.github+json");
 
     net_state_t state = NET_GITHUB_ERROR;
-    /* Static: the network task's stack also carries the TLS session. */
-    static char branches[MAX_REMOTE_IMAGES][BRANCH_NAME_SIZE];
-    int branch_count = 0;
-    set_activity("GET branches");
-    if (github_get(client, &buffer, BRANCHES_URL) == ESP_OK) {
+    set_activity("GET catalog");
+    if (github_get(client, &buffer, CATALOG_URL) == ESP_OK) {
+        /* Only the app objects have a "name"; each runs to the next one. */
         const char *end = buffer.data + buffer.length;
+        remote_count = 0;
         for (const char *name = json_value(buffer.data, end, "name");
-             name != NULL && branch_count < MAX_REMOTE_IMAGES;
-             name = json_value(name, end, "name")) {
-            if (json_copy_string(name, branches[branch_count], sizeof(branches[0])) &&
-                !branch_is_excluded(branches[branch_count])) {
-                ++branch_count;
+             name != NULL && remote_count < MAX_REMOTE_IMAGES;) {
+            const char *next = json_value(name, end, "name");
+            remote_image_t *image = &remote_images[remote_count];
+            if (catalog_image(name, next != NULL ? next : end, image)) {
+                ESP_LOGI(TAG, "App %s: %s, %u bytes", image->name, image->version,
+                         (unsigned)image->size);
+                ++remote_count;
             }
+            name = next;
         }
-        set_activity("GET releases");
-        if (github_get(client, &buffer, RELEASES_URL) == ESP_OK) {
-            remote_count = 0;
-            for (int i = 0; i < branch_count; ++i) {
-                remote_image_t *image = &remote_images[remote_count];
-                if (find_branch_image(buffer.data, branches[i], image)) {
-                    ESP_LOGI(TAG, "Branch %s: %s, %u bytes", image->name, image->version,
-                             (unsigned)image->size);
-                    ++remote_count;
-                } else {
-                    ESP_LOGW(TAG, "Branch %s has no %s release yet", branches[i],
-                             IMAGE_ASSET_NAME);
-                }
-            }
-            set_activity("%d on GitHub", remote_count);
-            state = NET_READY;
-        }
+        set_activity("%d on GitHub", remote_count);
+        state = NET_READY;
     }
     esp_http_client_cleanup(client);
     free(buffer.data);
     return state;
 }
 
-/* Joins Wi-Fi and lists the branches, then again each time the network
+/* Joins Wi-Fi and reads the catalog, then again each time the network
    chooser saves a network. */
 static void network_task(void *argument)
 {
@@ -1113,7 +1051,7 @@ static void network_task(void *argument)
     while (true) {
         if (started && wifi_join()) {
             net_state = NET_FETCHING;
-            net_state = fetch_branch_images();
+            net_state = fetch_catalog();
         } else {
             ESP_LOGW(TAG, "Wi-Fi did not connect; keeping stored images only");
             net_state = NET_OFFLINE;
@@ -1123,10 +1061,10 @@ static void network_task(void *argument)
     }
 }
 
-/* Has the network task join the saved network and list the branches again. */
+/* Has the network task join the saved network and read the catalog again. */
 static void rejoin_wifi(void)
 {
-    /* Set here too, so the menu drops the branches before they are refetched. */
+    /* Set here too, so the menu drops the apps before they are refetched. */
     net_state = NET_CONNECTING;
     xTaskNotifyGive(network_task_handle);
 }
@@ -1986,7 +1924,7 @@ void app_main(void)
 
         net_state_t state = net_state;
         if (state != shown_state) {
-            /* The branches show only while the list is complete. */
+            /* The apps show only while the list is complete. */
             shown_state = state;
             build_entries();
             draw_entries();
