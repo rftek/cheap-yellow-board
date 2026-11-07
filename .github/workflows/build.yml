@@ -9,14 +9,16 @@
 #
 # Asset names: the esp32 image is firmware.bin, other targets
 # firmware-<target>.bin.
+#
+# It runs for every change, so that ci-result, the check main's branch
+# protection requires, always reports; tools/ci_plan.py builds nothing for
+# changes to Markdown, docs/ or launcher/ only.
 name: Build apps
 
 on:
   push:
     branches: [main]
-    paths-ignore: ["**.md", "docs/**", "launcher/**"]
   pull_request:
-    paths-ignore: ["**.md", "docs/**", "launcher/**"]
   workflow_dispatch:
 
 permissions:
@@ -137,3 +139,18 @@ jobs:
               --notes "manifest.json lists the apps' boot images for the launcher."
           fi
           gh release upload catalog manifest.json --clobber
+
+  # The one check main's branch protection requires: it passes when every
+  # build passed or none was needed.
+  ci-result:
+    needs: [plan, build]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the builds
+        env:
+          PLAN: ${{ needs.plan.result }}
+          BUILD: ${{ needs.build.result }}
+        run: |
+          echo "plan: $PLAN, build: $BUILD"
+          [ "$PLAN" = success ] && { [ "$BUILD" = success ] || [ "$BUILD" = skipped ]; }

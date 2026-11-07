@@ -68,7 +68,7 @@ $pio = "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe"
 - **Pull requests** build the apps the change touches, once for each target in their `supported-targets.txt`. A change to `components/`, `external/`, `tools/` or the workflow builds every app. Nothing is published.
 - **Pushes to `main`** build the same way, then upload each image to a release tagged with the app's folder name: `firmware.bin` for esp32, `firmware-<target>.bin` for other targets (such as `firmware-esp32s3.bin`). The release is created the first time, and its tag moves to the commit that was built.
 - **The catalog:** after those builds, `tools/make_catalog.py` writes `manifest.json`, which lists every app's images with their download URL, size and version, and publishes it on the release tagged `catalog`: <https://github.com/rftek/cheap-yellow-board/releases/download/catalog/manifest.json>. The launcher reads it to find the apps.
-- Changes that touch only Markdown, `docs/` or `launcher/` don't run CI.
+- Changes that touch only Markdown, `docs/` or `launcher/` build nothing. The workflow still runs, so its `ci-result` check, which `main` requires, always reports.
 
 Published images are public, so they must contain no credentials, and they must fit a launcher slot (1.31 MB on the CYD).
 
