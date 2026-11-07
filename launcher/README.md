@@ -43,7 +43,7 @@ Flash layout (4 MB, `partitions.csv`):
 
 The repository's one workflow, `.github/workflows/build.yml`, builds the apps. When a change to `apps/<name>` is merged into `main`, GitHub Actions builds that app and uploads its app binary to the release tagged `<name>`, creating the release the first time: `firmware.bin` for the ESP32, `firmware-<target>.bin` for other targets. It then rewrites the catalog, `manifest.json` on the release tagged `catalog`. To add an application, add a folder under `apps/` in a pull request; [docs/INSTALL.md](../docs/INSTALL.md) has the steps. It must stay under 1.31 MB and contain no credentials.
 
-The launcher is never built by CI, on purpose: its binary contains your Wi-Fi credentials and must never be published. The workflow ignores changes to `launcher/`.
+The launcher is never built by CI, on purpose: its binary contains your Wi-Fi credentials and must never be published. The workflow builds nothing for changes to `launcher/`.
 
 ## Build and flash
 
