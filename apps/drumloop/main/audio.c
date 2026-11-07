@@ -31,7 +31,7 @@ static QueueHandle_t steps;
 static volatile uint32_t frames_written;
 static volatile uint32_t latency_frames;
 static volatile bool want_playing;
-/* Silent mode: no speaker, the engine runs on the clock alone. */
+/* Silent: no speaker, so the engine runs on the clock alone. */
 static bool silent;
 static bool silent_restart;
 
@@ -135,33 +135,26 @@ esp_err_t audio_start(drum_pattern_t *loop_pattern)
         return ESP_ERR_NO_MEM;
     }
     engine_init(&engine, pattern, on_step, NULL);
+    silent = true;
+    silent_restart = true;
     /* Above the UI, so drawing never delays a packet. */
     BaseType_t created = xTaskCreate(audio_task, "audio", 6144, NULL, 7, NULL);
     return created == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
-void audio_set_speaker(airplay_sender_handle_t new_speaker)
+void audio_set_output(airplay_sender_handle_t new_speaker)
 {
     xSemaphoreTake(lock, portMAX_DELAY);
     speaker = new_speaker;
-    silent = false;
-    want_playing = false;
-    if (new_speaker != NULL) {
-        latency_frames =
-            (uint32_t)((uint64_t)airplay_sender_latency_ms(new_speaker) * DRUM_RATE / 1000);
-        ESP_LOGI(TAG, "Speaker attached, latency %lu frames", (unsigned long)latency_frames);
-    }
-    xQueueReset(steps);
-    xSemaphoreGive(lock);
-}
-
-void audio_set_silent(bool on)
-{
-    xSemaphoreTake(lock, portMAX_DELAY);
-    silent = on && speaker == NULL;
+    silent = new_speaker == NULL;
     silent_restart = silent;
-    want_playing = false;
-    latency_frames = 0;
+    latency_frames = new_speaker != NULL ? (uint32_t)((uint64_t)airplay_sender_latency_ms(new_speaker) *
+                                                      DRUM_RATE / 1000)
+                                         : 0;
+    ESP_LOGI(TAG, "Output: %s, latency %lu frames", new_speaker != NULL ? "speaker" : "silent",
+             (unsigned long)latency_frames);
+    /* The loop keeps playing across the switch; the playhead picks up the
+       new latency from the next step. */
     xQueueReset(steps);
     xSemaphoreGive(lock);
 }

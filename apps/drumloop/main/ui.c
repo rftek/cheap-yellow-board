@@ -17,6 +17,7 @@
 #include "cyd_display.h"
 #include "export.h"
 #include "nvs.h"
+#include "output.h"
 
 /* Screen lines are cut to the display's width on purpose. */
 #pragma GCC diagnostic ignored "-Wformat-truncation"
@@ -73,6 +74,9 @@ static bool follow = true;
 static int view_bar;
 static int playhead = NO_STEP;
 static TickType_t flash_until[DRUM_TRACKS];
+/* The speaker dropped the session and output.c went silent: the MENU
+   button is red until the menu says so. */
+static bool speaker_lost_notice;
 
 static char drawn_header[COLUMNS + 1];
 static uint16_t drawn_header_fg[COLUMNS];
@@ -213,7 +217,8 @@ static void refresh_header(void)
                                          : CYD_COLOR_BUTTON;
     put_span(text, fg, bg, BAR_SPAN, bar,
              follow && pattern->bars > 1 ? CYD_COLOR_BLACK : CYD_COLOR_WHITE, bar_bg);
-    put_span(text, fg, bg, MENU_SPAN, "MENU", CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
+    put_span(text, fg, bg, MENU_SPAN, "MENU", CYD_COLOR_WHITE,
+             speaker_lost_notice ? CYD_COLOR_RED : CYD_COLOR_BUTTON);
 
     if (strcmp(text, drawn_header) == 0 && memcmp(fg, drawn_header_fg, sizeof(fg)) == 0 &&
         memcmp(bg, drawn_header_bg, sizeof(bg)) == 0) {
@@ -377,27 +382,29 @@ static void update_playhead(void)
 /* ---- Menu --------------------------------------------------------------- */
 
 #define MENU_INFO 1
-#define MENU_VOLUME 2
-#define MENU_TEMPO 3
-#define MENU_LENGTH 4
-#define MENU_TRAP 5
-#define MENU_DNB 6
-#define MENU_CLEAR 7
-#define MENU_EXPORT 8
-#define MENU_LATENCY 9
-#define MENU_DISCONNECT 10
+#define MENU_WIFI 2
+#define MENU_OUTPUT 3
+#define MENU_VOLUME 4
+#define MENU_TEMPO 5
+#define MENU_LENGTH 6
+#define MENU_BEATS 7
+#define MENU_CLEAR 8
+#define MENU_EXPORT 9
+#define MENU_LATENCY 10
 #define MENU_BACK 11
 #define SPLIT_BUTTON_COLUMNS 9
 #define VOLUME_STEP 10
 #define TEMPO_STEP 10
 
-typedef enum { MENU_RESULT_BACK, MENU_RESULT_DISCONNECT, MENU_RESULT_LOST } menu_result_t;
-
 static const uint32_t latency_choices[] = {2000, 1000, 500, 250};
+
+/* The menu's info line, kept between visits. */
+static char status_text[COLUMNS + 1] = " No speaker: silent";
 
 static void menu_status(const char *status)
 {
-    ESP_ERROR_CHECK(cyd_text_row(MENU_INFO, CYD_COLOR_YELLOW, CYD_COLOR_BLACK, status));
+    snprintf(status_text, sizeof(status_text), "%s", status);
+    ESP_ERROR_CHECK(cyd_text_row(MENU_INFO, CYD_COLOR_YELLOW, CYD_COLOR_BLACK, status_text));
 }
 
 /* A row with a button at each end and a value between them. */
@@ -421,6 +428,41 @@ static void draw_split_row(int row, const char *left, const char *value, const c
     ESP_ERROR_CHECK(cyd_draw_cells(row, text, fg, bg));
 }
 
+static void draw_button_row(int row, const char *label)
+{
+    ESP_ERROR_CHECK(cyd_text_row(row, CYD_COLOR_WHITE, CYD_COLOR_BUTTON, label));
+}
+
+static void draw_wifi_row(void)
+{
+    char line[COLUMNS + 1];
+    if (!output_wifi_saved()) {
+        ESP_ERROR_CHECK(cyd_text_row(MENU_WIFI, CYD_COLOR_GRAY, CYD_COLOR_BUTTON_DISABLED,
+                                     " WI-FI     NONE SAVED"));
+        return;
+    }
+    if (!output_wifi_on()) {
+        snprintf(line, sizeof(line), " WI-FI     OFF");
+    } else if (output_wifi_joined()) {
+        snprintf(line, sizeof(line), " WI-FI     ON  %s", output_wifi_ssid());
+    } else {
+        snprintf(line, sizeof(line), " WI-FI     NOT JOINED");
+    }
+    draw_button_row(MENU_WIFI, line);
+}
+
+static void draw_output_row(void)
+{
+    char line[COLUMNS + 1];
+    const char *name = output_speaker_name();
+    if (name != NULL) {
+        snprintf(line, sizeof(line), " OUTPUT    %s", name);
+    } else {
+        snprintf(line, sizeof(line), " OUTPUT    NONE (SILENT)");
+    }
+    draw_button_row(MENU_OUTPUT, line);
+}
+
 static void draw_volume_row(void)
 {
     char value[8];
@@ -439,11 +481,6 @@ static void draw_tempo_row(void)
     draw_split_row(MENU_TEMPO, "BPM -10", value, "BPM +10");
 }
 
-static void draw_button_row(int row, const char *label)
-{
-    ESP_ERROR_CHECK(cyd_text_row(row, CYD_COLOR_WHITE, CYD_COLOR_BUTTON, label));
-}
-
 static void draw_length_row(void)
 {
     char line[COLUMNS + 1];
@@ -459,21 +496,19 @@ static void draw_latency_row(uint32_t latency)
     draw_button_row(MENU_LATENCY, line);
 }
 
-static void draw_menu(const char *speaker_name, uint32_t latency)
+static void draw_menu(uint32_t latency)
 {
     ESP_ERROR_CHECK(cyd_text_row(0, CYD_COLOR_BLACK, CYD_COLOR_YELLOW, " DRUMLOOP SETTINGS"));
-    char line[COLUMNS + 1];
-    snprintf(line, sizeof(line), " %s", speaker_name);
-    ESP_ERROR_CHECK(cyd_text_row(MENU_INFO, CYD_COLOR_GRAY, CYD_COLOR_BLACK, line));
+    ESP_ERROR_CHECK(cyd_text_row(MENU_INFO, CYD_COLOR_YELLOW, CYD_COLOR_BLACK, status_text));
+    draw_wifi_row();
+    draw_output_row();
     draw_volume_row();
     draw_tempo_row();
     draw_length_row();
-    draw_button_row(MENU_TRAP, " LOAD TRAP BEAT    140");
-    draw_button_row(MENU_DNB, " LOAD DNB BEAT     174");
+    draw_split_row(MENU_BEATS, "TRAP 140", "LOAD BEAT", "DNB 174");
     draw_button_row(MENU_CLEAR, " CLEAR PATTERN");
     draw_button_row(MENU_EXPORT, " EXPORT LOOP");
     draw_latency_row(latency);
-    draw_button_row(MENU_DISCONNECT, " CHANGE SPEAKER");
     draw_button_row(MENU_BACK, " BACK TO PADS");
 }
 
@@ -515,18 +550,23 @@ static void export_loop(void)
     export_free(&export);
 }
 
-static menu_result_t run_menu(QueueHandle_t touch_queue, const char *speaker_name,
-                              volatile bool *speaker_lost)
+static void run_menu(QueueHandle_t touch_queue)
 {
     uint32_t latency = ui_saved_latency_ms();
     bool clear_armed = false;
-    draw_menu(speaker_name, latency);
+    if (speaker_lost_notice) {
+        speaker_lost_notice = false;
+        snprintf(status_text, sizeof(status_text), " Speaker disconnected");
+    }
+    draw_menu(latency);
     xQueueReset(touch_queue);
     while (true) {
         cyd_touch_point_t point;
         if (xQueueReceive(touch_queue, &point, pdMS_TO_TICKS(50)) != pdTRUE) {
-            if (*speaker_lost) {
-                return MENU_RESULT_LOST;
+            if (output_check_lost()) {
+                menu_status(" Speaker disconnected");
+                draw_output_row();
+                draw_volume_row();
             }
             /* Keep up with the playhead, so the grid is current on return. */
             update_playhead();
@@ -540,12 +580,35 @@ static menu_result_t run_menu(QueueHandle_t touch_queue, const char *speaker_nam
             clear_armed = false;
             draw_button_row(MENU_CLEAR, " CLEAR PATTERN");
         }
+        char status[COLUMNS + 1];
         switch (row) {
         case 0:
         case MENU_BACK:
-            return MENU_RESULT_BACK;
+            return;
+        case MENU_WIFI:
+            if (!output_wifi_saved()) {
+                menu_status(" Set Wi-Fi in the launcher");
+            } else if (output_wifi_on()) {
+                output_wifi_stop();
+                menu_status(" Wi-Fi off");
+                draw_wifi_row();
+                draw_output_row();
+                draw_volume_row();
+            } else {
+                output_wifi_start(status, sizeof(status));
+                snprintf(status_text, sizeof(status_text), "%s", status);
+                draw_menu(latency);
+                xQueueReset(touch_queue);
+            }
+            break;
+        case MENU_OUTPUT:
+            output_pick_speaker(status, sizeof(status));
+            snprintf(status_text, sizeof(status_text), "%s", status);
+            draw_menu(latency);
+            xQueueReset(touch_queue);
+            break;
         case MENU_VOLUME:
-            if (left || right) {
+            if ((left || right) && audio_has_speaker()) {
                 audio_set_volume(audio_get_volume() + (left ? -VOLUME_STEP : VOLUME_STEP));
                 draw_volume_row();
             }
@@ -562,17 +625,18 @@ static menu_result_t run_menu(QueueHandle_t touch_queue, const char *speaker_nam
             cycle_length();
             draw_length_row();
             break;
-        case MENU_TRAP:
-            load_trap();
+        case MENU_BEATS:
+            if (left) {
+                load_trap();
+                menu_status(" Loaded the trap beat");
+            } else if (right) {
+                load_dnb();
+                menu_status(" Loaded the DnB beat");
+            } else {
+                break;
+            }
             draw_tempo_row();
             draw_length_row();
-            menu_status(" Loaded the trap beat");
-            break;
-        case MENU_DNB:
-            load_dnb();
-            draw_tempo_row();
-            draw_length_row();
-            menu_status(" Loaded the DnB beat");
             break;
         case MENU_CLEAR:
             if (clear_armed) {
@@ -603,8 +667,6 @@ static menu_result_t run_menu(QueueHandle_t touch_queue, const char *speaker_nam
             menu_status(" Used from the next connect");
             break;
         }
-        case MENU_DISCONNECT:
-            return MENU_RESULT_DISCONNECT;
         default:
             break;
         }
@@ -675,8 +737,7 @@ static void full_redraw(void)
     refresh();
 }
 
-ui_result_t ui_perform(QueueHandle_t touch_queue, const char *speaker_name,
-                       volatile bool *speaker_lost, drum_pattern_t *loop_pattern)
+void ui_run(QueueHandle_t touch_queue, drum_pattern_t *loop_pattern)
 {
     pattern = loop_pattern;
     track_colors[DRUM_KICK] = cyd_rgb(255, 70, 40);
@@ -692,8 +753,8 @@ ui_result_t ui_perform(QueueHandle_t touch_queue, const char *speaker_name,
     full_redraw();
     xQueueReset(touch_queue);
     while (true) {
-        if (*speaker_lost) {
-            return UI_SPEAKER_LOST;
+        if (output_check_lost()) {
+            speaker_lost_notice = true;
         }
         cyd_touch_point_t point;
         TickType_t wait = pdMS_TO_TICKS(REFRESH_MS);
@@ -705,13 +766,7 @@ ui_result_t ui_perform(QueueHandle_t touch_queue, const char *speaker_name,
             } else if (point.y >= GRID_ROW * FH) {
                 tap_grid(point.x, point.y);
             } else if (in_span(MENU_SPAN, point.x / FW)) {
-                menu_result_t result = run_menu(touch_queue, speaker_name, speaker_lost);
-                if (result == MENU_RESULT_DISCONNECT) {
-                    return UI_DISCONNECT;
-                }
-                if (result == MENU_RESULT_LOST) {
-                    return UI_SPEAKER_LOST;
-                }
+                run_menu(touch_queue);
                 full_redraw();
                 xQueueReset(touch_queue);
                 break;
@@ -723,4 +778,3 @@ ui_result_t ui_perform(QueueHandle_t touch_queue, const char *speaker_name,
         refresh();
     }
 }
-

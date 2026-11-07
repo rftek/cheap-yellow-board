@@ -1,15 +1,19 @@
 # DrumLoop
 
-A live drum machine for the Waveshare ESP32-S3-Touch-LCD-7 (800x480, capacitive touch), made for building drum and bass and trap beats on the fly. Eight 808-style sounds sit on touch pads that play live. A step sequencer loops 1 to 16 bars at an adjustable tempo, and you can build its beat by tapping steps or by recording what you play on the pads. The sound plays on an AirPlay speaker through the [airplay_sender](../../components/airplay_sender) component.
+A live drum machine for the Waveshare ESP32-S3-Touch-LCD-7 (800x480, capacitive touch), made for building drum and bass and trap beats on the fly. Eight 808-style sounds sit on touch pads that play live. A step sequencer loops 1 to 16 bars at an adjustable tempo, and you can build its beat by tapping steps or by recording what you play on the pads. The sound plays on an AirPlay speaker through the [airplay_sender](../../components/airplay_sender) component, or nowhere while you build a beat.
+
+Bluetooth output isn't possible on this board: the ESP32-S3 has no Classic Bluetooth, so no A2DP, and its BLE 5.0 radio lacks the isochronous channels LE Audio needs. BLE MIDI, sending the hits to a phone or computer that makes the sound, would work and could be added.
 
 This app lives in `apps/drumloop`. The [root README](../../README.md) lists every app in this repository. It targets the S3 board only (`supported-targets.txt`).
 
-## Getting connected
+## Starting up
 
-1. The start screen has two buttons. **PLAY ON AIRPLAY SPEAKER** joins the Wi-Fi network saved by the [launcher](../../launcher) (`wifi_ssid` and `wifi_pass` in NVS namespace `cyd_config`); no credentials are compiled in, and the button is gray when none is saved. **NO SPEAKER: PLAY SILENT** skips Wi-Fi altogether, and the radio stays off.
-2. It searches for AirPlay speakers for 3 seconds and lists them. Tap one to connect. Gray speakers marked `NO` can't be used; tap one to see why. Tap the title to search again.
+DrumLoop boots straight to the performance screen with Wi-Fi off and no speaker. The pads, the grid and the loop all work without sound: the loop and playhead run in real time on the board's clock. To hear it, open **MENU**:
 
-To skip the speaker later, tap **NO SPEAKER: PLAY SILENT** under the list. The button is also on the "Could not join" screen. Silent mode opens the performance screen with no sound. You can still build beats, and the loop and playhead run in real time on the board's clock with no AirPlay delay. **CHANGE SPEAKER** in the menu goes back to the list, or to the start screen if Wi-Fi was skipped, and the beat is kept.
+1. **WI-FI** turns the radio on and joins the network saved by the [launcher](../../launcher) (`wifi_ssid` and `wifi_pass` in NVS namespace `cyd_config`). No credentials are compiled in. Tap it again to turn Wi-Fi off. The row is gray when the launcher has no network saved.
+2. **OUTPUT** opens the speaker picker. It joins Wi-Fi first if it is off, searches for AirPlay speakers for 3 seconds, and lists them. Tap one to connect. Gray speakers marked `NO` can't be used; tap one to see why. Tap the title to search again. **NO SPEAKER** disconnects and goes silent; **BACK** leaves the output as it was.
+
+The loop keeps playing when the output changes, and the beat is kept. If the speaker drops the session, DrumLoop goes silent and the MENU button turns red until you open the menu, which says so.
 
 ## The performance screen
 
@@ -52,18 +56,18 @@ All sounds are synthesized at boot, the way the 808's circuits make them, so the
 
 ### MENU
 
+- **WI-FI** and **OUTPUT**: see [Starting up](#starting-up).
 - **VOL - / VOL +**: speaker volume in steps of 10%. It shows SILENT with no speaker.
 - **BPM -10 / BPM +10**.
 - **LOOP LENGTH**: 1, 2, 4, 8 or 16 bars. Each step up doubles the loop by copying the bars it has, so you can vary the copies. After 16 it goes back to 1 bar. The other bars are kept until the loop grows again.
-- **LOAD TRAP BEAT** (140 BPM, half time) and **LOAD DNB BEAT** (174 BPM, two-step): one-bar starter patterns. They replace the pattern.
+- **TRAP 140** (half time) and **DNB 174** (two-step): one-bar starter beats. They replace the pattern.
 - **CLEAR PATTERN**: tap twice.
 - **EXPORT LOOP**: a stub. See below.
 - **AIRPLAY DELAY**: 2000, 1000, 500 or 250 ms, saved in NVS (namespace `drumloop`) and used from the next connect. 2000 ms is the AirPlay 1 norm and works on every speaker. Shorter delays make the pads feel more immediate but some speakers don't honor them; try it on yours.
-- **CHANGE SPEAKER**: disconnects (or leaves silent mode) and goes back to the speaker list. The pattern is kept until power off.
 
 ## Latency
 
-AirPlay buffers audio on the speaker, so a pad sounds after the AirPlay delay, 2 s by default. For playing pads live, pick a shorter delay in MENU and reconnect. Recording and the playhead allow for the delay, so recorded hits land on the steps you heard.
+AirPlay buffers audio on the speaker, so a pad sounds after the AirPlay delay, 2 s by default. For playing pads live, pick a shorter delay in MENU and pick the speaker again in OUTPUT. Recording and the playhead allow for the delay, so recorded hits land on the steps you heard.
 
 ## Audio export (stub)
 
@@ -73,7 +77,8 @@ AirPlay buffers audio on the speaker, so a pad sounds after the AirPlay delay, 2
 
 | File | Contents |
 |---|---|
-| `main/main.c` | Wi-Fi, speaker search and list, connect and disconnect, silent mode |
+| `main/main.c` | start-up: kit, NVS, audio task, touch, UI task |
+| `main/output.c` | Wi-Fi on and off, speaker picker, connect and disconnect |
 | `main/ui.c` | performance screen and menu |
 | `main/audio.c` | audio task: runs the engine and writes 8 ms packets to the speaker, silence included, so pads play at any time; with no speaker it runs the engine on the clock |
 | `main/engine.c` | step sequencer (sample-accurate steps) and mixer (retrigger fades, hat choke, soft clipping) |

@@ -3,7 +3,7 @@
 /* The audio task: runs the engine and streams its output to the AirPlay
    speaker, one 8 ms packet at a time. While a speaker is attached it always
    writes, silence included, so a pad hit plays without restarting the
-   stream. */
+   stream. With no speaker it runs the engine on the clock. */
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -21,14 +21,12 @@ typedef struct {
    it plays. */
 esp_err_t audio_start(drum_pattern_t *pattern);
 
-/* Attaches a connected speaker, or detaches with NULL. Detaching waits for
-   the write in progress, so the caller can then disconnect the handle. */
-void audio_set_speaker(airplay_sender_handle_t speaker);
-
-/* Silent mode, for using the pads and sequencer with no speaker: the
+/* Sends the sound to a connected speaker, or with NULL to nowhere: then the
    engine runs in real time on the board's clock and its output is thrown
-   away. Ignored while a speaker is attached; attaching one ends it. */
-void audio_set_silent(bool on);
+   away, so the pads and loop still work. Silent is the default. Switching
+   waits for the write in progress, so the caller can then disconnect the
+   old speaker's handle. */
+void audio_set_output(airplay_sender_handle_t speaker);
 
 bool audio_has_speaker(void);
 
