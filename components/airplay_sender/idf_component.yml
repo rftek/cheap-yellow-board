@@ -1,0 +1,4 @@
+## Fetched by the ESP-IDF component manager at build time.
+description: AirPlay 1 (RAOP) audio sender
+dependencies:
+  espressif/mdns: "^1.8.0"
