@@ -1,0 +1,28 @@
+# ESP32-S3-Touch-LCD-7: 16 MB flash and 8 MB octal PSRAM. ESP-IDF adds this
+# file to sdkconfig.defaults when building for esp32s3. CI builds it only
+# when esp32s3 is listed in supported-targets.txt.
+CONFIG_IDF_TARGET="esp32s3"
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.esp32s3.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.esp32s3.csv"
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+
+# From Waveshare's RGB panel demo. Running code and constants from PSRAM
+# keeps the panel's frame buffer streaming while flash is written (NVS), and
+# the larger data cache with 64-byte lines suits the PSRAM frame buffer.
+CONFIG_SPIRAM_XIP_FROM_PSRAM=y
+CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
+CONFIG_ESP32S3_DATA_CACHE_64KB=y
+CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
+
+# The S3's Bluetooth controller is BLE only, so the esp32 dual-mode (BTDM)
+# settings in sdkconfig.defaults don't apply to it.
+
+# The labels at twice the CYD size (14 is in sdkconfig.defaults).
+CONFIG_LV_FONT_MONTSERRAT_28=y

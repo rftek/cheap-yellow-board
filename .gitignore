@@ -4,5 +4,8 @@ sdkconfig
 sdkconfig.old
 sdkconfig.*
 !sdkconfig.defaults
+!sdkconfig.defaults.*
 .vscode/launch.json
 .vscode/c_cpp_properties.json
+dist/
+managed_components/
