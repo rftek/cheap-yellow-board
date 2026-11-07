@@ -25,6 +25,13 @@ esp_err_t audio_start(drum_pattern_t *pattern);
    the write in progress, so the caller can then disconnect the handle. */
 void audio_set_speaker(airplay_sender_handle_t speaker);
 
+/* Silent mode, for using the pads and sequencer with no speaker: the
+   engine runs in real time on the board's clock and its output is thrown
+   away. Ignored while a speaker is attached; attaching one ends it. */
+void audio_set_silent(bool on);
+
+bool audio_has_speaker(void);
+
 /* Volume 0-100 on the attached speaker. */
 esp_err_t audio_set_volume(int volume);
 int audio_get_volume(void);

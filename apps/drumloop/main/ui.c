@@ -424,7 +424,11 @@ static void draw_split_row(int row, const char *left, const char *value, const c
 static void draw_volume_row(void)
 {
     char value[8];
-    snprintf(value, sizeof(value), "%d%%", audio_get_volume());
+    if (audio_has_speaker()) {
+        snprintf(value, sizeof(value), "%d%%", audio_get_volume());
+    } else {
+        snprintf(value, sizeof(value), "SILENT");
+    }
     draw_split_row(MENU_VOLUME, "VOL -", value, "VOL +");
 }
 
@@ -469,7 +473,7 @@ static void draw_menu(const char *speaker_name, uint32_t latency)
     draw_button_row(MENU_CLEAR, " CLEAR PATTERN");
     draw_button_row(MENU_EXPORT, " EXPORT LOOP");
     draw_latency_row(latency);
-    draw_button_row(MENU_DISCONNECT, " DISCONNECT");
+    draw_button_row(MENU_DISCONNECT, " CHANGE SPEAKER");
     draw_button_row(MENU_BACK, " BACK TO PADS");
 }
 

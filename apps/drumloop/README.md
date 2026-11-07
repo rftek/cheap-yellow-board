@@ -9,6 +9,8 @@ This app lives in `apps/drumloop`. The [root README](../../README.md) lists ever
 1. DrumLoop joins the Wi-Fi network saved by the [launcher](../../launcher) (`wifi_ssid` and `wifi_pass` in NVS namespace `cyd_config`). No credentials are compiled in.
 2. It searches for AirPlay speakers for 3 seconds and lists them. Tap one to connect. Gray speakers marked `NO` can't be used; tap one to see why. Tap the title to search again.
 
+To skip the speaker, tap **NO SPEAKER: PLAY SILENT** under the list. The button is also on the "No Wi-Fi saved" and "Could not join" screens. Silent mode opens the performance screen with no sound. You can still build beats, and the loop and playhead run in real time on the board's clock with no AirPlay delay. **CHANGE SPEAKER** in the menu goes back to the list, and the beat is kept.
+
 ## The performance screen
 
 ```
@@ -50,14 +52,14 @@ All sounds are synthesized at boot, the way the 808's circuits make them, so the
 
 ### MENU
 
-- **VOL - / VOL +**: speaker volume in steps of 10%.
+- **VOL - / VOL +**: speaker volume in steps of 10%. It shows SILENT with no speaker.
 - **BPM -10 / BPM +10**.
 - **LOOP LENGTH**: 1, 2, 4, 8 or 16 bars. Each step up doubles the loop by copying the bars it has, so you can vary the copies. After 16 it goes back to 1 bar. The other bars are kept until the loop grows again.
 - **LOAD TRAP BEAT** (140 BPM, half time) and **LOAD DNB BEAT** (174 BPM, two-step): one-bar starter patterns. They replace the pattern.
 - **CLEAR PATTERN**: tap twice.
 - **EXPORT LOOP**: a stub. See below.
 - **AIRPLAY DELAY**: 2000, 1000, 500 or 250 ms, saved in NVS (namespace `drumloop`) and used from the next connect. 2000 ms is the AirPlay 1 norm and works on every speaker. Shorter delays make the pads feel more immediate but some speakers don't honor them; try it on yours.
-- **DISCONNECT**: back to the speaker list. The pattern is kept until power off.
+- **CHANGE SPEAKER**: disconnects (or leaves silent mode) and goes back to the speaker list. The pattern is kept until power off.
 
 ## Latency
 
@@ -71,9 +73,9 @@ AirPlay buffers audio on the speaker, so a pad sounds after the AirPlay delay, 2
 
 | File | Contents |
 |---|---|
-| `main/main.c` | Wi-Fi, speaker search and list, connect and disconnect |
+| `main/main.c` | Wi-Fi, speaker search and list, connect and disconnect, silent mode |
 | `main/ui.c` | performance screen and menu |
-| `main/audio.c` | audio task: runs the engine and writes 8 ms packets to the speaker, silence included, so pads play at any time |
+| `main/audio.c` | audio task: runs the engine and writes 8 ms packets to the speaker, silence included, so pads play at any time; with no speaker it runs the engine on the clock |
 | `main/engine.c` | step sequencer (sample-accurate steps) and mixer (retrigger fades, hat choke, soft clipping) |
 | `main/kit.c` | 808-style synthesis |
 | `main/export.c` | loop render to WAV, save stub |

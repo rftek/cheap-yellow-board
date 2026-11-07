@@ -1,6 +1,7 @@
 #include "audio.h"
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
@@ -30,6 +31,9 @@ static QueueHandle_t steps;
 static volatile uint32_t frames_written;
 static volatile uint32_t latency_frames;
 static volatile bool want_playing;
+/* Silent mode: no speaker, the engine runs on the clock alone. */
+static bool silent;
+static bool silent_restart;
 
 static void on_step(uint64_t frame, uint16_t step, void *context)
 {
@@ -54,41 +58,70 @@ static void take_hits(void)
     }
 }
 
+/* Applies transport changes and hits, then renders one block. target is
+   the speaker, or NULL in silent mode. */
+static void render_block(int16_t *pcm, airplay_sender_handle_t target)
+{
+    if (want_playing && !engine.playing) {
+        engine_start(&engine);
+    } else if (!want_playing && engine.playing) {
+        engine_stop(&engine);
+        engine_silence(&engine);
+        if (target != NULL) {
+            airplay_sender_stop(target);
+        }
+        xQueueReset(steps);
+    }
+    take_hits();
+    engine_render(&engine, pcm, BLOCK_FRAMES);
+}
+
 static void audio_task(void *argument)
 {
     (void)argument;
     static int16_t pcm[BLOCK_FRAMES];
+    int64_t silent_start_us = 0;
+    uint64_t silent_frames = 0;
     while (true) {
         xSemaphoreTake(lock, portMAX_DELAY);
-        if (speaker == NULL) {
+        if (speaker != NULL) {
+            render_block(pcm, speaker);
+            esp_err_t result = airplay_sender_write(speaker, pcm, BLOCK_FRAMES,
+                                                    pdMS_TO_TICKS(WRITE_TIMEOUT_MS), NULL);
             xSemaphoreGive(lock);
-            if (engine.playing) {
-                engine_stop(&engine);
+            frames_written += BLOCK_FRAMES;
+            if (result != ESP_OK) {
+                /* The speaker went away; the UI hears of it from the
+                   sender's event and detaches. Don't spin meanwhile. */
+                vTaskDelay(pdMS_TO_TICKS(20));
             }
-            engine_silence(&engine);
-            xQueueReset(hits);
-            vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
-        if (want_playing && !engine.playing) {
-            engine_start(&engine);
-        } else if (!want_playing && engine.playing) {
-            engine_stop(&engine);
-            engine_silence(&engine);
-            airplay_sender_stop(speaker);
-            xQueueReset(steps);
+        bool run_silent = silent;
+        if (silent_restart) {
+            silent_restart = false;
+            silent_start_us = esp_timer_get_time();
+            silent_frames = 0;
         }
-        take_hits();
-        engine_render(&engine, pcm, BLOCK_FRAMES);
-        esp_err_t result =
-            airplay_sender_write(speaker, pcm, BLOCK_FRAMES, pdMS_TO_TICKS(WRITE_TIMEOUT_MS), NULL);
         xSemaphoreGive(lock);
-        frames_written += BLOCK_FRAMES;
-        if (result != ESP_OK) {
-            /* The speaker went away; the UI hears of it from the sender's
-               event and detaches. Don't spin meanwhile. */
-            vTaskDelay(pdMS_TO_TICKS(20));
+        if (run_silent) {
+            /* No speaker to pace the writes, so the clock does: render
+               every block that is due, as if a speaker played it. */
+            uint64_t due = (uint64_t)(esp_timer_get_time() - silent_start_us) * DRUM_RATE / 1000000;
+            while (silent_frames + BLOCK_FRAMES <= due) {
+                render_block(pcm, NULL);
+                silent_frames += BLOCK_FRAMES;
+                frames_written += BLOCK_FRAMES;
+            }
+            vTaskDelay(1);
+            continue;
         }
+        if (engine.playing) {
+            engine_stop(&engine);
+        }
+        engine_silence(&engine);
+        xQueueReset(hits);
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
 
@@ -111,6 +144,7 @@ void audio_set_speaker(airplay_sender_handle_t new_speaker)
 {
     xSemaphoreTake(lock, portMAX_DELAY);
     speaker = new_speaker;
+    silent = false;
     want_playing = false;
     if (new_speaker != NULL) {
         latency_frames =
@@ -119,6 +153,25 @@ void audio_set_speaker(airplay_sender_handle_t new_speaker)
     }
     xQueueReset(steps);
     xSemaphoreGive(lock);
+}
+
+void audio_set_silent(bool on)
+{
+    xSemaphoreTake(lock, portMAX_DELAY);
+    silent = on && speaker == NULL;
+    silent_restart = silent;
+    want_playing = false;
+    latency_frames = 0;
+    xQueueReset(steps);
+    xSemaphoreGive(lock);
+}
+
+bool audio_has_speaker(void)
+{
+    xSemaphoreTake(lock, portMAX_DELAY);
+    bool attached = speaker != NULL;
+    xSemaphoreGive(lock);
+    return attached;
 }
 
 esp_err_t audio_set_volume(int volume)

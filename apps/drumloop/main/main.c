@@ -3,7 +3,7 @@
    A live drum machine: eight 808-style sounds on touch pads and a step
    sequencer of up to 16 bars, played on an AirPlay speaker through
    components/airplay_sender. This file joins Wi-Fi, lets the player pick a
-   speaker and connects; ui.c is the performance screen, audio.c streams
+   speaker (or skip it and play silent) and connects; ui.c is the performance screen, audio.c streams
    the engine (engine.c) to the speaker, kit.c makes the sounds and
    export.c renders the loop for a future export. */
 
@@ -40,7 +40,8 @@
 #define HEADER_ROW 0
 #define FOOTER_ROW (CYD_TEXT_ROWS - 1)
 #define LIST_FIRST_ROW 1
-#define LIST_ROWS (CYD_TEXT_ROWS - 2)
+#define SKIP_ROW (FOOTER_ROW - 1)
+#define LIST_ROWS (SKIP_ROW - LIST_FIRST_ROW)
 #define ARROW_COLUMNS 3
 #define ARROW_DOWN_COLUMN (CYD_TEXT_COLUMNS - ARROW_COLUMNS)
 #define ARROW_UP_COLUMN (ARROW_DOWN_COLUMN - ARROW_COLUMNS - 1)
@@ -60,6 +61,8 @@ static airplay_device_t devices[MAX_DEVICES];
 static size_t device_count;
 static int list_offset;
 static volatile bool speaker_lost;
+/* Never set: there is no speaker to lose in silent mode. */
+static volatile bool no_speaker_lost;
 
 /* The loop. It outlives speaker connections, so a beat survives a
    reconnect; it is not saved across power cycles. */
@@ -173,6 +176,22 @@ static void show_status(const char *status)
     ESP_ERROR_CHECK(cyd_text_row(FOOTER_ROW, CYD_COLOR_GRAY, CYD_COLOR_BLACK, status));
 }
 
+/* The button that skips the speaker and opens the pads in silent mode. */
+static void show_skip_button(void)
+{
+    ESP_ERROR_CHECK(cyd_text_row(SKIP_ROW, CYD_COLOR_WHITE, CYD_COLOR_BUTTON,
+                                 " NO SPEAKER: PLAY SILENT"));
+}
+
+/* Waits for a tap; true if it was on the skip button. */
+static bool wait_for_skip_tap(void)
+{
+    xQueueReset(touch_queue);
+    cyd_touch_point_t point;
+    xQueueReceive(touch_queue, &point, portMAX_DELAY);
+    return point.y / CYD_FONT_HEIGHT == SKIP_ROW;
+}
+
 static void wait_for_tap(void)
 {
     xQueueReset(touch_queue);
@@ -209,7 +228,8 @@ static void show_list(void)
     }
     ESP_ERROR_CHECK(cyd_draw_cells(HEADER_ROW, header, foreground, background));
 
-    clear_rows(LIST_FIRST_ROW, FOOTER_ROW - 1);
+    clear_rows(LIST_FIRST_ROW, SKIP_ROW - 1);
+    show_skip_button();
     if (device_count == 0) {
         ESP_ERROR_CHECK(cyd_text_row(CYD_TEXT_ROWS / 2 - 1, CYD_COLOR_YELLOW, CYD_COLOR_BLACK,
                                      " No AirPlay speakers"));
@@ -298,6 +318,16 @@ static void play_to(const airplay_device_t *device)
     }
 }
 
+/* Runs the performance screen with no speaker, for practising on the
+   pads or building a beat; the playhead runs on the board's clock. */
+static void play_silent(void)
+{
+    ESP_LOGI(TAG, "No speaker: silent mode");
+    audio_set_silent(true);
+    ui_perform(touch_queue, "No speaker (silent)", &no_speaker_lost, &pattern);
+    audio_set_silent(false);
+}
+
 static void search(void)
 {
     show_message(" Searching", " AirPlay speakers", NULL);
@@ -344,6 +374,10 @@ static void browse_list(void)
             play_to(device);
             show_list();
             xQueueReset(touch_queue);
+        } else if (row == SKIP_ROW) {
+            play_silent();
+            show_list();
+            xQueueReset(touch_queue);
         }
     }
 }
@@ -353,9 +387,13 @@ static void main_task(void *argument)
     (void)argument;
     if (!have_wifi_settings) {
         ESP_LOGW(TAG, "No Wi-Fi network saved in NVS %s", CYD_CONFIG_NAMESPACE);
-        show_message(" No Wi-Fi saved", " Set one in the launcher", NULL);
-        vTaskDelete(NULL);
-        return;
+        while (true) {
+            show_message(" No Wi-Fi saved", " Set one in the launcher", NULL);
+            show_skip_button();
+            if (wait_for_skip_tap()) {
+                play_silent();
+            }
+        }
     }
     while (true) {
         char line[CYD_TEXT_COLUMNS + 1];
@@ -365,8 +403,11 @@ static void main_task(void *argument)
             char reason[CYD_TEXT_COLUMNS + 1];
             snprintf(reason, sizeof(reason), " Reason %u", wifi_last_reason);
             show_message(" Could not join", line, " Tap to retry");
+            show_skip_button();
             show_status(reason);
-            wait_for_tap();
+            if (wait_for_skip_tap()) {
+                play_silent();
+            }
             continue;
         }
         search();
