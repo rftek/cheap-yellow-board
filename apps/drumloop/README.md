@@ -6,10 +6,10 @@ This app lives in `apps/drumloop`. The [root README](../../README.md) lists ever
 
 ## Getting connected
 
-1. DrumLoop joins the Wi-Fi network saved by the [launcher](../../launcher) (`wifi_ssid` and `wifi_pass` in NVS namespace `cyd_config`). No credentials are compiled in.
+1. The start screen has two buttons. **PLAY ON AIRPLAY SPEAKER** joins the Wi-Fi network saved by the [launcher](../../launcher) (`wifi_ssid` and `wifi_pass` in NVS namespace `cyd_config`); no credentials are compiled in, and the button is gray when none is saved. **NO SPEAKER: PLAY SILENT** skips Wi-Fi altogether, and the radio stays off.
 2. It searches for AirPlay speakers for 3 seconds and lists them. Tap one to connect. Gray speakers marked `NO` can't be used; tap one to see why. Tap the title to search again.
 
-To skip the speaker, tap **NO SPEAKER: PLAY SILENT** under the list. The button is also on the "No Wi-Fi saved" and "Could not join" screens. Silent mode opens the performance screen with no sound. You can still build beats, and the loop and playhead run in real time on the board's clock with no AirPlay delay. **CHANGE SPEAKER** in the menu goes back to the list, and the beat is kept.
+To skip the speaker later, tap **NO SPEAKER: PLAY SILENT** under the list. The button is also on the "Could not join" screen. Silent mode opens the performance screen with no sound. You can still build beats, and the loop and playhead run in real time on the board's clock with no AirPlay delay. **CHANGE SPEAKER** in the menu goes back to the list, or to the start screen if Wi-Fi was skipped, and the beat is kept.
 
 ## The performance screen
 

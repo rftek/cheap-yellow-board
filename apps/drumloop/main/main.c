@@ -3,7 +3,7 @@
    A live drum machine: eight 808-style sounds on touch pads and a step
    sequencer of up to 16 bars, played on an AirPlay speaker through
    components/airplay_sender. This file joins Wi-Fi, lets the player pick a
-   speaker (or skip it and play silent) and connects; ui.c is the performance screen, audio.c streams
+   speaker and connects, or skips Wi-Fi and the speaker for silent mode; ui.c is the performance screen, audio.c streams
    the engine (engine.c) to the speaker, kit.c makes the sounds and
    export.c renders the loop for a future export. */
 
@@ -54,6 +54,7 @@ static esp_netif_t *sta_netif;
 static char wifi_ssid[33];
 static char wifi_password[65];
 static bool have_wifi_settings;
+static bool wifi_started;
 static uint8_t wifi_last_reason;
 static esp_netif_ip_info_t ip_info;
 
@@ -115,7 +116,6 @@ static void wifi_init(void)
                                                wifi_event_handler, NULL));
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    load_wifi_settings();
     if (have_wifi_settings) {
         wifi_config_t wifi_config = {0};
         memcpy(wifi_config.sta.ssid, wifi_ssid, strnlen(wifi_ssid, sizeof(wifi_config.sta.ssid)));
@@ -382,18 +382,54 @@ static void browse_list(void)
     }
 }
 
-static void main_task(void *argument)
+#define START_AIRPLAY_ROW 4
+#define START_WIFI_ROW 5
+#define START_SILENT_ROW 7
+#define START_SILENT_NOTE_ROW 8
+
+/* The first screen: play on an AirPlay speaker (which needs Wi-Fi), or
+   skip Wi-Fi and play silent. True for AirPlay. */
+static bool choose_start(void)
 {
-    (void)argument;
-    if (!have_wifi_settings) {
-        ESP_LOGW(TAG, "No Wi-Fi network saved in NVS %s", CYD_CONFIG_NAMESPACE);
-        while (true) {
-            show_message(" No Wi-Fi saved", " Set one in the launcher", NULL);
-            show_skip_button();
-            if (wait_for_skip_tap()) {
-                play_silent();
-            }
+    char line[CYD_TEXT_COLUMNS + 1];
+    ESP_ERROR_CHECK(cyd_text_row(HEADER_ROW, CYD_COLOR_BLACK, CYD_COLOR_YELLOW, " DRUMLOOP"));
+    clear_rows(LIST_FIRST_ROW, FOOTER_ROW);
+    ESP_ERROR_CHECK(cyd_text_row(2, CYD_COLOR_YELLOW, CYD_COLOR_BLACK, " 808 pads and looper"));
+    if (have_wifi_settings) {
+        ESP_ERROR_CHECK(cyd_text_row(START_AIRPLAY_ROW, CYD_COLOR_WHITE, CYD_COLOR_BUTTON,
+                                     " PLAY ON AIRPLAY SPEAKER"));
+        snprintf(line, sizeof(line), " Wi-Fi: %s", wifi_ssid);
+    } else {
+        ESP_ERROR_CHECK(cyd_text_row(START_AIRPLAY_ROW, CYD_COLOR_GRAY,
+                                     CYD_COLOR_BUTTON_DISABLED, " PLAY ON AIRPLAY SPEAKER"));
+        snprintf(line, sizeof(line), " Set Wi-Fi in the launcher");
+    }
+    ESP_ERROR_CHECK(cyd_text_row(START_WIFI_ROW, CYD_COLOR_GRAY, CYD_COLOR_BLACK, line));
+    ESP_ERROR_CHECK(cyd_text_row(START_SILENT_ROW, CYD_COLOR_WHITE, CYD_COLOR_BUTTON,
+                                 " NO SPEAKER: PLAY SILENT"));
+    ESP_ERROR_CHECK(cyd_text_row(START_SILENT_NOTE_ROW, CYD_COLOR_GRAY, CYD_COLOR_BLACK,
+                                 " No Wi-Fi, no sound"));
+    xQueueReset(touch_queue);
+    while (true) {
+        cyd_touch_point_t point;
+        xQueueReceive(touch_queue, &point, portMAX_DELAY);
+        int row = point.y / CYD_FONT_HEIGHT;
+        if (row == START_AIRPLAY_ROW && have_wifi_settings) {
+            return true;
         }
+        if (row == START_SILENT_ROW) {
+            return false;
+        }
+    }
+}
+
+/* Joins Wi-Fi and runs the speaker list. The list's skip button and the
+   join-failure screen lead to silent mode; this never returns. */
+static void airplay_mode(void)
+{
+    if (!wifi_started) {
+        wifi_init();
+        wifi_started = true;
     }
     while (true) {
         char line[CYD_TEXT_COLUMNS + 1];
@@ -415,6 +451,19 @@ static void main_task(void *argument)
     }
 }
 
+static void main_task(void *argument)
+{
+    (void)argument;
+    if (!have_wifi_settings) {
+        ESP_LOGW(TAG, "No Wi-Fi network saved in NVS %s", CYD_CONFIG_NAMESPACE);
+    }
+    /* Wi-Fi starts only when the player picks AirPlay. */
+    while (!choose_start()) {
+        play_silent();
+    }
+    airplay_mode();
+}
+
 void app_main(void)
 {
     ESP_ERROR_CHECK(cyd_display_init());
@@ -428,7 +477,7 @@ void app_main(void)
         nvs_result = nvs_flash_init();
     }
     ESP_ERROR_CHECK(nvs_result);
-    wifi_init();
+    load_wifi_settings();
     ESP_ERROR_CHECK(audio_start(&pattern));
 
     ESP_ERROR_CHECK(cyd_touch_start(&touch_queue));
