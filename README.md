@@ -14,6 +14,7 @@ Applications for the ESP32 Cheap Yellow Display (CYD, ESP32-2432S028R), written 
 | [apps/catmouse](apps/catmouse) | PAC-MAN-style maze game | esp32, esp32s3 |
 | [apps/catmouse_pad](apps/catmouse_pad) | The same maze game, also steered with an Xbox controller | esp32, esp32s3 |
 | [apps/datalogger](apps/datalogger) | Voltage logger on GPIO35 | esp32 |
+| [apps/drumloop](apps/drumloop) | Live 808 drum pads and a 1-16 bar step sequencer, played on an AirPlay speaker | esp32s3 |
 | [apps/f1_race](apps/f1_race) | F1 racing game | esp32, esp32s3 |
 | [apps/gear_roll](apps/gear_roll) | LVGL gear demo | esp32, esp32s3 |
 | [apps/screen_check](apps/screen_check) | Screen color test | esp32, esp32s3 |
