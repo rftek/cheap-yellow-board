@@ -8,6 +8,7 @@ Applications for the ESP32 Cheap Yellow Display (CYD, ESP32-2432S028R), written 
 
 | Folder | Application | Targets |
 |---|---|---|
+| [apps/airplay_test](apps/airplay_test) | AirPlay speaker search and test tone (airplay_sender demo) | esp32s3 |
 | [apps/birdnet_viewer](apps/birdnet_viewer) | BirdNET bird photo viewer | esp32, esp32s3 |
 | [apps/bluetooth_diag](apps/bluetooth_diag) | Bluetooth Classic and LE scanner and connection tester | esp32 |
 | [apps/catmouse](apps/catmouse) | PAC-MAN-style maze game | esp32, esp32s3 |
@@ -39,6 +40,7 @@ launcher/                    the launcher, its bootloader (bootloader_components
                              and partition tables
 components/cyd_display/      display, fonts, patterns and touch, shared by every app
 components/cyd_gamepad/      Xbox / Bluetooth gamepad input on Bluepad32
+components/airplay_sender/   AirPlay 1 (RAOP) audio output to network speakers
 external/bluepad32/          Bluepad32 git submodule, with BTstack nested in it
 docs/                        build environment and installation guide
 tools/ci_plan.py             picks the apps a change needs built
