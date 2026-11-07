@@ -55,7 +55,7 @@ One network task handles the timing and control sockets and the keepalive, and n
 
 ## Size
 
-About 10 KB of code, plus about 90 KB for Espressif's mDNS component. At run time it uses the backlog (`backlog_packets` × 1424 bytes) and a 4 KB task stack. It runs on the ESP32 as well as the S3; on the CYD, which has no PSRAM, set `backlog_packets` to 32 or so.
+About 10 KB of code, plus about 90 KB for Espressif's mDNS component. At run time it uses the backlog (`backlog_packets` × 1424 bytes) about 4 KB of buffers in the handle and a 6 KB task stack. It runs on the ESP32 as well as the S3; on the CYD, which has no PSRAM, set `backlog_packets` to 32 or so.
 
 ## Not supported
 
@@ -68,4 +68,4 @@ About 10 KB of code, plus about 90 KB for Espressif's mDNS component. At run tim
 
 ## Testing status
 
-It builds for the esp32s3. It has not been tried against a real speaker yet. Shairport Sync on a PC or Raspberry Pi is the easiest first target, and `-v` there shows the RTSP exchange.
+Played to a Denon AVR-S770H receiver (AirPlay 2, `et=0,4`, so it took the `/auth-setup` path) from the Waveshare S3 on 2026-11-07. Denon Home 250 speakers were found, but haven't been played to yet.

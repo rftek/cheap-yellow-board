@@ -44,6 +44,8 @@ static const char *TAG = "airplay_sender";
 #define PACKET_SIZE (RTP_HEADER_SIZE + ALAC_FRAME_SIZE)
 #define RESEND_HEADER_SIZE 4
 
+/* lwIP's sendto and select run deep; 4 KB overflowed on the S3. */
+#define NETWORK_TASK_STACK 6144
 #define RTSP_TIMEOUT_MS 5000
 #define RTSP_HEADER_MAX 2048
 #define SYNC_INTERVAL_US 1000000
@@ -108,6 +110,11 @@ struct airplay_sender {
 
     uint8_t *backlog; /* backlog_packets x PACKET_SIZE */
     uint16_t *backlog_size;
+
+    /* Working buffers, kept off the task stacks. */
+    char request_head[768];           /* under rtsp_lock */
+    rtsp_response_t scratch_response; /* under rtsp_lock */
+    uint8_t resend_packet[RESEND_HEADER_SIZE + PACKET_SIZE]; /* under lock */
 };
 
 /* ---- Byte and clock helpers --------------------------------------------- */
@@ -202,12 +209,15 @@ static esp_err_t rtsp_request(struct airplay_sender *s, const char *method, cons
                               const char *extra_headers, const char *content_type,
                               const void *body, size_t body_length, rtsp_response_t *response)
 {
-    rtsp_response_t local;
+    /* The buffers live in the sender, not on the stack: the network task
+       sends keepalives from a small stack. */
+    xSemaphoreTake(s->rtsp_lock, portMAX_DELAY);
     if (response == NULL) {
-        response = &local;
+        response = &s->scratch_response;
     }
-    char head[768];
-    int n = snprintf(head, sizeof(head),
+    char *head = s->request_head;
+    const size_t head_size = sizeof(s->request_head);
+    int n = snprintf(head, head_size,
                      "%s %s RTSP/1.0\r\n"
                      "CSeq: %lu\r\n"
                      "User-Agent: iTunes/7.6.2 (Windows; N;)\r\n"
@@ -217,21 +227,21 @@ static esp_err_t rtsp_request(struct airplay_sender *s, const char *method, cons
                      method, uri, (unsigned long)++s->cseq, s->client_instance, s->dacp_id,
                      (unsigned long)s->active_remote);
     if (s->session[0] != '\0') {
-        n += snprintf(head + n, sizeof(head) - n, "Session: %s\r\n", s->session);
+        n += snprintf(head + n, head_size - n, "Session: %s\r\n", s->session);
     }
     if (extra_headers != NULL) {
-        n += snprintf(head + n, sizeof(head) - n, "%s", extra_headers);
+        n += snprintf(head + n, head_size - n, "%s", extra_headers);
     }
     if (body_length > 0) {
-        n += snprintf(head + n, sizeof(head) - n, "Content-Type: %s\r\nContent-Length: %u\r\n",
+        n += snprintf(head + n, head_size - n, "Content-Type: %s\r\nContent-Length: %u\r\n",
                       content_type, (unsigned)body_length);
     }
-    n += snprintf(head + n, sizeof(head) - n, "\r\n");
-    if (n >= (int)sizeof(head)) {
+    n += snprintf(head + n, head_size - n, "\r\n");
+    if (n >= (int)head_size) {
+        xSemaphoreGive(s->rtsp_lock);
         return ESP_ERR_INVALID_SIZE;
     }
 
-    xSemaphoreTake(s->rtsp_lock, portMAX_DELAY);
     esp_err_t result = send_all(s->rtsp, head, (size_t)n);
     if (result == ESP_OK && body_length > 0) {
         result = send_all(s->rtsp, body, body_length);
@@ -275,15 +285,16 @@ static esp_err_t rtsp_request(struct airplay_sender *s, const char *method, cons
             body_have += (size_t)got;
         }
     }
+    int status = response->status;
     xSemaphoreGive(s->rtsp_lock);
 
     if (result != ESP_OK) {
         ESP_LOGW(TAG, "%s: no response (%s)", method, esp_err_to_name(result));
         return result;
     }
-    ESP_LOGD(TAG, "%s %s -> %d", method, uri, response->status);
-    if (response->status != 200) {
-        ESP_LOGW(TAG, "%s %s: RTSP status %d", method, uri, response->status);
+    ESP_LOGD(TAG, "%s %s -> %d", method, uri, status);
+    if (status != 200) {
+        ESP_LOGW(TAG, "%s %s: RTSP status %d", method, uri, status);
         return ESP_FAIL;
     }
     return ESP_OK;
@@ -393,7 +404,7 @@ static void send_chunk(struct airplay_sender *s)
 /* Answers a resend request from the backlog. Under lock. */
 static void resend(struct airplay_sender *s, uint16_t first, uint16_t count)
 {
-    uint8_t reply[RESEND_HEADER_SIZE + PACKET_SIZE];
+    uint8_t *reply = s->resend_packet;
     struct sockaddr_in to = s->remote;
     to.sin_port = htons(s->remote_control_port);
     if (count > s->config.backlog_packets) {
@@ -507,6 +518,8 @@ static void network_task(void *argument)
             rtsp_request(s, "OPTIONS", "*", NULL, NULL, NULL, 0, NULL);
         }
     }
+    ESP_LOGI(TAG, "Network task stack headroom: %u bytes",
+             (unsigned)uxTaskGetStackHighWaterMark(NULL));
     xSemaphoreGive(s->task_done);
     vTaskDelete(NULL);
 }
@@ -616,7 +629,7 @@ static esp_err_t open_session(struct airplay_sender *s, const airplay_device_t *
         return ESP_ERR_NO_MEM;
     }
     s->connected = true;
-    if (xTaskCreate(network_task, "airplay_net", 4096, s, 6, &s->task) != pdPASS) {
+    if (xTaskCreate(network_task, "airplay_net", NETWORK_TASK_STACK, s, 6, &s->task) != pdPASS) {
         s->task = NULL;
         return ESP_ERR_NO_MEM;
     }
