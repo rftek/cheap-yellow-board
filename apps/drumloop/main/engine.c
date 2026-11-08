@@ -42,24 +42,20 @@ void engine_stop(drum_engine_t *engine)
 void engine_silence(drum_engine_t *engine)
 {
     for (int track = 0; track < DRUM_TRACKS; ++track) {
-        engine->voices[track].pos = UINT32_MAX;
+        engine->voices[track].sound = NULL;
         engine->voices[track].fade_left = 0;
     }
 }
 
-static bool voice_active(const drum_voice_t *voice, const drum_sound_t *sound)
-{
-    return voice->pos < sound->frames;
-}
-
 /* Moves a sounding hit to the fade slot, so it dies away in 5 ms. */
-static void fade_out(drum_voice_t *voice, const drum_sound_t *sound)
+static void fade_out(drum_voice_t *voice)
 {
-    if (voice_active(voice, sound)) {
+    if (voice->sound != NULL) {
+        voice->fade_sound = voice->sound;
         voice->fade_pos = voice->pos;
         voice->fade_left = RETRIGGER_FADE;
     }
-    voice->pos = UINT32_MAX;
+    voice->sound = NULL;
 }
 
 void engine_hit(drum_engine_t *engine, int track)
@@ -69,10 +65,11 @@ void engine_hit(drum_engine_t *engine, int track)
     }
     /* As on the 808, the closed hat chokes the open one. */
     if (track == DRUM_CLOSED_HAT) {
-        fade_out(&engine->voices[DRUM_OPEN_HAT], kit_sound(DRUM_OPEN_HAT));
+        fade_out(&engine->voices[DRUM_OPEN_HAT]);
     }
     drum_voice_t *voice = &engine->voices[track];
-    fade_out(voice, kit_sound(track));
+    fade_out(voice);
+    voice->sound = kit_sound(engine->pattern->kit, track);
     voice->pos = 0;
 }
 
@@ -144,19 +141,26 @@ static void mix(drum_engine_t *engine, int16_t *out, size_t frames)
     float acc[MIX_CHUNK];
     memset(acc, 0, frames * sizeof(float));
     for (int track = 0; track < DRUM_TRACKS; ++track) {
-        const drum_sound_t *sound = kit_sound(track);
         drum_voice_t *voice = &engine->voices[track];
-        float gain = sound->gain / 32768.0f;
-        for (size_t i = 0; i < frames && voice->pos < sound->frames; ++i) {
-            acc[i] += sound->pcm[voice->pos++] * gain;
+        const drum_sound_t *sound = voice->sound;
+        if (sound != NULL) {
+            float gain = sound->gain / 32768.0f;
+            size_t i = 0;
+            for (; i < frames && voice->pos < sound->frames; ++i) {
+                acc[i] += sound->pcm[voice->pos++] * gain;
+            }
+            if (voice->pos >= sound->frames) {
+                voice->sound = NULL;
+            }
         }
+        const drum_sound_t *fading = voice->fade_sound;
         for (size_t i = 0; i < frames && voice->fade_left > 0; ++i) {
-            if (voice->fade_pos >= sound->frames) {
+            if (voice->fade_pos >= fading->frames) {
                 voice->fade_left = 0;
                 break;
             }
             float fade = (float)voice->fade_left / RETRIGGER_FADE;
-            acc[i] += sound->pcm[voice->fade_pos++] * gain * fade;
+            acc[i] += fading->pcm[voice->fade_pos++] * (fading->gain / 32768.0f) * fade;
             --voice->fade_left;
         }
     }

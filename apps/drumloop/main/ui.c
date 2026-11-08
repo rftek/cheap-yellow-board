@@ -143,8 +143,9 @@ static void save_latency_ms(uint32_t latency)
 
 /* ---- Starter beats ------------------------------------------------------ */
 
-static void load_beat(uint16_t bpm, const uint16_t steps[DRUM_TRACKS])
+static void load_beat(uint16_t bpm, int kit, const uint16_t steps[DRUM_TRACKS])
 {
+    pattern->kit = (uint8_t)kit;
     memset(pattern->steps, 0, sizeof(pattern->steps));
     memcpy(pattern->steps[0], steps, sizeof(pattern->steps[0]));
     pattern->bars = 1;
@@ -164,7 +165,7 @@ static void load_trap(void)
         [DRUM_CLOSED_HAT] = 0xB555, /* eighths, 13 and 15, not 14 */
         [DRUM_OPEN_HAT] = 0x4000,   /* 14 */
     };
-    load_beat(140, steps);
+    load_beat(140, KIT_TRAP, steps);
 }
 
 /* Two-step drum and bass at 174: kick on 1 and the "and" of 3, snare on 2
@@ -177,7 +178,7 @@ static void load_dnb(void)
         [DRUM_CLOSED_HAT] = 0x5555, /* eighths */
         [DRUM_RIM] = 0x8080,        /* 7, 15 */
     };
-    load_beat(174, steps);
+    load_beat(174, KIT_DNB, steps);
 }
 
 /* ---- Drawing ------------------------------------------------------------ */
@@ -249,7 +250,7 @@ static void draw_track_label(int track)
     }
     bool muted = (pattern->muted >> track) & 1;
     span_t label = {0, LABEL_WIDTH / FW};
-    put_span(text, fg, bg, label, kit_sound(track)->label,
+    put_span(text, fg, bg, label, kit_sound(pattern->kit, track)->label,
              muted ? CYD_COLOR_GRAY : CYD_COLOR_BLACK, muted ? COLOR_MUTED : track_colors[track]);
     ESP_ERROR_CHECK(cyd_draw_cells(GRID_ROW + track, text, fg, bg));
     for (int step = 0; step < DRUM_STEPS; ++step) {
@@ -320,7 +321,7 @@ static void draw_pads(int flash)
     for (int pad = 0; pad < DRUM_TRACKS; ++pad) {
         int center = pad * PAD_WIDTH + PAD_WIDTH / 2;
         int start = (center - FW + FW / 2) / FW;
-        memcpy(text + start, kit_sound(pad)->label, 2);
+        memcpy(text + start, kit_sound(pattern->kit, pad)->label, 2);
     }
     ESP_ERROR_CHECK(cyd_draw_cells(PAD_LABEL_ROW, text, fg, bg));
     int label_y = PAD_LABEL_ROW * FH;
@@ -393,8 +394,8 @@ static void update_playhead(void)
 #define MENU_TEMPO 5
 #define MENU_LENGTH 6
 #define MENU_BEATS 7
-#define MENU_CLEAR 8
-#define MENU_EXPORT 9
+#define MENU_CLEAR 8 /* CLEAR on the left, EXPORT on the right */
+#define MENU_KIT 9
 #define MENU_LATENCY 10
 #define MENU_BACK 11
 #define SPLIT_BUTTON_COLUMNS 9
@@ -494,6 +495,18 @@ static void draw_length_row(void)
     draw_button_row(MENU_LENGTH, line);
 }
 
+static void draw_clear_row(bool armed)
+{
+    draw_split_row(MENU_CLEAR, armed ? "CLEAR?" : "CLEAR", "", "EXPORT");
+}
+
+static void draw_kit_row(void)
+{
+    char line[COLUMNS + 1];
+    snprintf(line, sizeof(line), " KIT  %s  %s", kit_name(pattern->kit), kit_about(pattern->kit));
+    draw_button_row(MENU_KIT, line);
+}
+
 static void draw_latency_row(uint32_t latency)
 {
     char line[COLUMNS + 1];
@@ -511,8 +524,8 @@ static void draw_menu(uint32_t latency)
     draw_tempo_row();
     draw_length_row();
     draw_split_row(MENU_BEATS, "TRAP 140", "LOAD BEAT", "DNB 174");
-    draw_button_row(MENU_CLEAR, " CLEAR PATTERN");
-    draw_button_row(MENU_EXPORT, " EXPORT LOOP");
+    draw_clear_row(false);
+    draw_kit_row();
     draw_latency_row(latency);
     draw_button_row(MENU_BACK, " BACK TO PADS");
 }
@@ -584,9 +597,9 @@ static void run_menu(QueueHandle_t touch_queue)
         int column = point.x / FW;
         bool left = column < SPLIT_BUTTON_COLUMNS;
         bool right = column >= COLUMNS - SPLIT_BUTTON_COLUMNS;
-        if (clear_armed && row != MENU_CLEAR) {
+        if (clear_armed && !(row == MENU_CLEAR && left)) {
             clear_armed = false;
-            draw_button_row(MENU_CLEAR, " CLEAR PATTERN");
+            draw_clear_row(false);
         }
         char status[COLUMNS + 1];
         switch (row) {
@@ -645,21 +658,29 @@ static void run_menu(QueueHandle_t touch_queue)
             }
             draw_tempo_row();
             draw_length_row();
+            draw_kit_row();
             break;
         case MENU_CLEAR:
-            if (clear_armed) {
+            if (right) {
+                export_loop();
+            } else if (!left) {
+                break;
+            } else if (clear_armed) {
                 memset(pattern->steps, 0, sizeof(pattern->steps));
                 clear_armed = false;
-                draw_button_row(MENU_CLEAR, " CLEAR PATTERN");
+                draw_clear_row(false);
                 menu_status(" Pattern cleared");
             } else {
                 clear_armed = true;
-                ESP_ERROR_CHECK(cyd_text_row(MENU_CLEAR, CYD_COLOR_WHITE, CYD_COLOR_RED,
-                                             " TAP AGAIN TO CLEAR"));
+                draw_clear_row(true);
+                menu_status(" Tap CLEAR? again to clear");
             }
             break;
-        case MENU_EXPORT:
-            export_loop();
+        case MENU_KIT:
+            /* Takes effect at once, even mid-loop; ringing hits finish on
+               the kit they started on. */
+            pattern->kit = (uint8_t)((pattern->kit + 1) % DRUM_KITS);
+            draw_kit_row();
             break;
         case MENU_LATENCY: {
             size_t count = sizeof(latency_choices) / sizeof(latency_choices[0]);
@@ -788,7 +809,7 @@ void ui_run(QueueHandle_t touch_queue, drum_pattern_t *loop_pattern)
     track_colors[DRUM_OPEN_HAT] = cyd_rgb(70, 130, 255);
     track_colors[DRUM_TOM] = cyd_rgb(60, 220, 90);
     track_colors[DRUM_RIM] = cyd_rgb(230, 90, 230);
-    track_colors[DRUM_COWBELL] = cyd_rgb(220, 220, 200);
+    track_colors[DRUM_EXTRA] = cyd_rgb(220, 220, 200);
     playhead = NO_STEP;
 
     cyd_touch_set_tap_callback(on_tap, NULL);

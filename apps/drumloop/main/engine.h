@@ -22,15 +22,20 @@ typedef struct {
     uint8_t bars; /* loop length: 1, 2, 4, 8 or 16 */
     uint16_t bpm;
     uint8_t muted; /* bit per track */
+    uint8_t kit;   /* drum_kit_t; changing it changes the sound at once */
 } drum_pattern_t;
 
 /* Called as each step starts, with the frame it starts at (the count of
    frames rendered before it) and its index in the loop, bar * 16 + step. */
 typedef void (*drum_step_cb_t)(uint64_t frame, uint16_t step, void *context);
 
+/* A voice keeps the sound it was hit with, so a hit rings out on its own
+   kit when the kit changes. */
 typedef struct {
-    uint32_t pos;      /* next frame of the sound; idle once past its end */
-    uint32_t fade_pos; /* the previous hit, fading out after a retrigger */
+    const drum_sound_t *sound; /* NULL when idle */
+    uint32_t pos;              /* next frame of the sound */
+    const drum_sound_t *fade_sound; /* the previous hit, fading out after a retrigger */
+    uint32_t fade_pos;
     uint16_t fade_left;
 } drum_voice_t;
 

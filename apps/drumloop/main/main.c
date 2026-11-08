@@ -1,6 +1,6 @@
 /* DrumLoop for the Waveshare ESP32-S3-Touch-LCD-7.
 
-   A live drum machine: eight 808-style sounds on touch pads and a step
+   A live drum machine: four drum kits (808, 909, trap and DnB) on touch pads and a step
    sequencer of up to 16 bars. It boots straight to the pads with Wi-Fi off
    and no speaker; Wi-Fi and the AirPlay speaker are chosen in the menu.
 
@@ -26,7 +26,7 @@ static QueueHandle_t touch_queue;
 
 /* The loop. It outlives speaker connections, so a beat survives a change
    of output; it is not saved across power cycles. */
-static drum_pattern_t pattern = {.bars = 1, .bpm = DEFAULT_BPM};
+static drum_pattern_t pattern = {.bars = 1, .bpm = DEFAULT_BPM, .kit = KIT_808};
 
 static void ui_task(void *argument)
 {
@@ -38,7 +38,7 @@ void app_main(void)
 {
     ESP_ERROR_CHECK(cyd_display_init());
     ESP_ERROR_CHECK(cyd_text_row(CYD_TEXT_ROWS / 2 - 1, CYD_COLOR_YELLOW, CYD_COLOR_BLACK,
-                                 " Building the 808 kit"));
+                                 " Building the drum kits"));
     ESP_ERROR_CHECK(kit_init());
 
     esp_err_t nvs_result = nvs_flash_init();

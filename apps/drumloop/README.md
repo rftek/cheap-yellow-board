@@ -1,6 +1,6 @@
 # DrumLoop
 
-A live drum machine for the Waveshare ESP32-S3-Touch-LCD-7 (800x480, capacitive touch), made for building drum and bass and trap beats on the fly. Eight 808-style sounds sit on touch pads that play live. A step sequencer loops 1 to 16 bars at an adjustable tempo, and you can build its beat by tapping steps or by recording what you play on the pads. The sound plays on an AirPlay speaker through the [airplay_sender](../../components/airplay_sender) component, or nowhere while you build a beat.
+A live drum machine for the Waveshare ESP32-S3-Touch-LCD-7 (800x480, capacitive touch), made for building drum and bass and trap beats on the fly. Eight drum sounds sit on touch pads that play live, from one of four kits: 808, 909, trap and drum and bass. A step sequencer loops 1 to 16 bars at an adjustable tempo, and you can build its beat by tapping steps or by recording what you play on the pads. The sound plays on an AirPlay speaker through the [airplay_sender](../../components/airplay_sender) component, or nowhere while you build a beat.
 
 Bluetooth output isn't possible on this board: the ESP32-S3 has no Classic Bluetooth, so no A2DP, and its BLE 5.0 radio lacks the isochronous channels LE Audio needs. BLE MIDI, sending the hits to a phone or computer that makes the sound, would work and could be added.
 
@@ -39,20 +39,22 @@ The loop keeps playing when the output changes, and the beat is kept. If the spe
 
 The grid's playhead and its bar page follow what the speaker is playing. That is the AirPlay delay behind what the board renders, so the screen matches what you hear.
 
-### The kit
+### The kits
 
-All sounds are synthesized at boot, the way the 808's circuits make them, so there is no sample data: about 350 KB of 44.1 kHz audio in PSRAM.
+All sounds are synthesized at boot from oscillators, noise and filters, the way analog drum machines make them, so there is no sample data: about 1.5 MB of 44.1 kHz audio in PSRAM for the four kits.
 
-| Pad | Sound | How it's made |
-|---|---|---|
-| BD | Bass drum, the long trap "808" | sine swept from 160 to 47 Hz, 0.45 s decay, saturated |
-| SD | Snare | two damped tones and high-passed noise |
-| CP | Hand clap | band-passed noise in three bursts and a tail |
-| CH | Closed hi-hat | six detuned square waves, high-passed; it chokes the open hat |
-| OH | Open hi-hat | the same with a long decay |
-| LT | Low tom | sine with a small pitch bend |
-| RS | Rim shot | two high tones, very short |
-| CB | Cowbell | 540 and 800 Hz squares through a band pass |
+Every kit has the same eight roles, so a beat plays on any kit. Pick the kit with **KIT** in MENU. It changes the sound at once, even while the loop plays; a hit already ringing finishes on its old kit. The kit is part of the pattern, and the TRAP and DNB starter beats bring their own.
+
+| Pad | 808 (classic) | 909 (punchy) | TRAP (long 808 bass) | DNB (tight breaks) |
+|---|---|---|---|---|
+| 1 | BD: sine swept from 160 to 47 Hz, 0.45 s decay, saturated | BD: short, hard click, 0.2 s | BD: 44 Hz sub with 0.9 s decay, driven hard | BD: short and punchy, 0.12 s |
+| 2 | SD: two tones and noise | SD: brighter, more snares | SD: tight crack | SD: high-tuned, loud snares |
+| 3 | CP: three bursts and a tail | CP | CP: wide, long tail | CP: short |
+| 4 | CH: six detuned squares, high-passed; chokes the open hat | CH: noisier | CH: very short | CH: noisy, like a real hat |
+| 5 | OH | OH | OH: short | OH: long |
+| 6 | LT: low tom | MT: mid tom | LT: deep tom | MT: mid tom |
+| 7 | RS: rim shot | RS | RS | RS |
+| 8 | CB: cowbell | RD: ride | SN: finger snap | RD: ride |
 
 ### MENU
 
@@ -60,9 +62,9 @@ All sounds are synthesized at boot, the way the 808's circuits make them, so the
 - **VOL - / VOL +**: speaker volume in steps of 10%. It shows SILENT with no speaker.
 - **BPM -10 / BPM +10**.
 - **LOOP LENGTH**: 1, 2, 4, 8 or 16 bars. Each step up doubles the loop by copying the bars it has, so you can vary the copies. After 16 it goes back to 1 bar. The other bars are kept until the loop grows again.
-- **TRAP 140** (half time) and **DNB 174** (two-step): one-bar starter beats. They replace the pattern.
-- **CLEAR PATTERN**: tap twice.
-- **EXPORT LOOP**: a stub. See below.
+- **TRAP 140** (half time) and **DNB 174** (two-step): one-bar starter beats on their own kit. They replace the pattern.
+- **CLEAR** (left; tap twice) and **EXPORT** (right; a stub, see below) share a row.
+- **KIT**: the next kit: 808, 909, TRAP, DNB.
 - **AIRPLAY DELAY**: 2000, 1000, 500, 250, 150 or 100 ms, saved in NVS (namespace `drumloop`) and used from the next connect. 2000 ms is the AirPlay 1 norm and works on every speaker. Shorter delays make the pads feel more immediate but some speakers don't honor them; try it on yours.
 
 ## Latency
@@ -95,7 +97,7 @@ AirPlay can't get much closer to real time than that. A wired I2S amplifier or D
 | `main/ui.c` | performance screen and menu |
 | `main/audio.c` | audio task: runs the engine and writes 8 ms packets to the speaker, silence included, so pads play at any time; with no speaker it runs the engine on the clock |
 | `main/engine.c` | step sequencer (sample-accurate steps) and mixer (retrigger fades, hat choke, soft clipping) |
-| `main/kit.c` | 808-style synthesis |
+| `main/kit.c` | the four kits' synthesis |
 | `main/export.c` | loop render to WAV, save stub |
 
 ## Limits
