@@ -1,5 +1,7 @@
 #include "audio.h"
 
+#include <stdatomic.h>
+
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -25,6 +27,10 @@ static drum_engine_t engine;
 /* Covers speaker and every call on it, so the UI's volume changes and
    detaching never run during a write. */
 static SemaphoreHandle_t lock;
+/* Callers waiting for lock. While a speaker plays, the audio task holds
+   lock through each paced write and takes it again at once, and it runs
+   above the UI, so it steps aside for a tick whenever someone waits. */
+static atomic_int lock_waiters;
 static airplay_sender_handle_t speaker;
 static QueueHandle_t hits;
 static QueueHandle_t steps;
@@ -34,6 +40,13 @@ static volatile bool want_playing;
 /* Silent: no speaker, so the engine runs on the clock alone. */
 static bool silent;
 static bool silent_restart;
+
+static void take_lock(void)
+{
+    atomic_fetch_add(&lock_waiters, 1);
+    xSemaphoreTake(lock, portMAX_DELAY);
+    atomic_fetch_sub(&lock_waiters, 1);
+}
 
 static void on_step(uint64_t frame, uint16_t step, void *context)
 {
@@ -94,6 +107,8 @@ static void audio_task(void *argument)
                 /* The speaker went away; the UI hears of it from the
                    sender's event and detaches. Don't spin meanwhile. */
                 vTaskDelay(pdMS_TO_TICKS(20));
+            } else if (atomic_load(&lock_waiters) > 0) {
+                vTaskDelay(1);
             }
             continue;
         }
@@ -144,7 +159,7 @@ esp_err_t audio_start(drum_pattern_t *loop_pattern)
 
 void audio_set_output(airplay_sender_handle_t new_speaker)
 {
-    xSemaphoreTake(lock, portMAX_DELAY);
+    take_lock();
     speaker = new_speaker;
     silent = new_speaker == NULL;
     silent_restart = silent;
@@ -161,7 +176,7 @@ void audio_set_output(airplay_sender_handle_t new_speaker)
 
 bool audio_has_speaker(void)
 {
-    xSemaphoreTake(lock, portMAX_DELAY);
+    take_lock();
     bool attached = speaker != NULL;
     xSemaphoreGive(lock);
     return attached;
@@ -169,7 +184,7 @@ bool audio_has_speaker(void)
 
 esp_err_t audio_set_volume(int volume)
 {
-    xSemaphoreTake(lock, portMAX_DELAY);
+    take_lock();
     esp_err_t result = speaker != NULL ? airplay_sender_set_volume(speaker, volume)
                                        : ESP_ERR_INVALID_STATE;
     xSemaphoreGive(lock);
@@ -178,7 +193,7 @@ esp_err_t audio_set_volume(int volume)
 
 int audio_get_volume(void)
 {
-    xSemaphoreTake(lock, portMAX_DELAY);
+    take_lock();
     int volume = speaker != NULL ? airplay_sender_get_volume(speaker) : 0;
     xSemaphoreGive(lock);
     return volume;
