@@ -248,3 +248,35 @@ esp_err_t cyd_text_row(int row, uint16_t foreground, uint16_t background, const 
     }
     return cyd_draw_cells(row, text, foregrounds, backgrounds);
 }
+
+/* ---- Touch: fast mode and the tap callback, shared by both backends ---- */
+
+static volatile bool touch_fast;
+static cyd_tap_fn tap_callback;
+static void *tap_context;
+
+void cyd_touch_set_fast(bool fast)
+{
+    touch_fast = fast;
+}
+
+bool cyd_backend_touch_fast(void)
+{
+    return touch_fast;
+}
+
+void cyd_touch_set_tap_callback(cyd_tap_fn tap, void *context)
+{
+    tap_callback = NULL;
+    tap_context = context;
+    tap_callback = tap;
+}
+
+void cyd_backend_post_tap(QueueHandle_t queue, const cyd_touch_point_t *point)
+{
+    cyd_tap_fn tap = tap_callback;
+    if (tap != NULL && tap(point, tap_context)) {
+        return;
+    }
+    xQueueSend(queue, point, 0);
+}

@@ -346,6 +346,7 @@ static bool connect_to(const airplay_device_t *device, char *status, size_t stat
     airplay_sender_config_t config = AIRPLAY_SENDER_DEFAULT_CONFIG();
     config.channels = 1;
     config.latency_ms = ui_saved_latency_ms();
+    config.lead_packets = 1; /* a pad hit is sent 8 ms ahead, not 32 */
     config.on_event = on_speaker_event;
     airplay_sender_handle_t sender;
     speaker_lost = false;

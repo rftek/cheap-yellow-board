@@ -43,6 +43,11 @@
 #define TOUCH_RAW_Y_MIN 513
 #define TOUCH_RAW_Y_MAX 3600
 #define TOUCH_DEBOUNCE_MS 250
+/* cyd_touch_set_fast: a shorter gap between taps and a faster poll. The
+   resistive panel still needs a gap against chatter. */
+#define TOUCH_FAST_DEBOUNCE_MS 60
+#define TOUCH_POLL_MS 25
+#define TOUCH_FAST_POLL_MS 10
 /* Readings per axis per tap, and how many of the lowest and highest to drop. */
 #define TOUCH_SAMPLES 9
 #define TOUCH_TRIM 2
@@ -463,23 +468,25 @@ static void touchscreen_task(void *argument)
     TickType_t last_tap = 0;
     while (true) {
         /* Each new press becomes one tap, debounced against panel chatter. */
+        bool fast = cyd_backend_touch_fast();
         bool pressed = gpio_get_level(TOUCH_PIN_IRQ) == 0;
-        if (pressed && !was_pressed &&
-            xTaskGetTickCount() - last_tap >= pdMS_TO_TICKS(TOUCH_DEBOUNCE_MS)) {
+        TickType_t gap = pdMS_TO_TICKS(fast ? TOUCH_FAST_DEBOUNCE_MS : TOUCH_DEBOUNCE_MS);
+        if (pressed && !was_pressed && xTaskGetTickCount() - last_tap >= gap) {
             vTaskDelay(pdMS_TO_TICKS(10));
             cyd_touch_point_t point;
             esp_err_t result = touch_read_point(&point);
             if (result != ESP_OK) {
                 ESP_LOGE(TAG, "Touchscreen read failed: %s", esp_err_to_name(result));
             } else if (gpio_get_level(TOUCH_PIN_IRQ) == 0) {
+                cyd_backend_post_tap(touch_queue, &point);
                 ESP_LOGI(TAG, "Tap at %d,%d (raw %u,%u)", point.x, point.y, point.raw_x,
                          point.raw_y);
-                xQueueSend(touch_queue, &point, 0);
                 last_tap = xTaskGetTickCount();
             }
         }
         was_pressed = pressed;
-        vTaskDelay(pdMS_TO_TICKS(25));
+        TickType_t poll = pdMS_TO_TICKS(fast ? TOUCH_FAST_POLL_MS : TOUCH_POLL_MS);
+        vTaskDelay(poll > 0 ? poll : 1);
     }
 }
 
@@ -498,7 +505,7 @@ bool cyd_touch_read(cyd_touch_point_t *point)
 
 esp_err_t cyd_touch_start(QueueHandle_t *queue)
 {
-    touch_queue = xQueueCreate(4, sizeof(cyd_touch_point_t));
+    touch_queue = xQueueCreate(16, sizeof(cyd_touch_point_t));
     ESP_RETURN_ON_FALSE(touch_queue != NULL, ESP_ERR_NO_MEM, TAG, "create touch queue");
     ESP_RETURN_ON_ERROR(cyd_touch_init(), TAG, "initialize touchscreen");
     ESP_RETURN_ON_FALSE(xTaskCreate(touchscreen_task, "touchscreen", 3072, NULL, 5, NULL) ==

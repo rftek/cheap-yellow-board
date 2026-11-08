@@ -75,6 +75,7 @@ typedef struct {
     uint8_t channels;          /* input channels, 1 or 2 */
     uint32_t latency_ms;       /* how long the speaker buffers before playing */
     uint16_t backlog_packets;  /* sent packets kept for resend requests */
+    uint8_t lead_packets;      /* how far ahead of the clock audio is sent */
     int volume;                /* initial volume, 0-100 */
     airplay_event_cb_t on_event;
     void *event_context;
@@ -82,12 +83,14 @@ typedef struct {
 
 /* 2 s is what AirPlay 1 speakers expect; shorter works on many receivers
    (Shairport Sync) and makes a game's sound effects less late. 128 packets
-   of backlog is about 1 s (182 KB, in PSRAM when there is some). */
+   of backlog is about 1 s (182 KB, in PSRAM when there is some). Sending
+   4 packets (32 ms) ahead absorbs the app's scheduling jitter; an
+   instrument can send 1 ahead so a hit it renders is sent sooner. */
 #define AIRPLAY_SENDER_DEFAULT_CONFIG() \
     {                                   \
         .channels = 2,                  \
         .latency_ms = 2000,             \
-        .backlog_packets = 128,         \
+        .backlog_packets = 128,                 .lead_packets = 4,              \
         .volume = 50,                   \
         .on_event = NULL,               \
         .event_context = NULL,          \

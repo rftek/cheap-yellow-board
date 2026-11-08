@@ -50,8 +50,6 @@ static const char *TAG = "airplay_sender";
 #define RTSP_HEADER_MAX 2048
 #define SYNC_INTERVAL_US 1000000
 #define KEEPALIVE_INTERVAL_US (30 * 1000000LL)
-/* How far ahead of our clock audio may be sent, for Wi-Fi jitter. */
-#define LEAD_FRAMES (4 * FRAMES)
 /* An arbitrary NTP epoch for our clock: only differences matter. */
 #define NTP_EPOCH_SECONDS 0xEC000000u
 
@@ -795,14 +793,16 @@ static esp_err_t send_chunk_paced(struct airplay_sender *s, TickType_t start, Ti
             s->next_ts = now_ts;
             ahead = 0;
         }
-        if (ahead <= LEAD_FRAMES) {
+        /* Audio may be sent config.lead_packets ahead of our clock. */
+        int32_t lead = (int32_t)s->config.lead_packets * FRAMES;
+        if (ahead <= lead) {
             send_chunk(s);
             xSemaphoreGive(s->lock);
             return ESP_OK;
         }
         xSemaphoreGive(s->lock);
 
-        TickType_t wait = pdMS_TO_TICKS((uint32_t)(ahead - LEAD_FRAMES) * 1000 / AIRPLAY_SAMPLE_RATE);
+        TickType_t wait = pdMS_TO_TICKS((uint32_t)(ahead - lead) * 1000 / AIRPLAY_SAMPLE_RATE);
         if (wait == 0) {
             wait = 1;
         }

@@ -35,7 +35,7 @@ The loop keeps playing when the output changes, and the beat is kept. If the spe
 | **MENU** | The settings below. |
 | **Track label** | Mutes or unmutes the track in the loop. The pads still play. |
 | **Step** | Turns that step on or off in the bar on view. |
-| **Pads** | Play the sound at once. The pad flashes white. |
+| **Pads** | Play the sound at once. The pad flashes white. Play with several fingers: each new finger is a hit, even while others are down. |
 
 The grid's playhead and its bar page follow what the speaker is playing. That is the AirPlay delay behind what the board renders, so the screen matches what you hear.
 
@@ -63,11 +63,24 @@ All sounds are synthesized at boot, the way the 808's circuits make them, so the
 - **TRAP 140** (half time) and **DNB 174** (two-step): one-bar starter beats. They replace the pattern.
 - **CLEAR PATTERN**: tap twice.
 - **EXPORT LOOP**: a stub. See below.
-- **AIRPLAY DELAY**: 2000, 1000, 500 or 250 ms, saved in NVS (namespace `drumloop`) and used from the next connect. 2000 ms is the AirPlay 1 norm and works on every speaker. Shorter delays make the pads feel more immediate but some speakers don't honor them; try it on yours.
+- **AIRPLAY DELAY**: 2000, 1000, 500, 250, 150 or 100 ms, saved in NVS (namespace `drumloop`) and used from the next connect. 2000 ms is the AirPlay 1 norm and works on every speaker. Shorter delays make the pads feel more immediate but some speakers don't honor them; try it on yours.
 
 ## Latency
 
 AirPlay buffers audio on the speaker, so a pad sounds after the AirPlay delay, 2 s by default. For playing pads live, pick a shorter delay in MENU and pick the speaker again in OUTPUT. Recording and the playhead allow for the delay, so recorded hits land on the steps you heard.
+
+Everything else between a tap and the speaker is kept short:
+
+| Stage | Time |
+|---|---|
+| Touch: the GT911 scans about every 10 ms and the driver polls it every 5 ms in fast mode ([cyd_touch_set_fast](../../components/cyd_display/include/cyd_display.h)) | about 5-15 ms |
+| The touch task hands a pad straight to the audio task ([cyd_touch_set_tap_callback](../../components/cyd_display/include/cyd_display.h)), without waiting for the screen to redraw | under 1 ms |
+| The hit goes into the next 8 ms packet, sent 1 packet ahead of the clock (`lead_packets = 1`) | 8-16 ms |
+| The AirPlay delay, plus whatever the speaker adds itself | 100 ms and up |
+
+Below about 200 ms, a packet lost on Wi-Fi may not be resent in time, which you hear as a click or a gap. Wi-Fi power saving is off while DrumLoop is on Wi-Fi.
+
+AirPlay can't get much closer to real time than that. A wired I2S amplifier or DAC on spare pins would bring a tap to about 10-15 ms and could be added as another OUTPUT.
 
 ## Audio export (stub)
 
@@ -87,7 +100,7 @@ AirPlay buffers audio on the speaker, so a pad sounds after the AirPlay delay, 2
 
 ## Limits
 
-- The touch driver reports one finger at a time, so a pad hit while another finger is still down is missed. Finger-drum with taps that don't overlap.
+- The GT911 tracks up to 5 fingers. The menu takes one finger at a time, with a short gap between taps.
 - Patterns are not saved across power cycles yet.
 
 ## Build and flash

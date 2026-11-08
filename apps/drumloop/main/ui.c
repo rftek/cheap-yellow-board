@@ -10,6 +10,7 @@
 
 #include "ui.h"
 
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -69,11 +70,15 @@ static uint16_t track_colors[DRUM_TRACKS];
 
 /* Screen state, and what is drawn now, so a refresh redraws only changes. */
 static drum_pattern_t *pattern;
-static bool recording;
+static volatile bool recording;
 static bool follow = true;
 static int view_bar;
 static int playhead = NO_STEP;
 static TickType_t flash_until[DRUM_TRACKS];
+/* Pads are played from the touch task (on_tap) while the performance
+   screen is up; it leaves the pads it played here for this task to flash. */
+static volatile bool pads_live;
+static atomic_uint pads_hit;
 /* The speaker dropped the session and output.c went silent: the MENU
    button is red until the menu says so. */
 static bool speaker_lost_notice;
@@ -396,7 +401,7 @@ static void update_playhead(void)
 #define VOLUME_STEP 10
 #define TEMPO_STEP 10
 
-static const uint32_t latency_choices[] = {2000, 1000, 500, 250};
+static const uint32_t latency_choices[] = {2000, 1000, 500, 250, 150, 100};
 
 /* The menu's info line, kept between visits. */
 static char status_text[COLUMNS + 1] = " No speaker: silent";
@@ -559,6 +564,9 @@ static void run_menu(QueueHandle_t touch_queue)
         snprintf(status_text, sizeof(status_text), " Speaker disconnected");
     }
     draw_menu(latency);
+    /* Menu buttons get ordinary taps: one finger, with a gap between taps. */
+    pads_live = false;
+    cyd_touch_set_fast(false);
     xQueueReset(touch_queue);
     while (true) {
         cyd_touch_point_t point;
@@ -720,21 +728,54 @@ static void tap_grid(int x, int y)
     pattern->steps[view_bar][track] ^= (uint16_t)(1u << step);
 }
 
-static void tap_pad(int x)
+static void full_redraw(void)
+{
+    invalidate();
+    ESP_ERROR_CHECK(cyd_fill_rect(0, 0, CYD_LCD_WIDTH, CYD_LCD_HEIGHT, CYD_COLOR_BLACK));
+    refresh();
+}
+
+static void play_pad(int x)
 {
     int pad = x / PAD_WIDTH;
     if (pad >= DRUM_TRACKS) {
         pad = DRUM_TRACKS - 1;
     }
     audio_hit(pad, recording && audio_is_playing());
-    flash_until[pad] = xTaskGetTickCount() + pdMS_TO_TICKS(FLASH_MS);
+    atomic_fetch_or(&pads_hit, 1u << pad);
 }
 
-static void full_redraw(void)
+/* Runs in the touch task for every tap: a pad goes to the audio task at
+   once instead of waiting for this task to finish a redraw. */
+static bool on_tap(const cyd_touch_point_t *point, void *context)
 {
-    invalidate();
-    ESP_ERROR_CHECK(cyd_fill_rect(0, 0, CYD_LCD_WIDTH, CYD_LCD_HEIGHT, CYD_COLOR_BLACK));
-    refresh();
+    (void)context;
+    if (!pads_live || point->y < PAD_TOP) {
+        return false;
+    }
+    play_pad(point->x);
+    return true;
+}
+
+static void flash_hit_pads(void)
+{
+    unsigned hit = atomic_exchange(&pads_hit, 0);
+    TickType_t until = xTaskGetTickCount() + pdMS_TO_TICKS(FLASH_MS);
+    for (int pad = 0; pad < DRUM_TRACKS; ++pad) {
+        if (hit & (1u << pad)) {
+            flash_until[pad] = until;
+        }
+    }
+}
+
+/* The performance screen: fast multi-finger taps, pads played by on_tap. */
+static void enter_pads(QueueHandle_t touch_queue)
+{
+    full_redraw();
+    xQueueReset(touch_queue);
+    atomic_store(&pads_hit, 0);
+    pads_live = true;
+    cyd_touch_set_fast(true);
 }
 
 void ui_run(QueueHandle_t touch_queue, drum_pattern_t *loop_pattern)
@@ -750,8 +791,8 @@ void ui_run(QueueHandle_t touch_queue, drum_pattern_t *loop_pattern)
     track_colors[DRUM_COWBELL] = cyd_rgb(220, 220, 200);
     playhead = NO_STEP;
 
-    full_redraw();
-    xQueueReset(touch_queue);
+    cyd_touch_set_tap_callback(on_tap, NULL);
+    enter_pads(touch_queue);
     while (true) {
         if (output_check_lost()) {
             speaker_lost_notice = true;
@@ -762,18 +803,18 @@ void ui_run(QueueHandle_t touch_queue, drum_pattern_t *loop_pattern)
         while (xQueueReceive(touch_queue, &point, wait) == pdTRUE) {
             wait = 0;
             if (point.y >= PAD_TOP) {
-                tap_pad(point.x);
+                play_pad(point.x); /* only if it came before pads_live */
             } else if (point.y >= GRID_ROW * FH) {
                 tap_grid(point.x, point.y);
             } else if (in_span(MENU_SPAN, point.x / FW)) {
                 run_menu(touch_queue);
-                full_redraw();
-                xQueueReset(touch_queue);
+                enter_pads(touch_queue);
                 break;
             } else {
                 tap_header(point.x / FW);
             }
         }
+        flash_hit_pads();
         update_playhead();
         refresh();
     }

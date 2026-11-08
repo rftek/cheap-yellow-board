@@ -51,8 +51,10 @@
 #define GT911_ADDRESS 0x5D
 #define GT911_STATUS 0x814E /* bit 7: new report; bits 0-3: touch count */
 #define GT911_POINT1 0x814F /* track id, x, y (little-endian), size */
+#define GT911_POINT_SIZE 8  /* bytes per finger in the report */
 #define GT911_MAX_POINTS 5
 #define TOUCH_POLL_MS 25
+#define TOUCH_FAST_POLL_MS 5 /* the GT911 itself reports about every 10 ms */
 #define TOUCH_DEBOUNCE_MS 250
 
 /* Rows per esp_lcd_panel_draw_bitmap call in cyd_backend_fill_rect. */
@@ -261,26 +263,50 @@ static esp_err_t gt911_clear_status(void)
     return i2c_master_transmit(gt911, command, sizeof(command), I2C_TIMEOUT_MS);
 }
 
-/* Takes the GT911's latest report, if it has a new one, and returns whether
-   a finger is down, with the first touch point in *point. */
-static bool touch_poll(cyd_touch_point_t *point)
+/* The fingers in one GT911 report, each with the controller's track id,
+   which stays the same while that finger is down. */
+typedef struct {
+    int count;
+    uint8_t ids[GT911_MAX_POINTS];
+    cyd_touch_point_t points[GT911_MAX_POINTS];
+} touch_report_t;
+
+/* Takes the GT911's latest report into *report and returns true, if it has
+   a new one. The first finger is kept for cyd_touch_read. */
+static bool touch_take_report(touch_report_t *report)
 {
     uint8_t status;
-    if (gt911_read(GT911_STATUS, &status, 1) == ESP_OK && (status & 0x80)) {
-        int count = status & 0x0F;
-        uint8_t data[8];
-        if (count > 0 && count <= GT911_MAX_POINTS &&
-            gt911_read(GT911_POINT1, data, sizeof(data)) == ESP_OK) {
-            touch_last.raw_x = (uint16_t)(data[1] | (data[2] << 8));
-            touch_last.raw_y = (uint16_t)(data[3] | (data[4] << 8));
-            cyd_touch_map(NULL, touch_last.raw_x, touch_last.raw_y, &touch_last.x,
-                          &touch_last.y);
-            touch_down = true;
-        } else {
-            touch_down = false;
-        }
-        gt911_clear_status();
+    if (gt911_read(GT911_STATUS, &status, 1) != ESP_OK || !(status & 0x80)) {
+        return false;
     }
+    int count = status & 0x0F;
+    uint8_t data[GT911_MAX_POINTS * GT911_POINT_SIZE];
+    report->count = 0;
+    if (count > 0 && count <= GT911_MAX_POINTS &&
+        gt911_read(GT911_POINT1, data, (size_t)count * GT911_POINT_SIZE) == ESP_OK) {
+        for (int i = 0; i < count; ++i) {
+            const uint8_t *entry = data + i * GT911_POINT_SIZE;
+            cyd_touch_point_t *point = &report->points[i];
+            report->ids[i] = entry[0];
+            point->raw_x = (uint16_t)(entry[1] | (entry[2] << 8));
+            point->raw_y = (uint16_t)(entry[3] | (entry[4] << 8));
+            cyd_touch_map(NULL, point->raw_x, point->raw_y, &point->x, &point->y);
+        }
+        report->count = count;
+    }
+    gt911_clear_status();
+    touch_down = report->count > 0;
+    if (touch_down) {
+        touch_last = report->points[0];
+    }
+    return true;
+}
+
+/* Returns whether a finger is down, with the first touch point in *point. */
+static bool touch_poll(cyd_touch_point_t *point)
+{
+    touch_report_t report;
+    touch_take_report(&report);
     *point = touch_last;
     return touch_down;
 }
@@ -290,18 +316,35 @@ static void touchscreen_task(void *argument)
     (void)argument;
     bool was_pressed = false;
     TickType_t last_tap = 0;
+    uint32_t held_ids = 0; /* track ids down in the last report, one bit each */
     while (true) {
-        /* Each new press becomes one tap, debounced like the CYD's. */
-        cyd_touch_point_t point;
-        bool pressed = touch_poll(&point);
-        if (pressed && !was_pressed &&
+        touch_report_t report;
+        bool fresh = touch_take_report(&report);
+        bool fast = cyd_backend_touch_fast();
+        if (fresh) {
+            /* Fast mode: every finger that wasn't down before is a tap. */
+            uint32_t ids = 0;
+            for (int i = 0; i < report.count; ++i) {
+                uint32_t bit = 1u << (report.ids[i] & 31);
+                if (fast && !(held_ids & bit)) {
+                    cyd_backend_post_tap(touch_queue, &report.points[i]);
+                    last_tap = xTaskGetTickCount();
+                }
+                ids |= bit;
+            }
+            held_ids = ids;
+        }
+        /* Otherwise each new press becomes one tap, debounced like the CYD's. */
+        if (!fast && touch_down && !was_pressed &&
             xTaskGetTickCount() - last_tap >= pdMS_TO_TICKS(TOUCH_DEBOUNCE_MS)) {
+            cyd_touch_point_t point = touch_last;
+            cyd_backend_post_tap(touch_queue, &point);
             ESP_LOGI(TAG, "Tap at %d,%d", point.x, point.y);
-            xQueueSend(touch_queue, &point, 0);
             last_tap = xTaskGetTickCount();
         }
-        was_pressed = pressed;
-        vTaskDelay(pdMS_TO_TICKS(TOUCH_POLL_MS));
+        was_pressed = touch_down;
+        TickType_t poll = pdMS_TO_TICKS(fast ? TOUCH_FAST_POLL_MS : TOUCH_POLL_MS);
+        vTaskDelay(poll > 0 ? poll : 1);
     }
 }
 
@@ -317,7 +360,7 @@ bool cyd_touch_read(cyd_touch_point_t *point)
 
 esp_err_t cyd_touch_start(QueueHandle_t *queue)
 {
-    touch_queue = xQueueCreate(4, sizeof(cyd_touch_point_t));
+    touch_queue = xQueueCreate(16, sizeof(cyd_touch_point_t));
     ESP_RETURN_ON_FALSE(touch_queue != NULL, ESP_ERR_NO_MEM, TAG, "create touch queue");
     ESP_RETURN_ON_ERROR(cyd_touch_init(), TAG, "initialize touchscreen");
     ESP_RETURN_ON_FALSE(xTaskCreate(touchscreen_task, "touchscreen", 3072, NULL, 5, NULL) ==

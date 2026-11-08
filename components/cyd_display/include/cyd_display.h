@@ -110,6 +110,22 @@ esp_err_t cyd_text_row(int row, uint16_t foreground, uint16_t background, const 
    saved in NVS, if any. */
 esp_err_t cyd_touch_start(QueueHandle_t *queue);
 
+/* For instruments, such as drum pads, where a tap must act at once. Fast
+   mode polls the panel every few milliseconds instead of every 25, drops
+   the 250 ms gap between taps (to 60 ms on the resistive CYD) and, on a
+   multi-touch panel, makes each new finger its own tap. Off by default;
+   it can be switched at any time, for example off while a menu is open. */
+void cyd_touch_set_fast(bool fast);
+
+/* Called by the touch task for each tap before it is queued, so an app can
+   react without waiting for its UI task to finish drawing. Return true when
+   the tap was handled and should not be queued. Runs in the touch task:
+   keep it short and don't draw from it. */
+typedef bool (*cyd_tap_fn)(const cyd_touch_point_t *point, void *context);
+
+/* Sets the tap callback; NULL removes it. */
+void cyd_touch_set_tap_callback(cyd_tap_fn tap, void *context);
+
 /* For UI libraries that poll (such as LVGL) instead of taking taps: sets
    up the touchscreen and loads the saved calibration, without the tap
    task. Use either this with cyd_touch_read, or cyd_touch_start. */
