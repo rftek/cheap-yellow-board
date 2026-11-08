@@ -16,6 +16,8 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "wav.h"
 
 #define TWO_PI (2.0f * (float)M_PI)
@@ -27,6 +29,13 @@
 static const char *TAG = "kit";
 
 static drum_sound_t sounds[DRUM_KITS][DRUM_TRACKS];
+
+/* sin of cycles * 2 pi. sinf() of a large angle takes a slow argument
+   reduction, so whole cycles are dropped first. */
+static inline float sin_cycles(float cycles)
+{
+    return sinf(TWO_PI * (cycles - floorf(cycles)));
+}
 static uint32_t noise_state = 0x6d2b79f5;
 
 /* White noise in -1..1 (xorshift32). */
@@ -100,8 +109,9 @@ static void make_kick(float *buffer, uint32_t frames, const float *p)
     for (uint32_t i = 0; i < frames; ++i) {
         float t = (float)i / DRUM_RATE;
         float freq = p[0] + p[1] * expf(-t / p[2]);
-        phase += TWO_PI * freq / DRUM_RATE;
-        float x = sinf(phase) * expf(-t / p[3]);
+        phase += freq / DRUM_RATE;
+        phase -= phase >= 1.0f ? 1.0f : 0.0f;
+        float x = sinf(TWO_PI * phase) * expf(-t / p[3]);
         x += p[4] * noise() * expf(-t / 0.002f);
         buffer[i] = tanhf(p[5] * x);
     }
@@ -116,8 +126,8 @@ static void make_snare(float *buffer, uint32_t frames, const float *p)
     biquad_init(&hp, HIGHPASS, p[3], 0.7f);
     for (uint32_t i = 0; i < frames; ++i) {
         float t = (float)i / DRUM_RATE;
-        float tone = 0.5f * sinf(TWO_PI * p[0] * t) * expf(-t / p[2]) +
-                     0.3f * sinf(TWO_PI * p[1] * t) * expf(-t / (p[2] * 0.67f));
+        float tone = 0.5f * sin_cycles(p[0] * t) * expf(-t / p[2]) +
+                     0.3f * sin_cycles(p[1] * t) * expf(-t / (p[2] * 0.67f));
         float snares = biquad_run(&hp, noise()) * expf(-t / p[4]);
         buffer[i] = tone + p[5] * snares;
     }
@@ -184,8 +194,9 @@ static void make_tom(float *buffer, uint32_t frames, const float *p)
     for (uint32_t i = 0; i < frames; ++i) {
         float t = (float)i / DRUM_RATE;
         float freq = p[0] + p[1] * expf(-t / 0.05f);
-        phase += TWO_PI * freq / DRUM_RATE;
-        float x = sinf(phase) * expf(-t / p[2]);
+        phase += freq / DRUM_RATE;
+        phase -= phase >= 1.0f ? 1.0f : 0.0f;
+        float x = sinf(TWO_PI * phase) * expf(-t / p[2]);
         x += 0.08f * biquad_run(&lp, noise()) * expf(-t / 0.05f);
         buffer[i] = x;
     }
@@ -199,7 +210,7 @@ static void make_rim(float *buffer, uint32_t frames, const float *p)
     biquad_init(&hp, HIGHPASS, 500.0f, 0.7f);
     for (uint32_t i = 0; i < frames; ++i) {
         float t = (float)i / DRUM_RATE;
-        float x = (0.6f * sinf(TWO_PI * p[0] * t) + 0.5f * sinf(TWO_PI * p[1] * t)) *
+        float x = (0.6f * sin_cycles(p[0] * t) + 0.5f * sin_cycles(p[1] * t)) *
                   expf(-t / p[2]);
         buffer[i] = tanhf(2.0f * biquad_run(&hp, x));
     }
@@ -234,7 +245,7 @@ static void make_snap(float *buffer, uint32_t frames, const float *p)
     for (uint32_t i = 0; i < frames; ++i) {
         float t = (float)i / DRUM_RATE;
         float x = biquad_run(&bp, noise()) * expf(-t / p[2]);
-        x += 0.4f * sinf(TWO_PI * p[3] * t) * expf(-t / 0.006f);
+        x += 0.4f * sin_cycles(p[3] * t) * expf(-t / 0.006f);
         buffer[i] = x;
     }
 }
@@ -359,6 +370,7 @@ esp_err_t kit_init(void)
                 .gain = def->gain,
             };
             total_bytes += frames * sizeof(int16_t);
+            vTaskDelay(1);
         }
     }
     free(scratch);
