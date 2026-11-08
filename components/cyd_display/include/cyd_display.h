@@ -74,6 +74,14 @@ bool cyd_has_psram(void);
    brightness saved in NVS (full brightness if none). */
 esp_err_t cyd_display_init(void);
 
+/* Selects (true) or releases the board's microSD card. On the Waveshare S3
+   board the card's chip select is pin EXIO4 of the I/O expander, which an
+   SPI driver can't toggle: select the card once and mount it over SPI
+   (MOSI 11, MISO 13, SCK 12) with no CS pin (SDSPI_SLOT_NO_CS), as
+   Waveshare's example does. ESP_ERR_NOT_SUPPORTED on the CYD, whose card
+   has an ordinary GPIO chip select. Call after cyd_display_init. */
+esp_err_t cyd_sd_select(bool selected);
+
 /* Sets the backlight, clamped to CYD_BRIGHTNESS_MIN..MAX; does not save it. */
 esp_err_t cyd_set_brightness(int percent);
 int cyd_get_brightness(void);

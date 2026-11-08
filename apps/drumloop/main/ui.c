@@ -19,6 +19,7 @@
 #include "export.h"
 #include "nvs.h"
 #include "output.h"
+#include "sdcard.h"
 
 /* Screen lines are cut to the display's width on purpose. */
 #pragma GCC diagnostic ignored "-Wformat-truncation"
@@ -556,16 +557,56 @@ static void export_loop(void)
         menu_status(line);
         return;
     }
-    result = export_save(&export, "drumloop.wav");
-    if (result == ESP_ERR_NOT_SUPPORTED) {
-        snprintf(line, sizeof(line), " %.1f s WAV; no save yet", (double)export.frames / DRUM_RATE);
+    menu_status(" Saving to the SD card...");
+    char saved[24];
+    result = export_save(&export, saved, sizeof(saved));
+    if (result == ESP_ERR_NOT_FOUND) {
+        snprintf(line, sizeof(line), " No SD card to save to");
     } else if (result == ESP_OK) {
-        snprintf(line, sizeof(line), " Saved %.1f s WAV", (double)export.frames / DRUM_RATE);
+        snprintf(line, sizeof(line), " Saved %s %.0fs", saved, (double)export.frames / DRUM_RATE);
     } else {
         snprintf(line, sizeof(line), " Save failed: %s", esp_err_to_name(result));
     }
     menu_status(line);
     export_free(&export);
+}
+
+/* Moves to the next kit: the built-in ones, then the SD card's, loading a
+   card kit's WAVs the first time. Past the last kit it looks for a card
+   again, so one put in after boot is found. A kit takes effect at once,
+   even mid-loop; ringing hits finish on the kit they started on. */
+static void next_kit(void)
+{
+    int kit = pattern->kit;
+    char status[COLUMNS + 1];
+    for (int tries = 0; tries <= DRUM_KITS + KIT_CARD_MAX; ++tries) {
+        int count = kit_count();
+        kit = kit + 1;
+        if (kit >= count) {
+            kit = 0;
+            if (!sdcard_mounted()) {
+                menu_status(" Looking for an SD card...");
+                if (sdcard_mount() == ESP_OK && kit_scan(KIT_FOLDER) > 0) {
+                    kit = count; /* the first kit on the card */
+                } else {
+                    menu_status(sdcard_mounted() ? " No kits in /kits on the card"
+                                                 : " No SD card: built-in kits");
+                }
+            }
+        }
+        if (!kit_on_card(kit)) {
+            break;
+        }
+        snprintf(status, sizeof(status), " Loading %s...", kit_name(kit));
+        menu_status(status);
+        if (kit_load(kit, status, sizeof(status)) == ESP_OK) {
+            menu_status(status);
+            break;
+        }
+        menu_status(status); /* it can't be used: try the next one */
+    }
+    pattern->kit = (uint8_t)kit;
+    draw_kit_row();
 }
 
 static void run_menu(QueueHandle_t touch_queue)
@@ -677,10 +718,7 @@ static void run_menu(QueueHandle_t touch_queue)
             }
             break;
         case MENU_KIT:
-            /* Takes effect at once, even mid-loop; ringing hits finish on
-               the kit they started on. */
-            pattern->kit = (uint8_t)((pattern->kit + 1) % DRUM_KITS);
-            draw_kit_row();
+            next_kit();
             break;
         case MENU_LATENCY: {
             size_t count = sizeof(latency_choices) / sizeof(latency_choices[0]);

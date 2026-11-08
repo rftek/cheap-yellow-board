@@ -171,6 +171,15 @@ static esp_err_t board_init(void)
     return i2c_add(GT911_ADDRESS, &gt911);
 }
 
+esp_err_t cyd_sd_select(bool selected)
+{
+    ESP_RETURN_ON_FALSE(expander_output != NULL, ESP_ERR_INVALID_STATE, TAG,
+                        "cyd_display_init first");
+    uint8_t levels = selected ? (uint8_t)(expander_levels & ~EXIO_SD_CS)
+                              : (uint8_t)(expander_levels | EXIO_SD_CS);
+    return expander_write(levels);
+}
+
 esp_err_t cyd_set_brightness(int percent)
 {
     if (percent < CYD_BRIGHTNESS_MIN) {

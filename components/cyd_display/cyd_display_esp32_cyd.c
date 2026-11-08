@@ -201,6 +201,12 @@ static esp_err_t lcd_init(void)
     return ESP_OK;
 }
 
+esp_err_t cyd_sd_select(bool selected)
+{
+    (void)selected;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
 esp_err_t cyd_set_brightness(int percent)
 {
     if (percent < CYD_BRIGHTNESS_MIN) {

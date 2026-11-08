@@ -18,6 +18,7 @@
 #include "kit.h"
 #include "nvs_flash.h"
 #include "output.h"
+#include "sdcard.h"
 #include "ui.h"
 
 #define DEFAULT_BPM 140
@@ -48,6 +49,11 @@ void app_main(void)
         nvs_result = nvs_flash_init();
     }
     ESP_ERROR_CHECK(nvs_result);
+
+    /* Kits on an SD card are listed now and read when first picked. */
+    if (sdcard_mount() == ESP_OK) {
+        kit_scan(KIT_FOLDER);
+    }
 
     /* Starts silent: no speaker until one is picked in the menu. */
     ESP_ERROR_CHECK(audio_start(&pattern));

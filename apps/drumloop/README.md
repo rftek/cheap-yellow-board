@@ -63,8 +63,8 @@ Every kit has the same eight roles, so a beat plays on any kit. Pick the kit wit
 - **BPM -10 / BPM +10**.
 - **LOOP LENGTH**: 1, 2, 4, 8 or 16 bars. Each step up doubles the loop by copying the bars it has, so you can vary the copies. After 16 it goes back to 1 bar. The other bars are kept until the loop grows again.
 - **TRAP 140** (half time) and **DNB 174** (two-step): one-bar starter beats on their own kit. They replace the pattern.
-- **CLEAR** (left; tap twice) and **EXPORT** (right; a stub, see below) share a row.
-- **KIT**: the next kit: 808, 909, TRAP, DNB.
+- **CLEAR** (left; tap twice) and **EXPORT** (right; saves the loop to the SD card, see below) share a row.
+- **KIT**: the next kit: 808, 909, TRAP, DNB, then the kits on the SD card. Past the last kit it looks for a card again, so a card put in after boot is found.
 - **AIRPLAY DELAY**: 2000, 1000, 500, 250, 150 or 100 ms, saved in NVS (namespace `drumloop`) and used from the next connect. 2000 ms is the AirPlay 1 norm and works on every speaker. Shorter delays make the pads feel more immediate but some speakers don't honor them; try it on yours.
 
 ## Latency
@@ -84,9 +84,32 @@ Below about 200 ms, a packet lost on Wi-Fi may not be resent in time, which you 
 
 AirPlay can't get much closer to real time than that. A wired I2S amplifier or DAC on spare pins would bring a tap to about 10-15 ms and could be added as another OUTPUT.
 
-## Audio export (stub)
+## Custom kits on an SD card
 
-[main/export.h](main/export.h) is the start of audio export. `export_render()` works: it renders one pass of the loop plus a 1 s tail into a 44.1 kHz mono 16-bit WAV in PSRAM. `export_save()` still has no destination. It could go to an SD card, an HTTP download from the board, or an upload to a computer. Until then it returns `ESP_ERR_NOT_SUPPORTED`, and **EXPORT LOOP** reports the length of the WAV it rendered.
+Put a FAT32 microSD card in the board's TF slot with your own samples in it:
+
+```
+kits/
+  amen/
+    1 BD.wav        pad 1, labelled BD
+    2 SD snare.wav  pad 2, labelled SD
+    4 CH.wav
+    5 OH.wav
+  vinyl/
+    ...
+```
+
+- Each folder in `kits` is a kit, named after the folder (cut to 10 characters). Up to 8 card kits are listed, after the four built-in ones.
+- A WAV goes on the pad given by the first character of its name, `1` to `8`. The next two letters or digits are the pad's label. Pads with no WAV keep the 808's sound, and other files are ignored.
+- Any common WAV works: 8, 16, 24 or 32-bit PCM or 32-bit float, mono or stereo (mixed to mono), at any sample rate from 8 to 192 kHz (resampled to 44.1 kHz). Compressed WAVs, such as ADPCM, aren't read. Each sample is cut at 4 seconds and its level matched to the built-in sounds.
+- Pads keep their roles: pad 4 still chokes pad 5, and the starter beats put kick, snare and hats on pads 1, 2 and 4.
+- A card kit's WAVs are read when you first pick it in **KIT**, which takes a moment. They stay in PSRAM until power off; a few MB of PSRAM are free for them.
+
+The card is mounted at boot through the I/O expander's chip select, as in Waveshare's 03_SD_Test example (see [cyd_sd_select](../../components/cyd_display/include/cyd_display.h)).
+
+## Audio export
+
+**EXPORT** renders one pass of the loop plus a 1 s tail into a 44.1 kHz mono 16-bit WAV in PSRAM ([main/export.h](main/export.h)) and saves it on the SD card as `exports/loop-001.wav`, `loop-002.wav` and so on. A 16-bar loop at 140 BPM is about 27 s, or 2.4 MB. With no card it says so. Other destinations, such as a download from the board over Wi-Fi, could take the same WAV.
 
 ## Code
 
@@ -97,13 +120,17 @@ AirPlay can't get much closer to real time than that. A wired I2S amplifier or D
 | `main/ui.c` | performance screen and menu |
 | `main/audio.c` | audio task: runs the engine and writes 8 ms packets to the speaker, silence included, so pads play at any time; with no speaker it runs the engine on the clock |
 | `main/engine.c` | step sequencer (sample-accurate steps) and mixer (retrigger fades, hat choke, soft clipping) |
-| `main/kit.c` | the four kits' synthesis |
-| `main/export.c` | loop render to WAV, save stub |
+| `main/kit.c` | the four kits' synthesis, and kits read from the SD card |
+| `main/wav.c` | WAV reader: PCM and float, any channels and rate, to 44.1 kHz mono |
+| `main/sdcard.c` | mounts the microSD card |
+| `main/export.c` | loop render to WAV, saved to the SD card |
 
 ## Limits
 
 - The GT911 tracks up to 5 fingers. The menu takes one finger at a time, with a short gap between taps.
 - Patterns are not saved across power cycles yet.
+- Don't take the SD card out while DrumLoop runs: it stays mounted, and a card put back isn't seen again until a restart.
+- The SD card code hasn't been tried on hardware yet.
 
 ## Build and flash
 

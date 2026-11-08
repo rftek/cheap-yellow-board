@@ -5,12 +5,18 @@
 
 #include "kit.h"
 
+#include <ctype.h>
+#include <dirent.h>
 #include <math.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <strings.h>
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "wav.h"
 
 #define TWO_PI (2.0f * (float)M_PI)
 /* Peak level of every sound before the mix gains. */
@@ -360,6 +366,206 @@ esp_err_t kit_init(void)
     return ESP_OK;
 }
 
+
+/* ---- Kits on the SD card ------------------------------------------------ */
+
+/* A folder of WAVs. Its sounds are read on first use and stay in PSRAM
+   until power off, so a hit still ringing never loses its samples. */
+typedef struct {
+    char name[KIT_NAME_MAX + 1]; /* shown on screen */
+    char *folder;                /* full path */
+    char labels[DRUM_TRACKS][3];
+    drum_sound_t sounds[DRUM_TRACKS];
+    volatile bool loaded;
+} card_kit_t;
+
+static card_kit_t card_kits[KIT_CARD_MAX];
+static int card_kit_count;
+
+int kit_count(void)
+{
+    return DRUM_KITS + card_kit_count;
+}
+
+bool kit_on_card(int kit)
+{
+    return kit >= DRUM_KITS && kit < kit_count();
+}
+
+static card_kit_t *card_kit(int kit)
+{
+    return kit_on_card(kit) ? &card_kits[kit - DRUM_KITS] : NULL;
+}
+
+int kit_scan(const char *dir)
+{
+    DIR *listing = opendir(dir);
+    if (listing == NULL) {
+        return 0;
+    }
+    int added = 0;
+    struct dirent *entry;
+    while ((entry = readdir(listing)) != NULL && card_kit_count < KIT_CARD_MAX) {
+        if (entry->d_type != DT_DIR || entry->d_name[0] == '.') {
+            continue;
+        }
+        size_t length = strlen(dir) + 1 + strlen(entry->d_name) + 1;
+        char *folder = malloc(length);
+        if (folder == NULL) {
+            break;
+        }
+        snprintf(folder, length, "%s/%s", dir, entry->d_name);
+        bool known = false;
+        for (int i = 0; i < card_kit_count; ++i) {
+            known = known || strcmp(card_kits[i].folder, folder) == 0;
+        }
+        if (known) {
+            free(folder);
+            continue;
+        }
+        card_kit_t *kit = &card_kits[card_kit_count];
+        memset(kit, 0, sizeof(*kit));
+        kit->folder = folder;
+        int n = 0;
+        for (const char *c = entry->d_name; *c != '\0' && n < KIT_NAME_MAX; ++c) {
+            kit->name[n++] = (char)(isprint((unsigned char)*c) ? toupper((unsigned char)*c) : '?');
+        }
+        ++card_kit_count;
+        ++added;
+        ESP_LOGI(TAG, "Found kit %s", folder);
+    }
+    closedir(listing);
+    return added;
+}
+
+static bool ends_with_wav(const char *name)
+{
+    size_t length = strlen(name);
+    return length > 4 && strcasecmp(name + length - 4, ".wav") == 0;
+}
+
+/* "3 CP big clap.wav" is pad 3, labelled CP: the first two letters or
+   digits after the pad number. */
+static int pad_of(const char *file, char label[3])
+{
+    if (file[0] < '1' || file[0] > '0' + DRUM_TRACKS) {
+        return -1;
+    }
+    int n = 0;
+    for (const char *c = file + 1; *c != '\0' && *c != '.' && n < 2; ++c) {
+        if (isalnum((unsigned char)*c)) {
+            label[n++] = (char)toupper((unsigned char)*c);
+        }
+    }
+    label[n] = '\0';
+    return file[0] - '1';
+}
+
+static void forget_sounds(card_kit_t *kit, const bool *from_card)
+{
+    for (int track = 0; track < DRUM_TRACKS; ++track) {
+        if (from_card[track]) {
+            free((void *)kit->sounds[track].pcm);
+        }
+    }
+}
+
+esp_err_t kit_load(int kit_index, char *status, size_t status_size)
+{
+    card_kit_t *kit = card_kit(kit_index);
+    if (kit == NULL) {
+        snprintf(status, status_size, " Kit %s", kit_name(kit_index));
+        return ESP_OK;
+    }
+    if (kit->loaded) {
+        snprintf(status, status_size, " Kit %s (SD card)", kit->name);
+        return ESP_OK;
+    }
+    DIR *listing = opendir(kit->folder);
+    if (listing == NULL) {
+        snprintf(status, status_size, " Can't open %s", kit->name);
+        return ESP_ERR_NOT_FOUND;
+    }
+    /* Pads without a WAV keep the 808's sound. */
+    bool from_card[DRUM_TRACKS] = {false};
+    for (int track = 0; track < DRUM_TRACKS; ++track) {
+        kit->sounds[track] = sounds[KIT_808][track];
+    }
+    int bad = 0;
+    size_t bytes = 0;
+    esp_err_t result = ESP_OK;
+    struct dirent *entry;
+    while ((entry = readdir(listing)) != NULL) {
+        char label[3];
+        int pad = entry->d_type == DT_DIR || !ends_with_wav(entry->d_name)
+                      ? -1
+                      : pad_of(entry->d_name, label);
+        if (pad < 0 || from_card[pad]) {
+            continue;
+        }
+        size_t length = strlen(kit->folder) + 1 + strlen(entry->d_name) + 1;
+        char *path = malloc(length);
+        if (path == NULL) {
+            result = ESP_ERR_NO_MEM;
+            break;
+        }
+        snprintf(path, length, "%s/%s", kit->folder, entry->d_name);
+        int16_t *pcm;
+        uint32_t frames;
+        esp_err_t loaded = wav_load(path, KIT_CARD_SECONDS, PEAK, &pcm, &frames);
+        if (loaded == ESP_ERR_NO_MEM) {
+            free(path);
+            result = ESP_ERR_NO_MEM;
+            break;
+        }
+        if (loaded != ESP_OK) {
+            ESP_LOGW(TAG, "%s: %s", path, esp_err_to_name(loaded));
+            free(path);
+            ++bad;
+            continue;
+        }
+        free(path);
+        if (strlen(label) == 2) {
+            memcpy(kit->labels[pad], label, 3);
+        } else {
+            memcpy(kit->labels[pad], sounds[KIT_808][pad].label, 3);
+        }
+        kit->sounds[pad] = (drum_sound_t){
+            .pcm = pcm,
+            .frames = frames,
+            .label = kit->labels[pad],
+            .gain = sounds[KIT_808][pad].gain,
+        };
+        from_card[pad] = true;
+        bytes += frames * sizeof(int16_t);
+    }
+    closedir(listing);
+    if (result != ESP_OK) {
+        forget_sounds(kit, from_card);
+        snprintf(status, status_size, " %s: not enough memory", kit->name);
+        return result;
+    }
+    int pads = 0;
+    for (int track = 0; track < DRUM_TRACKS; ++track) {
+        pads += from_card[track] ? 1 : 0;
+    }
+    if (pads == 0) {
+        snprintf(status, status_size, bad > 0 ? " %s: WAVs unreadable" : " %s: no 1-8 WAVs",
+                 kit->name);
+        return ESP_ERR_NOT_FOUND;
+    }
+    kit->loaded = true;
+    ESP_LOGI(TAG, "Loaded %s: %d pads, %d unreadable, %u KB", kit->folder, pads, bad,
+             (unsigned)(bytes / 1024));
+    if (bad > 0) {
+        snprintf(status, status_size, " %s: %d pads, %d bad WAV", kit->name, pads, bad);
+    } else {
+        snprintf(status, status_size, " %s: %d pads, %u KB", kit->name, pads,
+                 (unsigned)(bytes / 1024));
+    }
+    return ESP_OK;
+}
+
 static int clamp_kit(int kit)
 {
     return kit >= 0 && kit < DRUM_KITS ? kit : 0;
@@ -367,15 +573,20 @@ static int clamp_kit(int kit)
 
 const drum_sound_t *kit_sound(int kit, int track)
 {
+    card_kit_t *card = card_kit(kit);
+    if (card != NULL) {
+        return card->loaded ? &card->sounds[track] : &sounds[KIT_808][track];
+    }
     return &sounds[clamp_kit(kit)][track];
 }
 
 const char *kit_name(int kit)
 {
-    return kit_defs[clamp_kit(kit)].name;
+    card_kit_t *card = card_kit(kit);
+    return card != NULL ? card->name : kit_defs[clamp_kit(kit)].name;
 }
 
 const char *kit_about(int kit)
 {
-    return kit_defs[clamp_kit(kit)].about;
+    return kit_on_card(kit) ? "SD CARD" : kit_defs[clamp_kit(kit)].about;
 }

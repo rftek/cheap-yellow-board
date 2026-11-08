@@ -1,13 +1,17 @@
 #include "export.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "sdcard.h"
 
 #define WAV_HEADER_BYTES 44
+#define WRITE_BYTES 8192
 
 static const char *TAG = "export";
 
@@ -80,12 +84,56 @@ esp_err_t export_render(const drum_pattern_t *pattern, drum_export_t *out)
     return ESP_OK;
 }
 
-esp_err_t export_save(const drum_export_t *export, const char *name)
+esp_err_t export_save(const drum_export_t *export, char *saved, size_t saved_size)
 {
-    /* TODO: write export->wav somewhere: an SD card, an HTTP download
-       served from the board, or an upload to a computer. */
-    ESP_LOGW(TAG, "Saving %s (%u bytes) is not supported yet", name, (unsigned)export->size);
-    return ESP_ERR_NOT_SUPPORTED;
+    if (sdcard_mount() != ESP_OK) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    mkdir(EXPORT_DIR, 0775); /* fails harmlessly when it exists */
+    char path[64];
+    int number = 1;
+    struct stat info;
+    for (; number <= 999; ++number) {
+        snprintf(path, sizeof(path), EXPORT_DIR "/loop-%03d.wav", number);
+        if (stat(path, &info) != 0) {
+            break;
+        }
+    }
+    if (number > 999) {
+        return ESP_ERR_NO_MEM;
+    }
+    FILE *file = fopen(path, "wb");
+    if (file == NULL) {
+        ESP_LOGW(TAG, "Can't create %s", path);
+        return ESP_FAIL;
+    }
+    /* Writes go through internal RAM, which the SD driver can DMA from. */
+    uint8_t *buffer = heap_caps_malloc(WRITE_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (buffer == NULL) {
+        fclose(file);
+        return ESP_ERR_NO_MEM;
+    }
+    esp_err_t result = ESP_OK;
+    for (size_t done = 0; done < export->size; done += WRITE_BYTES) {
+        size_t take = export->size - done < WRITE_BYTES ? export->size - done : WRITE_BYTES;
+        memcpy(buffer, export->wav + done, take);
+        if (fwrite(buffer, 1, take, file) != take) {
+            result = ESP_FAIL;
+            break;
+        }
+    }
+    free(buffer);
+    if (fclose(file) != 0) {
+        result = ESP_FAIL;
+    }
+    if (result != ESP_OK) {
+        ESP_LOGW(TAG, "Writing %s failed", path);
+        remove(path);
+        return result;
+    }
+    snprintf(saved, saved_size, "loop-%03d.wav", number);
+    ESP_LOGI(TAG, "Saved %s (%u KB)", path, (unsigned)(export->size / 1024));
+    return ESP_OK;
 }
 
 void export_free(drum_export_t *export)
