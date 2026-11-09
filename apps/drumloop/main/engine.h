@@ -19,6 +19,9 @@
 typedef struct {
     /* Bit s of steps[bar][track] is step s of that bar. */
     uint16_t steps[DRUM_MAX_BARS][DRUM_TRACKS];
+    /* The same bit in doubles plays that step twice: on the step and half a
+       step later, as two thirty-second notes. Kept clear for steps off. */
+    uint16_t doubles[DRUM_MAX_BARS][DRUM_TRACKS];
     uint8_t bars; /* loop length: 1, 2, 4, 8 or 16 */
     uint16_t bpm;
     uint8_t muted; /* bit per track */
@@ -45,6 +48,8 @@ typedef struct {
     bool playing;
     uint16_t next_step;     /* index in the loop of the next step to start */
     double next_step_frame; /* the frame it starts at */
+    uint8_t half_tracks;    /* tracks to hit again half a step in, bit each */
+    double half_frame;      /* the frame of that second hit */
     drum_voice_t voices[DRUM_TRACKS];
     drum_step_cb_t on_step;
     void *context;

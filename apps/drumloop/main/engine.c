@@ -32,11 +32,13 @@ void engine_start(drum_engine_t *engine)
     engine->playing = true;
     engine->next_step = 0;
     engine->next_step_frame = (double)engine->frame;
+    engine->half_tracks = 0;
 }
 
 void engine_stop(drum_engine_t *engine)
 {
     engine->playing = false;
+    engine->half_tracks = 0;
 }
 
 void engine_silence(drum_engine_t *engine)
@@ -92,18 +94,24 @@ static void start_step(drum_engine_t *engine)
     }
     int bar = engine->next_step / DRUM_STEPS;
     int step = engine->next_step % DRUM_STEPS;
+    double per_step = engine_frames_per_step(pattern->bpm);
+    engine->half_tracks = 0;
     for (int track = 0; track < DRUM_TRACKS; ++track) {
         bool muted = (pattern->muted >> track) & 1;
         if (!muted && ((pattern->steps[bar][track] >> step) & 1)) {
             engine_hit(engine, track);
+            if ((pattern->doubles[bar][track] >> step) & 1) {
+                engine->half_tracks |= (uint8_t)(1u << track);
+            }
         }
     }
+    engine->half_frame = engine->next_step_frame + per_step / 2.0;
     if (engine->on_step != NULL) {
         engine->on_step((uint64_t)llround(engine->next_step_frame), engine->next_step,
                         engine->context);
     }
     engine->next_step = (uint16_t)((engine->next_step + 1) % total);
-    engine->next_step_frame += engine_frames_per_step(pattern->bpm);
+    engine->next_step_frame += per_step;
 }
 
 int engine_quantize(const drum_engine_t *engine, uint32_t frames_ago)
@@ -178,11 +186,27 @@ void engine_render(drum_engine_t *engine, int16_t *out, size_t frames)
             segment = MIX_CHUNK;
         }
         if (engine->playing) {
-            while (engine->next_step_frame <= (double)engine->frame) {
-                start_step(engine);
+            /* A second hit is always due before the next step. */
+            while (true) {
+                if (engine->half_tracks != 0 && engine->half_frame <= (double)engine->frame) {
+                    for (int track = 0; track < DRUM_TRACKS; ++track) {
+                        if ((engine->half_tracks >> track) & 1) {
+                            engine_hit(engine, track);
+                        }
+                    }
+                    engine->half_tracks = 0;
+                } else if (engine->next_step_frame <= (double)engine->frame) {
+                    start_step(engine);
+                } else {
+                    break;
+                }
             }
-            /* Mix only up to the next step, so it starts on its frame. */
-            double until = ceil(engine->next_step_frame - (double)engine->frame);
+            /* Mix only up to the next hit, so it starts on its frame. */
+            double next = engine->next_step_frame;
+            if (engine->half_tracks != 0 && engine->half_frame < next) {
+                next = engine->half_frame;
+            }
+            double until = ceil(next - (double)engine->frame);
             if (until < (double)segment) {
                 segment = (size_t)until;
             }

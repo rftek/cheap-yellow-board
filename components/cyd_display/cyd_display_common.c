@@ -7,6 +7,7 @@
 
 #include "cyd_display_backend.h"
 #include "esp_check.h"
+#include "freertos/FreeRTOS.h"
 #include "sdkconfig.h"
 
 /* A run of full-height display columns of one text line. */
@@ -279,4 +280,33 @@ void cyd_backend_post_tap(QueueHandle_t queue, const cyd_touch_point_t *point)
         return;
     }
     xQueueSend(queue, point, 0);
+}
+
+#define HELD_MAX 5
+static portMUX_TYPE held_lock = portMUX_INITIALIZER_UNLOCKED;
+static cyd_touch_point_t held_points[HELD_MAX];
+static int held_count;
+
+void cyd_backend_set_held(const cyd_touch_point_t *points, int count)
+{
+    if (count > HELD_MAX) {
+        count = HELD_MAX;
+    }
+    portENTER_CRITICAL(&held_lock);
+    if (count > 0) {
+        memcpy(held_points, points, (size_t)count * sizeof(*points));
+    }
+    held_count = count;
+    portEXIT_CRITICAL(&held_lock);
+}
+
+int cyd_touch_held(cyd_touch_point_t *points, int max)
+{
+    portENTER_CRITICAL(&held_lock);
+    int count = held_count < max ? held_count : max;
+    if (count > 0) {
+        memcpy(points, held_points, (size_t)count * sizeof(*points));
+    }
+    portEXIT_CRITICAL(&held_lock);
+    return count;
 }

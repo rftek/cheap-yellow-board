@@ -2,7 +2,8 @@
 
      row 0       transport: PLAY/STOP, REC, BPM - 140 +, bar page, MENU
      rows 1-8    the step grid: a track per row, its label (tap to mute)
-                 and 16 steps of the bar on view (tap to toggle)
+                 and 16 steps of the bar on view (tap to toggle; hold to
+                 play the step twice, or once again)
      rows 9-11   eight pads that play the sounds live
 
    The grid's playhead follows what the speaker is playing, which is the
@@ -41,6 +42,7 @@ _Static_assert(CYD_LCD_WIDTH == 800 && CYD_TEXT_ROWS == 12,
 #define PAD_TOP (PAD_ROW * FH)
 
 #define REFRESH_MS 10
+#define LONG_PRESS_MS 450
 #define FLASH_MS 120
 #define NO_STEP -1
 
@@ -168,6 +170,7 @@ static bool load_beat(uint16_t bpm, int kit, const uint16_t steps[DRUM_TRACKS])
     pattern->kit = (uint8_t)kit;
     for (int bar = 0; bar < pattern->bars; ++bar) {
         memcpy(pattern->steps[bar], steps, sizeof(pattern->steps[bar]));
+        memset(pattern->doubles[bar], 0, sizeof(pattern->doubles[bar]));
     }
     return true;
 }
@@ -291,6 +294,14 @@ static uint16_t cell_color(int track, int step)
     return step % 4 == 0 ? COLOR_BEAT : COLOR_OFF;
 }
 
+static bool cell_double(int track, int step)
+{
+    return (pattern->doubles[view_bar][track] >> step) & 1;
+}
+
+/* A cell's color, plus this bit when it's drawn split for a double step. */
+#define DRAWN_DOUBLE 0x10000u
+
 static void refresh_grid(void)
 {
     if (drawn_muted != pattern->muted) {
@@ -305,12 +316,24 @@ static void refresh_grid(void)
         int y = (GRID_ROW + track) * FH;
         for (int step = 0; step < DRUM_STEPS; ++step) {
             uint16_t color = cell_color(track, step);
-            if (drawn_cells[track][step] == color) {
+            bool split = cell_double(track, step);
+            uint32_t drawn = color | (split ? DRAWN_DOUBLE : 0);
+            if (drawn_cells[track][step] == drawn) {
                 continue;
             }
-            ESP_ERROR_CHECK(cyd_fill_rect(LABEL_WIDTH + step * STEP_WIDTH + 2, y + 2,
-                                          STEP_WIDTH - 4, FH - 5, color));
-            drawn_cells[track][step] = color;
+            int x = LABEL_WIDTH + step * STEP_WIDTH + 2;
+            int width = STEP_WIDTH - 4;
+            if (split) {
+                /* Two halves with a gap: two hits in the step. */
+                int half = (width - 4) / 2;
+                ESP_ERROR_CHECK(cyd_fill_rect(x, y + 2, half, FH - 5, color));
+                ESP_ERROR_CHECK(cyd_fill_rect(x + half, y + 2, width - 2 * half, FH - 5,
+                                              CYD_COLOR_BLACK));
+                ESP_ERROR_CHECK(cyd_fill_rect(x + width - half, y + 2, half, FH - 5, color));
+            } else {
+                ESP_ERROR_CHECK(cyd_fill_rect(x, y + 2, width, FH - 5, color));
+            }
+            drawn_cells[track][step] = drawn;
         }
     }
 }
@@ -559,6 +582,7 @@ static void cycle_length(void)
     }
     for (int bar = bars; bar < bars * 2; ++bar) {
         memcpy(pattern->steps[bar], pattern->steps[bar - bars], sizeof(pattern->steps[bar]));
+        memcpy(pattern->doubles[bar], pattern->doubles[bar - bars], sizeof(pattern->doubles[bar]));
     }
     pattern->bars = (uint8_t)(bars * 2);
 }
@@ -723,6 +747,7 @@ static void run_menu(QueueHandle_t touch_queue)
                 break;
             } else if (clear_armed) {
                 memset(pattern->steps, 0, sizeof(pattern->steps));
+                memset(pattern->doubles, 0, sizeof(pattern->doubles));
                 clear_armed = false;
                 draw_clear_row(false);
                 menu_status(" Pattern cleared");
@@ -788,18 +813,84 @@ static void tap_header(int column)
     }
 }
 
+/* The grid cell under x, y, or false when it isn't over a step. */
+static bool grid_cell(int x, int y, int *track, int *step)
+{
+    int row = y / FH - GRID_ROW;
+    if (row < 0 || row >= DRUM_TRACKS || x < LABEL_WIDTH) {
+        return false;
+    }
+    int column = (x - LABEL_WIDTH) / STEP_WIDTH;
+    *track = row;
+    *step = column < DRUM_STEPS ? column : DRUM_STEPS - 1;
+    return true;
+}
+
+/* A step tapped and maybe still held, with how it was before the tap. */
+static struct {
+    bool active;
+    int bar, track, step;
+    bool was_on, was_double;
+    TickType_t since;
+} press;
+
 static void tap_grid(int x, int y)
 {
-    int track = y / FH - GRID_ROW;
-    if (x < LABEL_WIDTH) {
-        pattern->muted ^= (uint8_t)(1u << track);
+    int track;
+    int step;
+    if (!grid_cell(x, y, &track, &step)) {
+        if (x < LABEL_WIDTH) {
+            pattern->muted ^= (uint8_t)(1u << (y / FH - GRID_ROW));
+        }
         return;
     }
-    int step = (x - LABEL_WIDTH) / STEP_WIDTH;
-    if (step >= DRUM_STEPS) {
-        step = DRUM_STEPS - 1;
+    uint16_t bit = (uint16_t)(1u << step);
+    press = (typeof(press)){
+        .active = true,
+        .bar = view_bar,
+        .track = track,
+        .step = step,
+        .was_on = pattern->steps[view_bar][track] & bit,
+        .was_double = pattern->doubles[view_bar][track] & bit,
+        .since = xTaskGetTickCount(),
+    };
+    pattern->steps[view_bar][track] ^= bit;
+    pattern->doubles[view_bar][track] &= (uint16_t)~bit;
+}
+
+/* A step held for LONG_PRESS_MS plays twice; a double step held plays once.
+   The tap already toggled it, so this sets it either way. */
+static void check_long_press(void)
+{
+    if (!press.active) {
+        return;
     }
-    pattern->steps[view_bar][track] ^= (uint16_t)(1u << step);
+    cyd_touch_point_t held[5];
+    int count = cyd_touch_held(held, 5);
+    bool still = false;
+    for (int i = 0; i < count; ++i) {
+        int track;
+        int step;
+        if (grid_cell(held[i].x, held[i].y, &track, &step) && track == press.track &&
+            step == press.step) {
+            still = true;
+        }
+    }
+    if (!still || press.bar != view_bar) {
+        press.active = false;
+        return;
+    }
+    if (xTaskGetTickCount() - press.since < pdMS_TO_TICKS(LONG_PRESS_MS)) {
+        return;
+    }
+    press.active = false;
+    uint16_t bit = (uint16_t)(1u << press.step);
+    pattern->steps[press.bar][press.track] |= bit;
+    if (press.was_on && press.was_double) {
+        pattern->doubles[press.bar][press.track] &= (uint16_t)~bit;
+    } else {
+        pattern->doubles[press.bar][press.track] |= bit;
+    }
 }
 
 static void full_redraw(void)
@@ -888,6 +979,7 @@ void ui_run(QueueHandle_t touch_queue, drum_pattern_t *loop_pattern)
                 tap_header(point.x / FW);
             }
         }
+        check_long_press();
         flash_hit_pads();
         update_playhead();
         refresh();

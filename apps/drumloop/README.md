@@ -34,7 +34,7 @@ The loop keeps playing when the output changes, and the beat is kept. If the spe
 | **bar page** (`1/4`) | Which bar the grid shows. Cyan means it follows the playhead. Tap to go to bar 1, 2, ... and back to follow. |
 | **MENU** | The settings below. |
 | **Track label** | Mutes or unmutes the track in the loop. The pads still play. |
-| **Step** | Turns that step on or off in the bar on view. |
+| **Step** | Turns that step on or off in the bar on view. Hold it (about half a second) to make it a double: it plays twice in its sixteenth, as two thirty-seconds (two claps in one step, a hat roll), and is drawn split in two. Hold a double to make it single again. |
 | **Pads** | Play the sound at once. The pad flashes white. Play with several fingers: each new finger is a hit, even while others are down. |
 
 The grid's playhead and its bar page follow what the speaker is playing. That is the AirPlay delay behind what the board renders, so the screen matches what you hear.
