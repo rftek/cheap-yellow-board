@@ -94,20 +94,26 @@
 
 static const char *TAG = "cyd_launcher";
 
-/* An asset's updated_at time, which changes with every upload. */
-#define VERSION_SIZE 24
+/* An asset's updated_at time, which changes with every upload: the catalog's
+   "version", which tells a newer build of a stored app. */
+#define STAMP_SIZE 24
+/* An app's MAJOR.MINOR version, such as "1.2", from its version.txt: the
+   catalog's "app_version" and esp_app_desc_t.version in its image. */
+#define APP_VERSION_SIZE 12
 
 typedef struct {
     const esp_partition_t *partition;
     bool valid;
     char name[APP_NAME_SIZE];   /* app folder name */
-    char version[VERSION_SIZE];    /* empty when flashed some other way */
+    char stamp[STAMP_SIZE];     /* empty when flashed some other way */
+    char app_version[APP_VERSION_SIZE]; /* from the image; empty if it has none */
 } slot_t;
 
 typedef struct {
     char name[APP_NAME_SIZE]; /* app folder name */
     char url[256];
-    char version[VERSION_SIZE];
+    char stamp[STAMP_SIZE];
+    char app_version[APP_VERSION_SIZE]; /* empty for images older than versions */
     uint32_t size;
 } remote_image_t;
 
@@ -147,7 +153,15 @@ static int entry_count;
 static int scroll_offset;
 static char title_text[MENU_COLUMNS + 1];
 
-typedef enum { INFO_ACTIVITY, INFO_ADDRESS, INFO_SIGNAL, INFO_RAM, INFO_PAGE_COUNT } info_page_t;
+typedef enum {
+    INFO_ACTIVITY,
+    INFO_ADDRESS,
+    INFO_SIGNAL,
+    INFO_RAM,
+    INFO_LAUNCHER_VERSION,
+    INFO_SLOT_VERSIONS,
+    INFO_PAGE_COUNT
+} info_page_t;
 
 /* What the network is doing, in words, from the network task and the
    Wi-Fi event handler. */
@@ -166,6 +180,26 @@ static int64_t info_page_until;
 static void slot_key(char *key, size_t size, const char *field, int slot)
 {
     snprintf(key, size, "%s%d", field, slot);
+}
+
+/* True for a MAJOR.MINOR version such as "1.2". Images built before
+   versions existed carry a git description such as "f29c5298-dirty". */
+static bool is_app_version(const char *text)
+{
+    const char *c = text;
+    if (*c < '0' || *c > '9') {
+        return false;
+    }
+    while (*c >= '0' && *c <= '9') {
+        ++c;
+    }
+    if (*c++ != '.' || *c < '0' || *c > '9') {
+        return false;
+    }
+    while (*c >= '0' && *c <= '9') {
+        ++c;
+    }
+    return *c == '\0' && (size_t)(c - text) < APP_VERSION_SIZE;
 }
 
 static void load_slots(void)
@@ -191,42 +225,46 @@ static void load_slots(void)
             /* Flashed over USB rather than downloaded: use the project name. */
             snprintf(slot->name, sizeof(slot->name), "%s", description.project_name);
         }
-        size_t version_size = sizeof(slot->version);
+        size_t stamp_size = sizeof(slot->stamp);
         slot_key(key, sizeof(key), "ver", i);
-        if (!have_nvs || nvs_get_str(nvs, key, slot->version, &version_size) != ESP_OK) {
-            slot->version[0] = '\0';
+        if (!have_nvs || nvs_get_str(nvs, key, slot->stamp, &stamp_size) != ESP_OK) {
+            slot->stamp[0] = '\0';
         }
         /* Images are named after their app folder, so a different project name
            means the slot was reflashed over USB since the download. */
         if (strcmp(slot->name, description.project_name) != 0) {
             snprintf(slot->name, sizeof(slot->name), "%s", description.project_name);
-            slot->version[0] = '\0';
+            slot->stamp[0] = '\0';
         }
-        ESP_LOGI(TAG, "Slot %c: %s (%s)", 'A' + i, slot->name,
-                 slot->version[0] != '\0' ? slot->version : "flashed over USB");
+        if (is_app_version(description.version)) {
+            strlcpy(slot->app_version, description.version, sizeof(slot->app_version));
+        }
+        ESP_LOGI(TAG, "Slot %c: %s %s (%s)", 'A' + i, slot->name, description.version,
+                 slot->stamp[0] != '\0' ? slot->stamp : "flashed over USB");
     }
     if (have_nvs) {
         nvs_close(nvs);
     }
 }
 
-/* Records which app and version a slot holds; NULL name clears it. */
-static void save_slot(int slot, const char *name, const char *version)
+/* Records which app and build (its asset's upload time) a slot holds; NULL
+   name clears it. The app's own version is read from the image instead. */
+static void save_slot(int slot, const char *name, const char *stamp)
 {
     nvs_handle_t nvs;
     if (nvs_open("launcher", NVS_READWRITE, &nvs) != ESP_OK) {
         return;
     }
     char name_key[16];
-    char version_key[16];
+    char stamp_key[16];
     slot_key(name_key, sizeof(name_key), "name", slot);
-    slot_key(version_key, sizeof(version_key), "ver", slot);
+    slot_key(stamp_key, sizeof(stamp_key), "ver", slot);
     if (name != NULL) {
         nvs_set_str(nvs, name_key, name);
-        nvs_set_str(nvs, version_key, version);
+        nvs_set_str(nvs, stamp_key, stamp);
     } else {
         nvs_erase_key(nvs, name_key);
-        nvs_erase_key(nvs, version_key);
+        nvs_erase_key(nvs, stamp_key);
     }
     nvs_commit(nvs);
     nvs_close(nvs);
@@ -416,8 +454,32 @@ static void set_activity(const char *format, ...)
     portEXIT_CRITICAL(&activity_lock);
 }
 
+/* True when a slot's image carries a MAJOR.MINOR version to show. */
+static bool any_slot_version(void)
+{
+    for (int i = 0; i < SLOT_COUNT; ++i) {
+        if (slots[i].valid && slots[i].app_version[0] != '\0') {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* "A 1.2 B 2.0": each slot's app version, '-' for none. Shown on the info
+   row because the CYD's menu rows are too narrow for long names and a
+   version together. */
+static void slot_versions_text(char *text, size_t size)
+{
+    const char *version[SLOT_COUNT];
+    for (int i = 0; i < SLOT_COUNT; ++i) {
+        version[i] = slots[i].valid && slots[i].app_version[0] != '\0' ? slots[i].app_version
+                                                                       : "-";
+    }
+    snprintf(text, size, "A %s B %s", version[0], version[1]);
+}
+
 /* One page of information: what the network is doing, the address and
-   signal once joined, or the free RAM. */
+   signal once joined, the free RAM, then the versions. */
 static void draw_info(void)
 {
     char text[48] = ""; /* room for a whole SSID, to satisfy -Wformat-truncation */
@@ -438,6 +500,12 @@ static void draw_info(void)
         }
         break;
     }
+    case INFO_LAUNCHER_VERSION:
+        snprintf(text, sizeof(text), "Launcher %.12s", esp_app_get_description()->version);
+        break;
+    case INFO_SLOT_VERSIONS:
+        slot_versions_text(text, sizeof(text));
+        break;
     default:
         snprintf(text, sizeof(text), "RAM %uK free", (unsigned)(esp_get_free_heap_size() / 1024));
         break;
@@ -446,12 +514,13 @@ static void draw_info(void)
 }
 
 /* Moves to the next info page, skipping the address and signal until
-   Wi-Fi has joined. */
+   Wi-Fi has joined, and the slot versions while no slot has one. */
 static void next_info_page(void)
 {
     do {
         info_page = (info_page + 1) % INFO_PAGE_COUNT;
-    } while (!wifi_connected && (info_page == INFO_ADDRESS || info_page == INFO_SIGNAL));
+    } while ((!wifi_connected && (info_page == INFO_ADDRESS || info_page == INFO_SIGNAL)) ||
+             (info_page == INFO_SLOT_VERSIONS && !any_slot_version()));
     info_page_until = esp_timer_get_time() + INFO_PAGE_US;
     draw_info();
 }
@@ -557,7 +626,7 @@ static bool remote_is_stored(const remote_image_t *image)
 {
     for (int i = 0; i < SLOT_COUNT; ++i) {
         if (slots[i].valid && strcmp(slots[i].name, image->name) == 0 &&
-            strcmp(slots[i].version, image->version) == 0) {
+            strcmp(slots[i].stamp, image->stamp) == 0) {
             return true;
         }
     }
@@ -618,26 +687,54 @@ static void draw_scroll_row(void)
     draw_menu_cells(SCROLL_ROW, text, foreground, background);
 }
 
-/* Draws entries[index], which must be on the current page. */
+/* Draws entries[index], which must be on the current page: two marker
+   columns, the app name, and its version at the right end of the row in
+   gray when the name leaves room for it. The CYD's 14 menu columns fit a
+   version only beside names of up to 8 characters; the info row's slot
+   versions page and the download screen show the rest. */
 static void draw_entry(int index, bool highlighted)
 {
-    char line[CYD_TEXT_COLUMNS + 1];
+    char markers[2];
+    const char *name;
+    const char *version;
     uint16_t color = CYD_COLOR_WHITE;
     const entry_t *entry = &entries[index];
     if (entry->kind == ENTRY_SLOT) {
         /* "A*name": slot letter, '*' on the image that boots by default. */
-        snprintf(line, sizeof(line), "%c%c%.12s", 'A' + entry->index,
-                 entry->index == default_slot() ? '*' : ' ', slots[entry->index].name);
+        markers[0] = 'A' + entry->index;
+        markers[1] = entry->index == default_slot() ? '*' : ' ';
+        name = slots[entry->index].name;
+        version = slots[entry->index].app_version;
     } else {
-        snprintf(line, sizeof(line), "+ %.12s", remote_images[entry->index].name);
+        /* "+ name": an app, or a newer build of one, to download. */
+        markers[0] = '+';
+        markers[1] = ' ';
+        name = remote_images[entry->index].name;
+        version = remote_images[entry->index].app_version;
         color = CYD_COLOR_CYAN;
     }
-    int row = MENU_FIRST_ROW + index - scroll_offset;
-    if (highlighted) {
-        draw_menu_row(row, CYD_COLOR_BLACK, CYD_COLOR_WHITE, line);
-    } else {
-        draw_menu_row(row, color, CYD_COLOR_BUTTON, line);
+
+    char text[MENU_COLUMNS + 1];
+    uint16_t foreground[MENU_COLUMNS];
+    uint16_t background[MENU_COLUMNS];
+    memset(text, ' ', MENU_COLUMNS);
+    text[MENU_COLUMNS] = '\0';
+    text[0] = markers[0];
+    text[1] = markers[1];
+    int width = MENU_COLUMNS - 2;
+    int name_length = (int)strnlen(name, width);
+    int version_length = (int)strlen(version);
+    bool show_version = version_length > 0 && name_length + 1 + version_length <= width;
+    memcpy(text + 2, name, name_length);
+    if (show_version) {
+        memcpy(text + MENU_COLUMNS - version_length, version, version_length);
     }
+    for (int i = 0; i < MENU_COLUMNS; ++i) {
+        bool in_version = show_version && i >= MENU_COLUMNS - version_length;
+        foreground[i] = highlighted ? CYD_COLOR_BLACK : in_version ? CYD_COLOR_GRAY : color;
+        background[i] = highlighted ? CYD_COLOR_WHITE : CYD_COLOR_BUTTON;
+    }
+    draw_menu_cells(MENU_FIRST_ROW + index - scroll_offset, text, foreground, background);
 }
 
 static void draw_entries(void)
@@ -946,8 +1043,9 @@ static bool json_copy_string(const char *value, char *output, size_t size)
 }
 
 /* Fills image from one app's entry in the catalog, [name, limit): its name
-   and the url, size and version of its image for this chip. An app without
-   one is not offered. */
+   and the url, size, upload time ("version") and app version of its image
+   for this chip. An app without one is not offered; an image without a
+   valid app_version is offered without one. */
 static bool catalog_image(const char *name, const char *limit, remote_image_t *image)
 {
     const char *asset = json_value(name, limit, CONFIG_IDF_TARGET);
@@ -961,9 +1059,14 @@ static bool catalog_image(const char *name, const char *limit, remote_image_t *i
     const char *size = json_value(asset, asset_end, "size");
     if (size == NULL || !json_copy_string(name, image->name, sizeof(image->name)) ||
         !json_copy_string(json_value(asset, asset_end, "url"), image->url, sizeof(image->url)) ||
-        !json_copy_string(json_value(asset, asset_end, "version"), image->version,
-                          sizeof(image->version))) {
+        !json_copy_string(json_value(asset, asset_end, "version"), image->stamp,
+                          sizeof(image->stamp))) {
         return false;
+    }
+    if (!json_copy_string(json_value(asset, asset_end, "app_version"), image->app_version,
+                          sizeof(image->app_version)) ||
+        !is_app_version(image->app_version)) {
+        image->app_version[0] = '\0';
     }
     image->size = (uint32_t)strtoul(size, NULL, 10);
     return true;
@@ -1025,8 +1128,9 @@ static net_state_t fetch_catalog(void)
             const char *next = json_value(name, end, "name");
             remote_image_t *image = &remote_images[remote_count];
             if (catalog_image(name, next != NULL ? next : end, image)) {
-                ESP_LOGI(TAG, "App %s: %s, %u bytes", image->name, image->version,
-                         (unsigned)image->size);
+                ESP_LOGI(TAG, "App %s %s: %s, %u bytes", image->name,
+                         image->app_version[0] != '\0' ? image->app_version : "(no version)",
+                         image->stamp, (unsigned)image->size);
                 ++remote_count;
             }
             name = next;
@@ -1136,8 +1240,11 @@ static esp_err_t download_image(const remote_image_t *image, int slot_index)
     ESP_ERROR_CHECK(cyd_text_row(0, CYD_COLOR_CYAN, CYD_COLOR_BLACK, "DOWNLOADING"));
     snprintf(line, sizeof(line), "%.17s", image->name);
     ESP_ERROR_CHECK(cyd_text_row(2, CYD_COLOR_WHITE, CYD_COLOR_BLACK, line));
-    snprintf(line, sizeof(line), "into slot %c", 'A' + slot_index);
-    ESP_ERROR_CHECK(cyd_text_row(3, CYD_COLOR_GRAY, CYD_COLOR_BLACK, line));
+    /* "1.2 into slot A": the version, when the catalog gives one. */
+    char into[APP_VERSION_SIZE + 16];
+    snprintf(into, sizeof(into), "%s%sinto slot %c", image->app_version,
+             image->app_version[0] != '\0' ? " " : "", 'A' + slot_index);
+    ESP_ERROR_CHECK(cyd_text_row(3, CYD_COLOR_GRAY, CYD_COLOR_BLACK, into));
     draw_download_progress("connect", 0, 0);
 
     esp_http_client_config_t config = {
@@ -1214,9 +1321,16 @@ static esp_err_t download_image(const remote_image_t *image, int slot_index)
     result = esp_ota_end(ota);
     if (result == ESP_OK) {
         snprintf(slot->name, sizeof(slot->name), "%s", image->name);
-        snprintf(slot->version, sizeof(slot->version), "%s", image->version);
+        snprintf(slot->stamp, sizeof(slot->stamp), "%s", image->stamp);
+        /* The image's own description is what load_slots reads next boot. */
+        esp_app_desc_t description;
+        slot->app_version[0] = '\0';
+        if (esp_ota_get_partition_description(slot->partition, &description) == ESP_OK &&
+            is_app_version(description.version)) {
+            strlcpy(slot->app_version, description.version, sizeof(slot->app_version));
+        }
         slot->valid = true;
-        save_slot(slot_index, image->name, image->version);
+        save_slot(slot_index, image->name, image->stamp);
         ESP_LOGI(TAG, "Stored %s in slot %c (%u bytes)", image->name, 'A' + slot_index,
                  (unsigned)received);
     }
