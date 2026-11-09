@@ -6,7 +6,7 @@
 #define PI 3.14159265f
 #define SINE_SIZE 1024
 #define CHUNK 64              /* frames mixed at a time in float */
-#define PLUCK_MAX 1100        /* delay line frames: down to 40 Hz */
+#define PLUCK_MAX 1400        /* delay line frames: down to 31.5 Hz, below C1 */
 #define MAX_MODES 16          /* resonators in a modal (piano) voice */
 #define DETUNED_PARTIALS 4    /* partials that get a second string */
 #define MODE_LIMIT_HZ 7000.0f /* partials above this are left out */
@@ -322,9 +322,11 @@ static struct {
 
 /* ---- Building blocks -------------------------------------------------------- */
 
+/* The sine of a phase in cycles, which must not be negative; whole cycles
+   wrap in the table index. No floorf: it is a library call in software on
+   this chip, and the organ alone made 72 a sample. */
 static inline float sine(float phase)
 {
-    phase -= floorf(phase);
     float x = phase * SINE_SIZE;
     int i = (int)x;
     float fraction = x - (float)i;
@@ -355,7 +357,7 @@ static inline float pulse(float phase, float dt, float width)
 {
     float value = phase < width ? 1.0f : -1.0f;
     float shifted = phase + 1.0f - width;
-    shifted -= floorf(shifted);
+    shifted = shifted >= 1.0f ? shifted - 1.0f : shifted;
     return value + poly_blep(phase, dt) - poly_blep(shifted, dt);
 }
 
@@ -461,7 +463,8 @@ static void render_fm(voice_t *voice, float *mix, int n)
     const fm_spec_t *spec = voice->spec->spec;
     for (int i = 0; i < n; ++i) {
         float modulator = sine(voice->phase2);
-        float out = sine(voice->phase + voice->depth * modulator);
+        /* Two cycles on, so a deep negative swing stays positive. */
+        float out = sine(voice->phase + 2.0f + voice->depth * modulator);
         voice->depth = voice->depth_floor + (voice->depth - voice->depth_floor) * voice->depth_coef;
         voice->phase = advance(voice->phase, voice->step);
         voice->phase2 = advance(voice->phase2, voice->step2);

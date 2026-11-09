@@ -1,6 +1,6 @@
 # Keyboard
 
-A two-octave touch keyboard for the Waveshare ESP32-S3-Touch-LCD-7 (800x480, capacitive touch). It has 25 keys from C to C, each labelled with its note, seven synthesized voices in 23 styles (concert grand, upright, electric pianos, church and jazz organs and more), eight notes at once, a sustain pedal and a loop recorder with overdub and undo. The sound plays on an AirPlay speaker through the shared [music_out](../../components/music_out) component, the same output [DrumLoop](../drumloop) uses. You can also play with no speaker while you work out a part.
+A two-octave touch keyboard for the Waveshare ESP32-S3-Touch-LCD-7 (800x480, capacitive touch). It plays across seven octaves, C1 to C8 as on an 88-key piano, two at a time: 25 keys from C to C, each labelled with its note, seven synthesized voices in 23 styles (concert grand, upright, electric pianos, church and jazz organs and more), eight notes at once, a sustain pedal and a loop recorder with overdub and undo. The sound plays on an AirPlay speaker through the shared [music_out](../../components/music_out) component, the same output [DrumLoop](../drumloop) uses. You can also play with no speaker while you work out a part.
 
 It shares its tempo and its AirPlay delay with DrumLoop. If you set 140 BPM in one app, the other starts at 140, so a keyboard loop and a drum loop made one after the other fit together.
 
@@ -19,8 +19,8 @@ If the speaker drops the session, the keyboard goes silent and the MENU button t
 
 ```
  PLAY  REC   -  120 +   MET   MENU     transport
- PIANO   C7 GRAND      UNDO            voice and style
- OCT -   C3-C5   OCT +       SUS       octave, sustain
+ PIANO  C7 GRAND   UNDO  SUS          voice, style, sustain
+ OCT -  [.....|==|.........]  OCT +    the 7 octaves; the 2 on the keys lit
  BAR 1.3 OF 2  37 NOTES                the loop, as heard
  ============------------------------  loop progress
  |C#| |D#|  |F#| |G#| |A#|  ...        25 keys, C3 to C5,
@@ -35,7 +35,8 @@ If the speaker drops the session, the keyboard goes silent and the MENU button t
 | **MET** | Metronome: a click on every beat while the loop runs, accented on beat 1. |
 | **Voice** (PIANO) | The next voice: PIANO, ORGAN, STRING, SYNTH, PLUCK, BELL, CHIP. The key you hold keeps its sound; new notes use the new one. |
 | **Style** (C7 GRAND) | The next style of that voice. The loop row shows what it is for a moment. Each voice remembers its style. Recorded notes keep the style they were played with, so takes on different pianos layer. |
-| **OCT - / OCT +** | Shift the keys an octave down or up: the lowest key from C2 to C5. The range shows between them. |
+| **OCT - / OCT +** | Shift the keys an octave down or up, anywhere from C1-C3 to C6-C8. The loop row says which two octaves for a moment. |
+| **Octave map** | All seven octaves, C1 to C8, in miniature between OCT - and OCT +. The two on the keys are bright, with a yellow bar under them, and the rest are dim. Loop notes light blue on it wherever they are, so a bass line recorded two octaves down still shows. Tap an octave on the map to put it at the left of the keys. |
 | **UNDO** | Removes the last take. |
 | **SUS** | The sustain pedal, latched: notes ring on after you lift until you tap SUS again. Recorded notes keep the length you heard. |
 | **Keys** | Play with up to five fingers at once (the GT911's limit). Slide a finger along the keys for a glissando. A key lights in the voice's color under your finger, and in blue while the loop plays it, at the moment the speaker does. Every key shows its note: white keys with the octave (C4), black keys without (C#), which are too narrow for three letters. Middle C's label is red. |
