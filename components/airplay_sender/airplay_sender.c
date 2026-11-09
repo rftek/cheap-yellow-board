@@ -702,7 +702,28 @@ static esp_err_t open_session(struct airplay_sender *s, const airplay_device_t *
     char record[96];
     snprintf(record, sizeof(record), "Range: npt=0-\r\nRTP-Info: seq=%u;rtptime=%lu\r\n", s->seq,
              (unsigned long)s->next_ts);
-    result = rtsp_request(s, "RECORD", s->url, record, NULL, NULL, 0, NULL);
+    response = malloc(sizeof(rtsp_response_t));
+    if (response == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    result = rtsp_request(s, "RECORD", s->url, record, NULL, NULL, 0, response);
+    if (result == ESP_OK) {
+        /* The speaker may say how far ahead it needs audio. Some (Denon
+           HEOS, for one) play nothing at all when given less, so a shorter
+           config.latency_ms is raised to it. */
+        char value[16];
+        if (header_value(response, "Audio-Latency", value, sizeof(value))) {
+            uint32_t frames = strtoul(value, NULL, 10);
+            ESP_LOGI(TAG, "The speaker asks for %lu frames (%lu ms) of latency",
+                     (unsigned long)frames, (unsigned long)((uint64_t)frames * 1000 / AIRPLAY_SAMPLE_RATE));
+            if (frames > s->latency_frames && frames <= 10 * AIRPLAY_SAMPLE_RATE) {
+                s->latency_frames = frames;
+                s->config.latency_ms =
+                    (uint32_t)(((uint64_t)frames * 1000 + AIRPLAY_SAMPLE_RATE - 1) / AIRPLAY_SAMPLE_RATE);
+            }
+        }
+    }
+    free(response);
     if (result != ESP_OK) {
         return result;
     }
@@ -763,7 +784,7 @@ esp_err_t airplay_sender_connect(const airplay_device_t *device,
         return result;
     }
     ESP_LOGI(TAG, "Connected to %s; latency %lu ms", device->name,
-             (unsigned long)config->latency_ms);
+             (unsigned long)s->config.latency_ms);
     *sender = s;
     return ESP_OK;
 }

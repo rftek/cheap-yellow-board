@@ -361,7 +361,9 @@ static bool connect_to(const airplay_device_t *device, char *status, size_t stat
     speaker = sender;
     snprintf(speaker_name, sizeof(speaker_name), "%s", device->name);
     audio_set_output(sender);
-    snprintf(status, status_size, " Playing on %s", device->name);
+    /* The speaker may have asked for a longer delay than the menu's. */
+    snprintf(status, status_size, " Playing on %s, %lu ms delay", device->name,
+             (unsigned long)airplay_sender_latency_ms(sender));
     return true;
 }
 

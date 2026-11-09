@@ -65,7 +65,7 @@ Every kit has the same eight roles, so a beat plays on any kit. Pick the kit wit
 - **TRAP 140** (half time) and **DNB 174** (two-step): one-bar starter beats on their own kit. They replace the pattern.
 - **CLEAR** (left; tap twice) and **EXPORT** (right; saves the loop to the SD card, see below) share a row.
 - **KIT**: the next kit: 808, 909, TRAP, DNB, then the kits on the SD card. Past the last kit it looks for a card again, so a card put in after boot is found.
-- **AIRPLAY DELAY**: 2000, 1000, 500, 250, 150 or 100 ms, saved in NVS (namespace `drumloop`) and used from the next connect. 2000 ms is the AirPlay 1 norm and works on every speaker. Shorter delays make the pads feel more immediate but some speakers don't honor them; try it on yours.
+- **AIRPLAY DELAY**: 2000, 1000, 500, 250, 150 or 100 ms, saved in NVS (namespace `drumloop`) and used from the next connect. 2000 ms is the AirPlay 1 norm and works on every speaker. Shorter delays make the pads feel more immediate, but some speakers play nothing at all below their own minimum: the Denon Home 250 was silent at 250 ms and plays at 2000 ms. When a speaker states its minimum as it connects, DrumLoop uses that instead, and the status line shows the delay in use.
 
 ## Latency
 
