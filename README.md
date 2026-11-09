@@ -15,6 +15,7 @@ Applications for the ESP32 Cheap Yellow Display (CYD, ESP32-2432S028R), written 
 | [apps/catmouse_pad](apps/catmouse_pad) | The same maze game, also steered with an Xbox controller | esp32, esp32s3 |
 | [apps/datalogger](apps/datalogger) | Voltage logger on GPIO35 | esp32 |
 | [apps/drumloop](apps/drumloop) | Live drum pads with 808, 909, trap and DnB kits and a 1-16 bar step sequencer, played on an AirPlay speaker | esp32s3 |
+| [apps/keyboard](apps/keyboard) | Two-octave touch keyboard with seven synth voices, sustain and a loop recorder, played on an AirPlay speaker | esp32s3 |
 | [apps/f1_race](apps/f1_race) | F1 racing game | esp32, esp32s3 |
 | [apps/gear_roll](apps/gear_roll) | LVGL gear demo | esp32, esp32s3 |
 | [apps/screen_check](apps/screen_check) | Screen color test | esp32, esp32s3 |
@@ -42,6 +43,7 @@ launcher/                    the launcher, its bootloader (bootloader_components
 components/cyd_display/      display, fonts, patterns and touch, shared by every app
 components/cyd_gamepad/      Xbox / Bluetooth gamepad input on Bluepad32
 components/airplay_sender/   AirPlay 1 (RAOP) audio output to network speakers
+components/music_out/        Wi-Fi, speaker picker and audio task for the music apps
 external/bluepad32/          Bluepad32 git submodule, with BTstack nested in it
 docs/                        build environment and installation guide
 tools/ci_plan.py             picks the apps a change needs built
