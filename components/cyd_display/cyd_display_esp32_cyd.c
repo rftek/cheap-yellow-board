@@ -473,7 +473,8 @@ static void touchscreen_task(void *argument)
     bool was_pressed = false;
     TickType_t last_tap = 0;
     while (true) {
-        /* Each new press becomes one tap, debounced against panel chatter. */
+        /* Each new press becomes one tap, debounced against panel chatter.
+           The press is held, for cyd_touch_held, where its tap was. */
         bool fast = cyd_backend_touch_fast();
         bool pressed = gpio_get_level(TOUCH_PIN_IRQ) == 0;
         TickType_t gap = pdMS_TO_TICKS(fast ? TOUCH_FAST_DEBOUNCE_MS : TOUCH_DEBOUNCE_MS);
@@ -484,6 +485,7 @@ static void touchscreen_task(void *argument)
             if (result != ESP_OK) {
                 ESP_LOGE(TAG, "Touchscreen read failed: %s", esp_err_to_name(result));
             } else if (gpio_get_level(TOUCH_PIN_IRQ) == 0) {
+                cyd_backend_set_held(&point, 1);
                 cyd_backend_post_tap(touch_queue, &point);
                 ESP_LOGI(TAG, "Tap at %d,%d (raw %u,%u)", point.x, point.y, point.raw_x,
                          point.raw_y);
@@ -501,6 +503,9 @@ static void touchscreen_task(void *argument)
             } else if (!pressed && was_pressed) {
                 cyd_backend_post_fingers(&fingers);
             }
+        }
+        if (!pressed && was_pressed) {
+            cyd_backend_set_held(NULL, 0);
         }
         was_pressed = pressed;
         TickType_t poll = pdMS_TO_TICKS(fast ? TOUCH_FAST_POLL_MS : TOUCH_POLL_MS);

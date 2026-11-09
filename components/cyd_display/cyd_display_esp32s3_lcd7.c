@@ -351,6 +351,7 @@ static void touchscreen_task(void *argument)
                 }
                 cyd_backend_post_fingers(&fingers);
             }
+            cyd_backend_set_held(report.points, report.count);
         }
         /* Otherwise each new press becomes one tap, debounced like the CYD's. */
         if (!fast && touch_down && !was_pressed &&

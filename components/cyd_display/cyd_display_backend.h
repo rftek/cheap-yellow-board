@@ -23,3 +23,6 @@ void cyd_backend_post_tap(QueueHandle_t queue, const cyd_touch_point_t *point);
 /* Whether the app set a fingers callback, and hands it a report. */
 bool cyd_backend_wants_fingers(void);
 void cyd_backend_post_fingers(const cyd_touch_fingers_t *fingers);
+
+/* Records the fingers down now, for cyd_touch_held. */
+void cyd_backend_set_held(const cyd_touch_point_t *points, int count);

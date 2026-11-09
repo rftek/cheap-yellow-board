@@ -156,6 +156,11 @@ typedef void (*cyd_fingers_fn)(const cyd_touch_fingers_t *fingers, void *context
 /* Sets the fingers callback; NULL removes it. */
 void cyd_touch_set_fingers_callback(cyd_fingers_fn fingers, void *context);
 
+/* For long presses, with cyd_touch_start: copies up to max of the fingers
+   down at the touch task's last poll into points and returns how many. The
+   resistive CYD reports one, where its press began. */
+int cyd_touch_held(cyd_touch_point_t *points, int max);
+
 /* For UI libraries that poll (such as LVGL) instead of taking taps: sets
    up the touchscreen and loads the saved calibration, without the tap
    task. Use either this with cyd_touch_read, or cyd_touch_start. */
