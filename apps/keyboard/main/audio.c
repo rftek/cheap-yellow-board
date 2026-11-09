@@ -1,5 +1,7 @@
 #include "audio.h"
 
+#include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "music_out.h"
@@ -9,6 +11,12 @@
 /* Loop notes on their way to the speaker: 2 s of a busy loop. */
 #define HEARD_QUEUE_LENGTH 128
 #define DEFAULT_BPM 120
+/* How often the render time is logged while it is more than a quarter of
+   the 8 ms a block lasts. */
+#define LOAD_REPORT_US 10000000
+#define BLOCK_US (1000000LL * MUSIC_OUT_BLOCK_FRAMES / MUSIC_OUT_RATE)
+
+static const char *TAG = "keyboard";
 
 typedef enum {
     COMMAND_NOTE_ON,
@@ -115,9 +123,27 @@ static bool render(int16_t *pcm, size_t frames, bool speaker_attached, void *con
 {
     (void)speaker_attached;
     (void)context;
+    static int64_t report_at;
+    static int64_t total_us;
+    static int64_t worst_us;
+    static uint32_t blocks;
+    int64_t start = esp_timer_get_time();
     bool flush = run_commands();
     looper_settings_t settings = audio_settings;
     looper_render(pcm, frames, music_out_frames_written(), &settings);
+    int64_t took = esp_timer_get_time() - start;
+    total_us += took;
+    worst_us = took > worst_us ? took : worst_us;
+    ++blocks;
+    if (start >= report_at) {
+        if (worst_us > BLOCK_US / 4) {
+            ESP_LOGI(TAG, "Render: average %lld us, worst %lld us of %lld us per block",
+                     total_us / blocks, worst_us, BLOCK_US);
+        }
+        report_at = start + LOAD_REPORT_US;
+        total_us = worst_us = 0;
+        blocks = 0;
+    }
     return flush;
 }
 
@@ -142,6 +168,7 @@ esp_err_t audio_start(QueueHandle_t touch_queue)
     config.render = render;
     config.on_change = on_output_change;
     config.task_stack = 8192; /* the synth mixes in float on the stack */
+    config.task_core = 1;     /* Wi-Fi runs on core 0, and the UI mostly does */
     return music_out_start(&config, touch_queue);
 }
 

@@ -56,6 +56,7 @@ typedef struct {
     void *context;
     int task_priority; /* above the UI task, so drawing never delays a packet */
     uint32_t task_stack;
+    int task_core; /* 0 or 1 to pin the audio task to a core, -1 for either */
 } music_out_config_t;
 
 #define MUSIC_OUT_DEFAULT_CONFIG() \
@@ -66,6 +67,7 @@ typedef struct {
         .context = NULL,           \
         .task_priority = 7,        \
         .task_stack = 6144,        \
+        .task_core = -1,           \
     }
 
 /* Reads the saved Wi-Fi network and starts the audio task, silent. The

@@ -46,7 +46,7 @@ Every sound is computed as it plays, in floating point at 44.1 kHz; there are no
 
 | Voice | Style | What it is | How it is made |
 |---|---|---|---|
-| PIANO | C7 GRAND | Bright concert grand, like Yamaha's C7 | Modal synthesis: up to 16 stiff-string partials (slightly sharp, as real piano strings are), struck an eighth of the way along. Each partial is a damped resonator that rings on its own, the higher ones dying sooner. The lower partials have a second string a cent apart, which beats. A short hammer thump starts it, and lifting the key drops the damper. Low notes ring for half a minute. |
+| PIANO | C7 GRAND | Bright concert grand, like Yamaha's C7 | Modal synthesis: up to 12 stiff-string partials (slightly sharp, as real piano strings are), struck an eighth of the way along. Each partial is a damped resonator that rings on its own, the higher ones dying sooner. The lower partials have a second string a cent apart, which beats. A short hammer thump starts it, and lifting the key drops the damper. Low notes ring for half a minute. |
 | | U1 UPRIGHT | Warm studio upright | The same, darker and shorter, with more thump |
 | | CP70 | Electric grand | The same, short and bright, strings 5 cents apart for its chorus, a little pickup drive |
 | | DX7 EP | FM electric piano | Two-operator FM, modulator at the pitch, a bright attack that mellows |

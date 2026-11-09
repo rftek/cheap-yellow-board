@@ -99,8 +99,10 @@ esp_err_t music_out_stream_start(const music_out_config_t *app_config)
         return ESP_ERR_NO_MEM;
     }
     silent_restart = true;
-    BaseType_t created = xTaskCreate(audio_task, "audio", config.task_stack, NULL,
-                                     config.task_priority, NULL);
+    BaseType_t created = xTaskCreatePinnedToCore(audio_task, "audio", config.task_stack, NULL,
+                                                 config.task_priority, NULL,
+                                                 config.task_core < 0 ? tskNO_AFFINITY
+                                                                      : config.task_core);
     return created == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
 }
 

@@ -7,8 +7,9 @@
 #define SINE_SIZE 1024
 #define CHUNK 64              /* frames mixed at a time in float */
 #define PLUCK_MAX 1100        /* delay line frames: down to 40 Hz */
-#define MAX_MODES 20          /* resonators in a modal (piano) voice */
-#define MODE_LIMIT_HZ 9000.0f /* partials above this are left out */
+#define MAX_MODES 16          /* resonators in a modal (piano) voice */
+#define DETUNED_PARTIALS 4    /* partials that get a second string */
+#define MODE_LIMIT_HZ 7000.0f /* partials above this are left out */
 #define SILENT 0.0001f        /* -80 dB: a voice this quiet is done */
 #define MASTER_GAIN 0.32f
 #define T60 6.9f              /* time constants in a fall of 60 dB */
@@ -130,7 +131,7 @@ typedef struct {
 /* Pianos. The grand rings longest, with stiff bright strings struck an
    eighth of the way along; the upright is darker, shorter and thumps;
    the electric grand is short, bright and chorused by detuned strings. */
-static const modal_spec_t PIANO_C7 = {.partials = 16, .inharmonicity = 0.0004f, .rolloff = 1.05f,
+static const modal_spec_t PIANO_C7 = {.partials = 12, .inharmonicity = 0.0004f, .rolloff = 1.05f,
     .hammer = 0.125f, .decay_slope = 0.22f, .detune_cents = 1.0f, .noise = 0.12f, .noise_tone = 0.25f};
 static const modal_spec_t PIANO_U1 = {.partials = 12, .inharmonicity = 0.0007f, .rolloff = 1.4f,
     .hammer = 0.14f, .decay_slope = 0.35f, .detune_cents = 2.0f, .noise = 0.22f, .noise_tone = 0.15f};
@@ -675,6 +676,7 @@ static void start_modal(voice_t *voice, int note, float freq, bool retrigger)
     memset(voice->y1, 0, sizeof(voice->y1));
     float scale = total > 0.0f ? 1.0f / total : 1.0f;
     int spare = MAX_MODES - partials;
+    spare = spare > DETUNED_PARTIALS ? DETUNED_PARTIALS : spare;
     for (int p = 0; p < partials; ++p) {
         /* The lower partials get a second string, slightly out of tune
            with the first, for the beating of a real piano's unisons. */

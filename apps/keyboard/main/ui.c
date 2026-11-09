@@ -929,5 +929,8 @@ void ui_run(QueueHandle_t touch_queue)
         refresh_sound(&state);
         refresh_loop(&state);
         refresh_keys();
+        if (wait == 0) {
+            vTaskDelay(1); /* taps came in: still let the idle task run */
+        }
     }
 }

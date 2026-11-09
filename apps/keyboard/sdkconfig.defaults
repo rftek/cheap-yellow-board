@@ -8,3 +8,8 @@ CONFIG_MDNS_MAX_SERVICES=4
 # A 1 ms tick lets the touch driver poll every 5 ms and the audio task wake
 # on time; at 100 Hz every wait rounds to 10 ms.
 CONFIG_FREERTOS_HZ=1000
+
+# The synth mixes up to eight voices of up to 16 resonators each in float,
+# 44100 times a second; at the default -Og its loops run several times
+# slower than at -O2.
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
