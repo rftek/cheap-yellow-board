@@ -19,3 +19,7 @@ bool cyd_backend_touch_fast(void);
 
 /* Hands a tap to the app's tap callback and, unless it took it, queues it. */
 void cyd_backend_post_tap(QueueHandle_t queue, const cyd_touch_point_t *point);
+
+/* Whether the app set a fingers callback, and hands it a report. */
+bool cyd_backend_wants_fingers(void);
+void cyd_backend_post_fingers(const cyd_touch_fingers_t *fingers);

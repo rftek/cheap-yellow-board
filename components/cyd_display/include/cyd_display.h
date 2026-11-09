@@ -134,6 +134,28 @@ typedef bool (*cyd_tap_fn)(const cyd_touch_point_t *point, void *context);
 /* Sets the tap callback; NULL removes it. */
 void cyd_touch_set_tap_callback(cyd_tap_fn tap, void *context);
 
+/* Every finger on the screen at one moment, for instruments that need to
+   know how long a key is held and where each finger slides to, such as a
+   keyboard. A finger keeps its id while it stays down. */
+#define CYD_TOUCH_MAX_FINGERS 5
+
+typedef struct {
+    uint8_t count;
+    uint8_t ids[CYD_TOUCH_MAX_FINGERS];
+    cyd_touch_point_t points[CYD_TOUCH_MAX_FINGERS];
+} cyd_touch_fingers_t;
+
+/* Called by the touch task with the fingers that are down each time the
+   panel reports, and once with count 0 when the last one lifts. Taps are
+   still posted as before (the tap callback can swallow them). Reports come
+   every 5-10 ms in fast mode, every 25 ms otherwise. On the GT911 that is
+   up to 5 fingers; on the CYD's resistive panel one, with id 0. Runs in the
+   touch task: keep it short and don't draw from it. */
+typedef void (*cyd_fingers_fn)(const cyd_touch_fingers_t *fingers, void *context);
+
+/* Sets the fingers callback; NULL removes it. */
+void cyd_touch_set_fingers_callback(cyd_fingers_fn fingers, void *context);
+
 /* For UI libraries that poll (such as LVGL) instead of taking taps: sets
    up the touchscreen and loads the saved calibration, without the tap
    task. Use either this with cyd_touch_read, or cyd_touch_start. */

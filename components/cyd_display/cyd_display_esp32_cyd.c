@@ -490,6 +490,18 @@ static void touchscreen_task(void *argument)
                 last_tap = xTaskGetTickCount();
             }
         }
+        /* The fingers callback: the one finger while it is down, then a
+           report with none when it lifts. */
+        if (cyd_backend_wants_fingers()) {
+            cyd_touch_fingers_t fingers = {.count = 0};
+            if (pressed && touch_read_point(&fingers.points[0]) == ESP_OK &&
+                gpio_get_level(TOUCH_PIN_IRQ) == 0) {
+                fingers.count = 1;
+                cyd_backend_post_fingers(&fingers);
+            } else if (!pressed && was_pressed) {
+                cyd_backend_post_fingers(&fingers);
+            }
+        }
         was_pressed = pressed;
         TickType_t poll = pdMS_TO_TICKS(fast ? TOUCH_FAST_POLL_MS : TOUCH_POLL_MS);
         vTaskDelay(poll > 0 ? poll : 1);

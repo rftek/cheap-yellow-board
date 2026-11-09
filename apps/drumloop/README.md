@@ -1,6 +1,6 @@
 # DrumLoop
 
-A live drum machine for the Waveshare ESP32-S3-Touch-LCD-7 (800x480, capacitive touch), made for building drum and bass and trap beats on the fly. Eight drum sounds sit on touch pads that play live, from one of four kits: 808, 909, trap and drum and bass. A step sequencer loops 1 to 16 bars at an adjustable tempo, and you can build its beat by tapping steps or by recording what you play on the pads. The sound plays on an AirPlay speaker through the [airplay_sender](../../components/airplay_sender) component, or nowhere while you build a beat.
+A live drum machine for the Waveshare ESP32-S3-Touch-LCD-7 (800x480, capacitive touch), made for building drum and bass and trap beats on the fly. Eight drum sounds sit on touch pads that play live, from one of four kits: 808, 909, trap and drum and bass. A step sequencer loops 1 to 16 bars at an adjustable tempo, and you can build its beat by tapping steps or by recording what you play on the pads. The sound plays on an AirPlay speaker through the [music_out](../../components/music_out) and [airplay_sender](../../components/airplay_sender) components, or nowhere while you build a beat.
 
 Bluetooth output isn't possible on this board: the ESP32-S3 has no Classic Bluetooth, so no A2DP, and its BLE 5.0 radio lacks the isochronous channels LE Audio needs. BLE MIDI, sending the hits to a phone or computer that makes the sound, would work and could be added.
 
@@ -30,7 +30,7 @@ The loop keeps playing when the output changes, and the beat is kept. If the spe
 |---|---|
 | **PLAY / STOP** | Starts the loop from its first step, or stops it. STOP also flushes the speaker's buffer so it goes quiet at once. |
 | **REC** | While the loop plays, each pad hit is also written into the pattern at the nearest sixteenth to where you heard it. |
-| **- / +** | Tempo, 60 to 200 BPM, one at a time (tens in MENU). Takes effect on the next step. |
+| **- / +** | Tempo, 60 to 200 BPM, one at a time (tens in MENU). Takes effect on the next step. The tempo is shared with [Keyboard](../keyboard) (NVS namespace `music`): DrumLoop starts at the tempo last set in either app. |
 | **bar page** (`1/4`) | Which bar the grid shows. Cyan means it follows the playhead. Tap to go to bar 1, 2, ... and back to follow. |
 | **MENU** | The settings below. |
 | **Track label** | Mutes or unmutes the track in the loop. The pads still play. |
@@ -65,7 +65,7 @@ Every kit has the same eight roles, so a beat plays on any kit. Pick the kit wit
 - **TRAP 140** (half time) and **DNB 174** (two-step) set the tempo. The loop's steps, length and kit stay. An empty loop gets the style's starter beat, on its own kit, in every bar.
 - **CLEAR** (left; tap twice) and **EXPORT** (right; saves the loop to the SD card, see below) share a row.
 - **KIT**: the next kit: 808, 909, TRAP, DNB, then the kits on the SD card. Past the last kit it looks for a card again, so a card put in after boot is found.
-- **AIRPLAY DELAY**: 2000, 1000, 500, 250, 150 or 100 ms, saved in NVS (namespace `drumloop`) and used from the next connect. 2000 ms is the AirPlay 1 norm and works on every speaker. Shorter delays make the pads feel more immediate, but some speakers play nothing at all below their own minimum, and don't say so: a Denon Home 250 is silent at 250 ms and plays at 500 ms. If a speaker is silent, raise the delay and pick it again. A speaker that states its minimum as it connects gets that instead; the status line shows the delay in use.
+- **AIRPLAY DELAY**: 2000, 1000, 500, 250, 150 or 100 ms, saved in NVS (namespace `music`, shared with Keyboard) and used from the next connect. 2000 ms is the AirPlay 1 norm and works on every speaker. Shorter delays make the pads feel more immediate, but some speakers play nothing at all below their own minimum, and don't say so: a Denon Home 250 is silent at 250 ms and plays at 500 ms. If a speaker is silent, raise the delay and pick it again. A speaker that states its minimum as it connects gets that instead; the status line shows the delay in use.
 
 ## Latency
 
@@ -116,9 +116,8 @@ The card is mounted at boot through the I/O expander's chip select, as in Wavesh
 | File | Contents |
 |---|---|
 | `main/main.c` | start-up: kit, NVS, audio task, touch, UI task |
-| `main/output.c` | Wi-Fi on and off, speaker picker, connect and disconnect |
 | `main/ui.c` | performance screen and menu |
-| `main/audio.c` | audio task: runs the engine and writes 8 ms packets to the speaker, silence included, so pads play at any time; with no speaker it runs the engine on the clock |
+| `main/audio.c` | the engine's side of the audio task: transport, pad hits and recording, rendered 8 ms at a time through [music_out](../../components/music_out), which also does Wi-Fi, the speaker picker and the silent clock |
 | `main/engine.c` | step sequencer (sample-accurate steps) and mixer (retrigger fades, hat choke, soft clipping) |
 | `main/kit.c` | the four kits' synthesis, and kits read from the SD card |
 | `main/wav.c` | WAV reader: PCM and float, any channels and rate, to 44.1 kHz mono |

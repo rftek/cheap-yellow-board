@@ -1,52 +1,24 @@
 #include "audio.h"
 
-#include <stdatomic.h>
-
 #include "esp_log.h"
-#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
-#include "freertos/semphr.h"
-#include "freertos/task.h"
+#include "music_out.h"
 
-#define BLOCK_FRAMES AIRPLAY_FRAMES_PER_PACKET
 #define HIT_QUEUE_LENGTH 32
 /* Enough for 2 s of latency at 200 BPM (27 steps). */
 #define STEP_QUEUE_LENGTH 64
-#define WRITE_TIMEOUT_MS 500
 
 typedef struct {
     uint8_t track;
     bool record;
 } hit_t;
 
-static const char *TAG = "audio";
-
 static drum_pattern_t *pattern;
 static drum_engine_t engine;
-/* Covers speaker and every call on it, so the UI's volume changes and
-   detaching never run during a write. */
-static SemaphoreHandle_t lock;
-/* Callers waiting for lock. While a speaker plays, the audio task holds
-   lock through each paced write and takes it again at once, and it runs
-   above the UI, so it steps aside for a tick whenever someone waits. */
-static atomic_int lock_waiters;
-static airplay_sender_handle_t speaker;
 static QueueHandle_t hits;
 static QueueHandle_t steps;
-static volatile uint32_t frames_written;
-static volatile uint32_t latency_frames;
 static volatile bool want_playing;
-/* Silent: no speaker, so the engine runs on the clock alone. */
-static bool silent;
-static bool silent_restart;
-
-static void take_lock(void)
-{
-    atomic_fetch_add(&lock_waiters, 1);
-    xSemaphoreTake(lock, portMAX_DELAY);
-    atomic_fetch_sub(&lock_waiters, 1);
-}
 
 static void on_step(uint64_t frame, uint16_t step, void *context)
 {
@@ -61,9 +33,9 @@ static void take_hits(void)
     while (xQueueReceive(hits, &hit, 0) == pdTRUE) {
         engine_hit(&engine, hit.track);
         if (hit.record) {
-            /* The player hears the loop latency_frames late, so the hit
-               belongs at the step they were hearing. */
-            int step = engine_quantize(&engine, latency_frames);
+            /* The player hears the loop the speaker's latency late, so the
+               hit belongs at the step they were hearing. */
+            int step = engine_quantize(&engine, music_out_latency_frames());
             if (step >= 0) {
                 pattern->steps[step / DRUM_STEPS][hit.track] |= (uint16_t)(1u << (step % DRUM_STEPS));
             }
@@ -71,132 +43,48 @@ static void take_hits(void)
     }
 }
 
-/* Applies transport changes and hits, then renders one block. target is
-   the speaker, or NULL in silent mode. */
-static void render_block(int16_t *pcm, airplay_sender_handle_t target)
+/* music_out's render callback, in the audio task: applies transport
+   changes and hits, then renders one block. */
+static bool render(int16_t *pcm, size_t frames, bool speaker_attached, void *context)
 {
+    (void)speaker_attached;
+    (void)context;
+    bool flush = false;
     if (want_playing && !engine.playing) {
         engine_start(&engine);
     } else if (!want_playing && engine.playing) {
         engine_stop(&engine);
         engine_silence(&engine);
-        if (target != NULL) {
-            airplay_sender_stop(target);
-        }
         xQueueReset(steps);
+        flush = true;
     }
     take_hits();
-    engine_render(&engine, pcm, BLOCK_FRAMES);
+    engine_render(&engine, pcm, frames);
+    return flush;
 }
 
-static void audio_task(void *argument)
+/* The loop keeps playing across an output change; the playhead picks up
+   the new latency from the next step. */
+static void on_output_change(void *context)
 {
-    (void)argument;
-    static int16_t pcm[BLOCK_FRAMES];
-    int64_t silent_start_us = 0;
-    uint64_t silent_frames = 0;
-    while (true) {
-        xSemaphoreTake(lock, portMAX_DELAY);
-        if (speaker != NULL) {
-            render_block(pcm, speaker);
-            esp_err_t result = airplay_sender_write(speaker, pcm, BLOCK_FRAMES,
-                                                    pdMS_TO_TICKS(WRITE_TIMEOUT_MS), NULL);
-            xSemaphoreGive(lock);
-            frames_written += BLOCK_FRAMES;
-            if (result != ESP_OK) {
-                /* The speaker went away; the UI hears of it from the
-                   sender's event and detaches. Don't spin meanwhile. */
-                vTaskDelay(pdMS_TO_TICKS(20));
-            } else if (atomic_load(&lock_waiters) > 0) {
-                vTaskDelay(1);
-            }
-            continue;
-        }
-        bool run_silent = silent;
-        if (silent_restart) {
-            silent_restart = false;
-            silent_start_us = esp_timer_get_time();
-            silent_frames = 0;
-        }
-        xSemaphoreGive(lock);
-        if (run_silent) {
-            /* No speaker to pace the writes, so the clock does: render
-               every block that is due, as if a speaker played it. */
-            uint64_t due = (uint64_t)(esp_timer_get_time() - silent_start_us) * DRUM_RATE / 1000000;
-            while (silent_frames + BLOCK_FRAMES <= due) {
-                render_block(pcm, NULL);
-                silent_frames += BLOCK_FRAMES;
-                frames_written += BLOCK_FRAMES;
-            }
-            vTaskDelay(1);
-            continue;
-        }
-        if (engine.playing) {
-            engine_stop(&engine);
-        }
-        engine_silence(&engine);
-        xQueueReset(hits);
-        vTaskDelay(pdMS_TO_TICKS(20));
-    }
+    (void)context;
+    xQueueReset(steps);
 }
 
-esp_err_t audio_start(drum_pattern_t *loop_pattern)
+esp_err_t audio_start(drum_pattern_t *loop_pattern, QueueHandle_t touch_queue)
 {
     pattern = loop_pattern;
-    lock = xSemaphoreCreateMutex();
     hits = xQueueCreate(HIT_QUEUE_LENGTH, sizeof(hit_t));
     steps = xQueueCreate(STEP_QUEUE_LENGTH, sizeof(audio_step_t));
-    if (lock == NULL || hits == NULL || steps == NULL) {
+    if (hits == NULL || steps == NULL) {
         return ESP_ERR_NO_MEM;
     }
     engine_init(&engine, pattern, on_step, NULL);
-    silent = true;
-    silent_restart = true;
-    /* Above the UI, so drawing never delays a packet. */
-    BaseType_t created = xTaskCreate(audio_task, "audio", 6144, NULL, 7, NULL);
-    return created == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
-}
-
-void audio_set_output(airplay_sender_handle_t new_speaker)
-{
-    take_lock();
-    speaker = new_speaker;
-    silent = new_speaker == NULL;
-    silent_restart = silent;
-    latency_frames = new_speaker != NULL ? (uint32_t)((uint64_t)airplay_sender_latency_ms(new_speaker) *
-                                                      DRUM_RATE / 1000)
-                                         : 0;
-    ESP_LOGI(TAG, "Output: %s, latency %lu frames", new_speaker != NULL ? "speaker" : "silent",
-             (unsigned long)latency_frames);
-    /* The loop keeps playing across the switch; the playhead picks up the
-       new latency from the next step. */
-    xQueueReset(steps);
-    xSemaphoreGive(lock);
-}
-
-bool audio_has_speaker(void)
-{
-    take_lock();
-    bool attached = speaker != NULL;
-    xSemaphoreGive(lock);
-    return attached;
-}
-
-esp_err_t audio_set_volume(int volume)
-{
-    take_lock();
-    esp_err_t result = speaker != NULL ? airplay_sender_set_volume(speaker, volume)
-                                       : ESP_ERR_INVALID_STATE;
-    xSemaphoreGive(lock);
-    return result;
-}
-
-int audio_get_volume(void)
-{
-    take_lock();
-    int volume = speaker != NULL ? airplay_sender_get_volume(speaker) : 0;
-    xSemaphoreGive(lock);
-    return volume;
+    music_out_config_t config = MUSIC_OUT_DEFAULT_CONFIG();
+    config.title = " DRUMLOOP";
+    config.render = render;
+    config.on_change = on_output_change;
+    return music_out_start(&config, touch_queue);
 }
 
 void audio_hit(int track, bool record)
@@ -215,18 +103,13 @@ bool audio_is_playing(void)
     return want_playing;
 }
 
-uint32_t audio_heard_frame(void)
-{
-    return frames_written - latency_frames;
-}
-
 bool audio_next_heard_step(audio_step_t *step)
 {
     audio_step_t next;
     if (xQueuePeek(steps, &next, 0) != pdTRUE) {
         return false;
     }
-    if ((int32_t)(audio_heard_frame() - next.frame) < 0) {
+    if ((int32_t)(music_out_heard_frame() - next.frame) < 0) {
         return false;
     }
     return xQueueReceive(steps, step, 0) == pdTRUE;

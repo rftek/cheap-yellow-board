@@ -280,3 +280,26 @@ void cyd_backend_post_tap(QueueHandle_t queue, const cyd_touch_point_t *point)
     }
     xQueueSend(queue, point, 0);
 }
+
+static cyd_fingers_fn fingers_callback;
+static void *fingers_context;
+
+void cyd_touch_set_fingers_callback(cyd_fingers_fn fingers, void *context)
+{
+    fingers_callback = NULL;
+    fingers_context = context;
+    fingers_callback = fingers;
+}
+
+bool cyd_backend_wants_fingers(void)
+{
+    return fingers_callback != NULL;
+}
+
+void cyd_backend_post_fingers(const cyd_touch_fingers_t *fingers)
+{
+    cyd_fingers_fn callback = fingers_callback;
+    if (callback != NULL) {
+        callback(fingers, fingers_context);
+    }
+}

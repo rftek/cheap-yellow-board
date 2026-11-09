@@ -53,6 +53,7 @@
 #define GT911_POINT1 0x814F /* track id, x, y (little-endian), size */
 #define GT911_POINT_SIZE 8  /* bytes per finger in the report */
 #define GT911_MAX_POINTS 5
+_Static_assert(GT911_MAX_POINTS <= CYD_TOUCH_MAX_FINGERS, "a report must fit cyd_touch_fingers_t");
 #define TOUCH_POLL_MS 25
 #define TOUCH_FAST_POLL_MS 5 /* the GT911 itself reports about every 10 ms */
 #define TOUCH_DEBOUNCE_MS 250
@@ -342,6 +343,14 @@ static void touchscreen_task(void *argument)
                 ids |= bit;
             }
             held_ids = ids;
+            if (cyd_backend_wants_fingers()) {
+                cyd_touch_fingers_t fingers = {.count = (uint8_t)report.count};
+                for (int i = 0; i < report.count && i < CYD_TOUCH_MAX_FINGERS; ++i) {
+                    fingers.ids[i] = report.ids[i];
+                    fingers.points[i] = report.points[i];
+                }
+                cyd_backend_post_fingers(&fingers);
+            }
         }
         /* Otherwise each new press becomes one tap, debounced like the CYD's. */
         if (!fast && touch_down && !was_pressed &&
