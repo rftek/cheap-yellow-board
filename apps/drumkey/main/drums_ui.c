@@ -1,0 +1,947 @@
+/* Drum&Key's drums screen, adapted from DrumLoop's ui.c, 800x480:
+
+     row 0       transport: PLAY/STOP, REC, BPM - 140 +, bar page, KEYS
+                 (to the keys screen), MENU
+     rows 1-8    the step grid: a track per row, its label (tap to mute)
+                 and 16 steps of the bar on view (tap to toggle; hold to
+                 play the step twice, or once again)
+     rows 9-11   eight pads that play the sounds live
+
+   The grid's playhead follows what the speaker is playing, which is the
+   AirPlay latency behind what the board renders. */
+
+#include "dk_ui.h"
+
+#include <stdatomic.h>
+#include <stdio.h>
+#include <string.h>
+
+#include "dk_audio.h"
+#include "cyd_display.h"
+#include "export.h"
+#include "music_out.h"
+#include "sdcard.h"
+
+/* Screen lines are cut to the display's width on purpose. */
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+
+_Static_assert(CYD_LCD_WIDTH == 800 && CYD_TEXT_ROWS == 12,
+               "DrumLoop is laid out for the 800x480 Waveshare S3 board");
+
+#define FW CYD_FONT_WIDTH
+#define FH CYD_FONT_HEIGHT
+#define COLUMNS CYD_TEXT_COLUMNS
+
+#define GRID_ROW 1
+#define PAD_ROW 9
+#define PAD_LABEL_ROW 10
+#define LABEL_WIDTH 128
+#define STEP_WIDTH ((CYD_LCD_WIDTH - LABEL_WIDTH) / DRUM_STEPS)
+#define PAD_WIDTH (CYD_LCD_WIDTH / DRUM_TRACKS)
+#define PAD_GAP 6
+#define PAD_TOP (PAD_ROW * FH)
+
+#define REFRESH_MS 10
+#define LONG_PRESS_MS 450
+#define FLASH_MS 120
+#define NO_STEP -1
+
+#define COLOR_OFF 0x2104
+#define COLOR_BEAT 0x39C7
+#define COLOR_HEAD 0x7BEF
+#define COLOR_PLAYING 0x0560
+#define COLOR_MUTED CYD_COLOR_BUTTON_DISABLED
+
+/* The tempo is saved for the other music apps once it has settled. */
+#define TEMPO_SAVE_MS 2000
+
+static const span_t PLAY_SPAN = DK_PLAY_SPAN;
+static const span_t REC_SPAN = DK_REC_SPAN;
+static const span_t BPM_DOWN_SPAN = DK_BPM_DOWN_SPAN;
+static const span_t BPM_SPAN = DK_BPM_SPAN;
+static const span_t BPM_UP_SPAN = DK_BPM_UP_SPAN;
+static const span_t BAR_SPAN = DK_SCREEN_SPAN;
+static const span_t SWITCH_SPAN = DK_SWITCH_SPAN;
+static const span_t MENU_SPAN = DK_MENU_SPAN;
+
+static uint16_t track_colors[DRUM_TRACKS];
+
+/* Screen state, and what is drawn now, so a refresh redraws only changes. */
+static drum_pattern_t *pattern;
+static volatile bool recording;
+static bool follow = true;
+static int view_bar;
+static int playhead = NO_STEP;
+static TickType_t flash_until[DRUM_TRACKS];
+/* Pads are played from the touch task (on_tap) while the performance
+   screen is up; it leaves the pads it played here for this task to flash. */
+static volatile bool pads_live;
+static atomic_uint pads_hit;
+/* The speaker dropped the session and output.c went silent: the MENU
+   button is red until the menu says so. */
+static bool speaker_lost_notice;
+
+static char drawn_header[COLUMNS + 1];
+static uint16_t drawn_header_fg[COLUMNS];
+static uint16_t drawn_header_bg[COLUMNS];
+static uint32_t drawn_cells[DRUM_TRACKS][DRUM_STEPS];
+static int drawn_muted;
+static int drawn_flash;
+
+#define NOT_DRAWN 0xFFFFFFFFu
+
+static uint16_t dim(uint16_t color)
+{
+    return (uint16_t)((color >> 1) & 0x7BEF);
+}
+
+static bool in_span(span_t span, int column)
+{
+    return column >= span.column && column < span.column + span.width;
+}
+
+/* Writes text centered in a span of a row being composed. */
+static void put_span(char *text, uint16_t *fg, uint16_t *bg, span_t span, const char *label,
+                     uint16_t foreground, uint16_t background)
+{
+    int length = (int)strlen(label);
+    if (length > span.width) {
+        length = span.width;
+    }
+    int start = span.column + (span.width - length) / 2;
+    for (int column = span.column; column < span.column + span.width; ++column) {
+        fg[column] = foreground;
+        bg[column] = background;
+    }
+    memcpy(text + start, label, (size_t)length);
+}
+
+/* ---- Settings ----------------------------------------------------------- */
+
+static uint16_t saved_bpm;
+static uint16_t changed_bpm;
+static TickType_t bpm_changed_at;
+
+/* Saves the tempo in the music apps' shared settings (music_out) once it
+   has stayed the same for a moment, so a run of taps on + is one write. */
+static void save_tempo_when_settled(void)
+{
+    TickType_t now = xTaskGetTickCount();
+    if (pattern->bpm != changed_bpm) {
+        changed_bpm = pattern->bpm;
+        bpm_changed_at = now;
+    }
+    if (changed_bpm != saved_bpm && now - bpm_changed_at >= pdMS_TO_TICKS(TEMPO_SAVE_MS)) {
+        music_out_save_tempo(changed_bpm);
+        saved_bpm = changed_bpm;
+    }
+}
+
+/* ---- Starter beats ------------------------------------------------------ */
+
+static bool loop_is_empty(void)
+{
+    for (int bar = 0; bar < pattern->bars; ++bar) {
+        for (int track = 0; track < DRUM_TRACKS; ++track) {
+            if (pattern->steps[bar][track] != 0) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/* Sets the style's tempo. The loop's programming, length and kit stay; only
+   an empty loop gets the starter beat (on the style's kit) in every bar.
+   Returns whether the beat was loaded. */
+static bool load_beat(uint16_t bpm, int kit, const uint16_t steps[DRUM_TRACKS])
+{
+    pattern->bpm = bpm;
+    if (!loop_is_empty()) {
+        return false;
+    }
+    pattern->kit = (uint8_t)kit;
+    for (int bar = 0; bar < pattern->bars; ++bar) {
+        memcpy(pattern->steps[bar], steps, sizeof(pattern->steps[bar]));
+        memset(pattern->doubles[bar], 0, sizeof(pattern->doubles[bar]));
+    }
+    return true;
+}
+
+/* Half-time trap at 140: kick and 808 on 1 and around, snare and clap on
+   3, eighth-note hats with a sixteenth roll into an open hat. */
+static bool load_trap(void)
+{
+    static const uint16_t steps[DRUM_TRACKS] = {
+        [DRUM_KICK] = 0x0481,       /* 0, 7, 10 */
+        [DRUM_SNARE] = 0x0100,      /* 8 */
+        [DRUM_CLAP] = 0x0100,       /* 8 */
+        [DRUM_CLOSED_HAT] = 0xB555, /* eighths, 13 and 15, not 14 */
+        [DRUM_OPEN_HAT] = 0x4000,   /* 14 */
+    };
+    return load_beat(140, KIT_TRAP, steps);
+}
+
+/* Two-step drum and bass at 174: kick on 1 and the "and" of 3, snare on 2
+   and 4, eighth-note hats and ghost rim shots. */
+static bool load_dnb(void)
+{
+    static const uint16_t steps[DRUM_TRACKS] = {
+        [DRUM_KICK] = 0x0401,       /* 0, 10 */
+        [DRUM_SNARE] = 0x1010,      /* 4, 12 */
+        [DRUM_CLOSED_HAT] = 0x5555, /* eighths */
+        [DRUM_RIM] = 0x8080,        /* 7, 15 */
+    };
+    return load_beat(174, KIT_DNB, steps);
+}
+
+/* ---- Drawing ------------------------------------------------------------ */
+
+static void invalidate(void)
+{
+    memset(drawn_header, 0, sizeof(drawn_header));
+    for (int track = 0; track < DRUM_TRACKS; ++track) {
+        for (int step = 0; step < DRUM_STEPS; ++step) {
+            drawn_cells[track][step] = NOT_DRAWN;
+        }
+    }
+    drawn_muted = -1;
+    drawn_flash = -1;
+}
+
+static void refresh_header(void)
+{
+    char text[COLUMNS + 1];
+    uint16_t fg[COLUMNS];
+    uint16_t bg[COLUMNS];
+    memset(text, ' ', COLUMNS);
+    text[COLUMNS] = '\0';
+    for (int column = 0; column < COLUMNS; ++column) {
+        fg[column] = CYD_COLOR_WHITE;
+        bg[column] = CYD_COLOR_BLACK;
+    }
+    bool playing = dk_is_playing();
+    put_span(text, fg, bg, PLAY_SPAN, playing ? "STOP" : "PLAY", CYD_COLOR_WHITE,
+             playing ? COLOR_PLAYING : CYD_COLOR_BUTTON);
+    put_span(text, fg, bg, REC_SPAN, "REC", CYD_COLOR_WHITE,
+             recording ? CYD_COLOR_RED : CYD_COLOR_BUTTON);
+    put_span(text, fg, bg, BPM_DOWN_SPAN, "-", CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
+    char number[8];
+    snprintf(number, sizeof(number), "%u", pattern->bpm);
+    put_span(text, fg, bg, BPM_SPAN, number, CYD_COLOR_YELLOW, CYD_COLOR_BLACK);
+    put_span(text, fg, bg, BPM_UP_SPAN, "+", CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
+    char bar[8];
+    snprintf(bar, sizeof(bar), "%d/%u", view_bar + 1, pattern->bars);
+    if (strlen(bar) > (size_t)BAR_SPAN.width) {
+        snprintf(bar, sizeof(bar), "B%d", view_bar + 1); /* 10 bars and up */
+    }
+    uint16_t bar_bg = pattern->bars == 1 ? CYD_COLOR_BUTTON_DISABLED
+                      : follow           ? CYD_COLOR_CYAN
+                                         : CYD_COLOR_BUTTON;
+    put_span(text, fg, bg, BAR_SPAN, bar,
+             follow && pattern->bars > 1 ? CYD_COLOR_BLACK : CYD_COLOR_WHITE, bar_bg);
+    put_span(text, fg, bg, SWITCH_SPAN, "KEYS", CYD_COLOR_WHITE, DK_KEYS_COLOR);
+    put_span(text, fg, bg, MENU_SPAN, "MENU", CYD_COLOR_WHITE,
+             speaker_lost_notice ? CYD_COLOR_RED : CYD_COLOR_BUTTON);
+
+    if (strcmp(text, drawn_header) == 0 && memcmp(fg, drawn_header_fg, sizeof(fg)) == 0 &&
+        memcmp(bg, drawn_header_bg, sizeof(bg)) == 0) {
+        return;
+    }
+    ESP_ERROR_CHECK(cyd_draw_cells(0, text, fg, bg));
+    dk_header_gaps();
+    memcpy(drawn_header, text, sizeof(drawn_header));
+    memcpy(drawn_header_fg, fg, sizeof(fg));
+    memcpy(drawn_header_bg, bg, sizeof(bg));
+}
+
+/* A track's row: its label, and black under the steps (redrawn after). */
+static void draw_track_label(int track)
+{
+    char text[COLUMNS + 1];
+    uint16_t fg[COLUMNS];
+    uint16_t bg[COLUMNS];
+    memset(text, ' ', COLUMNS);
+    text[COLUMNS] = '\0';
+    for (int column = 0; column < COLUMNS; ++column) {
+        fg[column] = CYD_COLOR_WHITE;
+        bg[column] = CYD_COLOR_BLACK;
+    }
+    bool muted = (pattern->muted >> track) & 1;
+    span_t label = {0, LABEL_WIDTH / FW};
+    put_span(text, fg, bg, label, kit_sound(pattern->kit, track)->label,
+             muted ? CYD_COLOR_GRAY : CYD_COLOR_BLACK, muted ? COLOR_MUTED : track_colors[track]);
+    ESP_ERROR_CHECK(cyd_draw_cells(GRID_ROW + track, text, fg, bg));
+    for (int step = 0; step < DRUM_STEPS; ++step) {
+        drawn_cells[track][step] = NOT_DRAWN;
+    }
+}
+
+static uint16_t cell_color(int track, int step)
+{
+    bool on = (pattern->steps[view_bar][track] >> step) & 1;
+    bool muted = (pattern->muted >> track) & 1;
+    bool head = playhead != NO_STEP && playhead / DRUM_STEPS == view_bar &&
+                playhead % DRUM_STEPS == step;
+    if (on) {
+        return head ? CYD_COLOR_WHITE : muted ? dim(track_colors[track]) : track_colors[track];
+    }
+    if (head) {
+        return COLOR_HEAD;
+    }
+    return step % 4 == 0 ? COLOR_BEAT : COLOR_OFF;
+}
+
+static bool cell_double(int track, int step)
+{
+    return (pattern->doubles[view_bar][track] >> step) & 1;
+}
+
+/* A cell's color, plus this bit when it's drawn split for a double step. */
+#define DRAWN_DOUBLE 0x10000u
+
+static void refresh_grid(void)
+{
+    if (drawn_muted != pattern->muted) {
+        for (int track = 0; track < DRUM_TRACKS; ++track) {
+            if (drawn_muted < 0 || ((drawn_muted ^ pattern->muted) >> track) & 1) {
+                draw_track_label(track);
+            }
+        }
+        drawn_muted = pattern->muted;
+    }
+    for (int track = 0; track < DRUM_TRACKS; ++track) {
+        int y = (GRID_ROW + track) * FH;
+        for (int step = 0; step < DRUM_STEPS; ++step) {
+            uint16_t color = cell_color(track, step);
+            bool split = cell_double(track, step);
+            uint32_t drawn = color | (split ? DRAWN_DOUBLE : 0);
+            if (drawn_cells[track][step] == drawn) {
+                continue;
+            }
+            int x = LABEL_WIDTH + step * STEP_WIDTH + 2;
+            int width = STEP_WIDTH - 4;
+            if (split) {
+                /* Two halves with a gap: two hits in the step. */
+                int half = (width - 4) / 2;
+                ESP_ERROR_CHECK(cyd_fill_rect(x, y + 2, half, FH - 5, color));
+                ESP_ERROR_CHECK(cyd_fill_rect(x + half, y + 2, width - 2 * half, FH - 5,
+                                              CYD_COLOR_BLACK));
+                ESP_ERROR_CHECK(cyd_fill_rect(x + width - half, y + 2, half, FH - 5, color));
+            } else {
+                ESP_ERROR_CHECK(cyd_fill_rect(x, y + 2, width, FH - 5, color));
+            }
+            drawn_cells[track][step] = drawn;
+        }
+    }
+}
+
+static void draw_pads(int flash)
+{
+    uint16_t colors[DRUM_TRACKS];
+    for (int pad = 0; pad < DRUM_TRACKS; ++pad) {
+        colors[pad] = (flash >> pad) & 1 ? CYD_COLOR_WHITE : track_colors[pad];
+        ESP_ERROR_CHECK(cyd_fill_rect(pad * PAD_WIDTH + PAD_GAP / 2, PAD_TOP + 2,
+                                      PAD_WIDTH - PAD_GAP, CYD_LCD_HEIGHT - PAD_TOP - 4,
+                                      colors[pad]));
+    }
+    /* Labels: a text row across all pads, each cell in the color of the pad
+       under it; then the gaps between pads are cut back out. */
+    char text[COLUMNS + 1];
+    uint16_t fg[COLUMNS];
+    uint16_t bg[COLUMNS];
+    memset(text, ' ', COLUMNS);
+    text[COLUMNS] = '\0';
+    for (int column = 0; column < COLUMNS; ++column) {
+        int pad = (column * FW + FW / 2) / PAD_WIDTH;
+        fg[column] = CYD_COLOR_BLACK;
+        bg[column] = colors[pad];
+    }
+    for (int pad = 0; pad < DRUM_TRACKS; ++pad) {
+        int center = pad * PAD_WIDTH + PAD_WIDTH / 2;
+        int start = (center - FW + FW / 2) / FW;
+        memcpy(text + start, kit_sound(pattern->kit, pad)->label, 2);
+    }
+    ESP_ERROR_CHECK(cyd_draw_cells(PAD_LABEL_ROW, text, fg, bg));
+    int label_y = PAD_LABEL_ROW * FH;
+    for (int pad = 0; pad <= DRUM_TRACKS; ++pad) {
+        int x = pad * PAD_WIDTH - PAD_GAP / 2;
+        int width = PAD_GAP;
+        if (x < 0) {
+            width += x;
+            x = 0;
+        }
+        if (x + width > CYD_LCD_WIDTH) {
+            width = CYD_LCD_WIDTH - x;
+        }
+        ESP_ERROR_CHECK(cyd_fill_rect(x, label_y, width, FH, CYD_COLOR_BLACK));
+    }
+    /* cyd_draw_cells leaves the row's bottom pixel line black. */
+    for (int pad = 0; pad < DRUM_TRACKS; ++pad) {
+        ESP_ERROR_CHECK(cyd_fill_rect(pad * PAD_WIDTH + PAD_GAP / 2, label_y + FH - 1,
+                                      PAD_WIDTH - PAD_GAP, 1, colors[pad]));
+    }
+}
+
+static void refresh_pads(void)
+{
+    TickType_t now = xTaskGetTickCount();
+    int flash = 0;
+    for (int pad = 0; pad < DRUM_TRACKS; ++pad) {
+        if ((int32_t)(flash_until[pad] - now) > 0) {
+            flash |= 1 << pad;
+        }
+    }
+    if (flash != drawn_flash) {
+        draw_pads(flash);
+        drawn_flash = flash;
+    }
+}
+
+static void refresh(void)
+{
+    if (view_bar >= pattern->bars) {
+        view_bar = 0;
+    }
+    refresh_header();
+    refresh_grid();
+    refresh_pads();
+}
+
+/* Moves the playhead to the step the speaker is playing now. */
+static void update_playhead(void)
+{
+    if (!dk_is_playing()) {
+        playhead = NO_STEP;
+        return;
+    }
+    audio_step_t step;
+    while (drums_next_heard_step(&step)) {
+        playhead = step.step;
+    }
+    if (follow && playhead != NO_STEP && playhead / DRUM_STEPS < pattern->bars) {
+        view_bar = playhead / DRUM_STEPS;
+    }
+}
+
+/* ---- Menu --------------------------------------------------------------- */
+
+#define MENU_INFO 1
+#define MENU_WIFI 2
+#define MENU_OUTPUT 3
+#define MENU_VOLUME 4
+#define MENU_TEMPO 5
+#define MENU_LENGTH 6
+#define MENU_BEATS 7
+#define MENU_CLEAR 8 /* CLEAR on the left, EXPORT on the right */
+#define MENU_KIT 9
+#define MENU_LATENCY 10
+#define MENU_BACK 11
+#define SPLIT_BUTTON_COLUMNS 9
+#define VOLUME_STEP 10
+#define TEMPO_STEP 10
+
+/* The menu's info line, kept between visits. */
+static char status_text[COLUMNS + 1] = " No speaker: silent";
+
+static void menu_status(const char *status)
+{
+    snprintf(status_text, sizeof(status_text), "%s", status);
+    ESP_ERROR_CHECK(cyd_text_row(MENU_INFO, CYD_COLOR_YELLOW, CYD_COLOR_BLACK, status_text));
+}
+
+/* A row with a button at each end and a value between them. */
+static void draw_split_row(int row, const char *left, const char *value, const char *right)
+{
+    char text[COLUMNS + 1];
+    uint16_t fg[COLUMNS];
+    uint16_t bg[COLUMNS];
+    memset(text, ' ', COLUMNS);
+    text[COLUMNS] = '\0';
+    for (int column = 0; column < COLUMNS; ++column) {
+        fg[column] = CYD_COLOR_WHITE;
+        bg[column] = CYD_COLOR_BLACK;
+    }
+    span_t left_span = {0, SPLIT_BUTTON_COLUMNS};
+    span_t right_span = {COLUMNS - SPLIT_BUTTON_COLUMNS, SPLIT_BUTTON_COLUMNS};
+    span_t middle = {SPLIT_BUTTON_COLUMNS, COLUMNS - 2 * SPLIT_BUTTON_COLUMNS};
+    put_span(text, fg, bg, left_span, left, CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
+    put_span(text, fg, bg, middle, value, CYD_COLOR_YELLOW, CYD_COLOR_BLACK);
+    put_span(text, fg, bg, right_span, right, CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
+    ESP_ERROR_CHECK(cyd_draw_cells(row, text, fg, bg));
+}
+
+static void draw_button_row(int row, const char *label)
+{
+    ESP_ERROR_CHECK(cyd_text_row(row, CYD_COLOR_WHITE, CYD_COLOR_BUTTON, label));
+}
+
+static void draw_volume_row(void)
+{
+    char value[8];
+    if (music_out_has_speaker()) {
+        snprintf(value, sizeof(value), "%d%%", music_out_get_volume());
+    } else {
+        snprintf(value, sizeof(value), "SILENT");
+    }
+    draw_split_row(MENU_VOLUME, "VOL -", value, "VOL +");
+}
+
+static void draw_tempo_row(void)
+{
+    char value[12];
+    snprintf(value, sizeof(value), "%u BPM", pattern->bpm);
+    draw_split_row(MENU_TEMPO, "BPM -10", value, "BPM +10");
+}
+
+static void draw_length_row(void)
+{
+    char line[COLUMNS + 1];
+    snprintf(line, sizeof(line), " LOOP LENGTH  %u BAR%s", pattern->bars,
+             pattern->bars == 1 ? "" : "S");
+    draw_button_row(MENU_LENGTH, line);
+}
+
+static void draw_clear_row(bool armed)
+{
+    draw_split_row(MENU_CLEAR, armed ? "CLEAR?" : "CLEAR", "", "EXPORT");
+}
+
+static void draw_kit_row(void)
+{
+    char line[COLUMNS + 1];
+    snprintf(line, sizeof(line), " KIT  %s  %s", kit_name(pattern->kit), kit_about(pattern->kit));
+    draw_button_row(MENU_KIT, line);
+}
+
+static void draw_menu(void)
+{
+    ESP_ERROR_CHECK(cyd_text_row(0, CYD_COLOR_BLACK, CYD_COLOR_YELLOW, " DRUM&KEY: DRUM SETTINGS"));
+    ESP_ERROR_CHECK(cyd_text_row(MENU_INFO, CYD_COLOR_YELLOW, CYD_COLOR_BLACK, status_text));
+    music_out_draw_wifi_row(MENU_WIFI);
+    music_out_draw_output_row(MENU_OUTPUT);
+    draw_volume_row();
+    draw_tempo_row();
+    draw_length_row();
+    draw_split_row(MENU_BEATS, "TRAP 140", "STYLE", "DNB 174");
+    draw_clear_row(false);
+    draw_kit_row();
+    music_out_draw_latency_row(MENU_LATENCY);
+    draw_button_row(MENU_BACK, " BACK TO PADS");
+}
+
+/* Doubles the loop (up to 16 bars), copying the bars it had into the new
+   ones, so a beat can grow by editing the copies; from 16 back to 1. */
+static void cycle_length(void)
+{
+    int bars = pattern->bars;
+    if (bars >= DRUM_MAX_BARS) {
+        pattern->bars = 1;
+        return;
+    }
+    for (int bar = bars; bar < bars * 2; ++bar) {
+        memcpy(pattern->steps[bar], pattern->steps[bar - bars], sizeof(pattern->steps[bar]));
+        memcpy(pattern->doubles[bar], pattern->doubles[bar - bars], sizeof(pattern->doubles[bar]));
+    }
+    pattern->bars = (uint8_t)(bars * 2);
+}
+
+static void export_loop(void)
+{
+    menu_status(" Rendering the loop...");
+    drum_export_t export;
+    esp_err_t result = export_render(pattern, &export);
+    char line[COLUMNS + 1];
+    if (result != ESP_OK) {
+        snprintf(line, sizeof(line), " Render failed: %s", esp_err_to_name(result));
+        menu_status(line);
+        return;
+    }
+    menu_status(" Saving to the SD card...");
+    char saved[24];
+    result = export_save(&export, saved, sizeof(saved));
+    if (result == ESP_ERR_NOT_FOUND) {
+        snprintf(line, sizeof(line), " No SD card to save to");
+    } else if (result == ESP_OK) {
+        snprintf(line, sizeof(line), " Saved %s %.0fs", saved, (double)export.frames / DRUM_RATE);
+    } else {
+        snprintf(line, sizeof(line), " Save failed: %s", esp_err_to_name(result));
+    }
+    menu_status(line);
+    export_free(&export);
+}
+
+/* Moves to the next kit: the built-in ones, then the SD card's, loading a
+   card kit's WAVs the first time. Past the last kit it looks for a card
+   again, so one put in after boot is found. A kit takes effect at once,
+   even mid-loop; ringing hits finish on the kit they started on. */
+static void next_kit(void)
+{
+    int kit = pattern->kit;
+    char status[COLUMNS + 1];
+    for (int tries = 0; tries <= DRUM_KITS + KIT_CARD_MAX; ++tries) {
+        int count = kit_count();
+        kit = kit + 1;
+        if (kit >= count) {
+            kit = 0;
+            if (!sdcard_mounted()) {
+                menu_status(" Looking for an SD card...");
+                if (sdcard_mount() == ESP_OK && kit_scan(KIT_FOLDER) > 0) {
+                    kit = count; /* the first kit on the card */
+                } else {
+                    menu_status(sdcard_mounted() ? " No kits in /kits on the card"
+                                                 : " No SD card: built-in kits");
+                }
+            }
+        }
+        if (!kit_on_card(kit)) {
+            break;
+        }
+        snprintf(status, sizeof(status), " Loading %s...", kit_name(kit));
+        menu_status(status);
+        if (kit_load(kit, status, sizeof(status)) == ESP_OK) {
+            menu_status(status);
+            break;
+        }
+        menu_status(status); /* it can't be used: try the next one */
+    }
+    pattern->kit = (uint8_t)kit;
+    draw_kit_row();
+}
+
+static void run_menu(QueueHandle_t touch_queue)
+{
+    bool clear_armed = false;
+    if (speaker_lost_notice) {
+        speaker_lost_notice = false;
+        snprintf(status_text, sizeof(status_text), " Speaker disconnected");
+    }
+    draw_menu();
+    /* Menu buttons get ordinary taps: one finger, with a gap between taps. */
+    pads_live = false;
+    cyd_touch_set_fast(false);
+    xQueueReset(touch_queue);
+    while (true) {
+        cyd_touch_point_t point;
+        if (xQueueReceive(touch_queue, &point, pdMS_TO_TICKS(50)) != pdTRUE) {
+            if (music_out_check_lost()) {
+                menu_status(" Speaker disconnected");
+                music_out_draw_output_row(MENU_OUTPUT);
+                draw_volume_row();
+            }
+            save_tempo_when_settled();
+            /* Keep up with the playhead, so the grid is current on return. */
+            update_playhead();
+            continue;
+        }
+        int row = point.y / FH;
+        int column = point.x / FW;
+        bool left = column < SPLIT_BUTTON_COLUMNS;
+        bool right = column >= COLUMNS - SPLIT_BUTTON_COLUMNS;
+        if (clear_armed && !(row == MENU_CLEAR && left)) {
+            clear_armed = false;
+            draw_clear_row(false);
+        }
+        char status[COLUMNS + 1];
+        switch (row) {
+        case 0:
+        case MENU_BACK:
+            return;
+        case MENU_WIFI:
+            if (music_out_tap_wifi(status, sizeof(status))) {
+                snprintf(status_text, sizeof(status_text), "%s", status);
+                draw_menu();
+                xQueueReset(touch_queue);
+            } else {
+                menu_status(status);
+            }
+            break;
+        case MENU_OUTPUT:
+            music_out_pick_speaker(status, sizeof(status));
+            snprintf(status_text, sizeof(status_text), "%s", status);
+            draw_menu();
+            xQueueReset(touch_queue);
+            break;
+        case MENU_VOLUME:
+            if ((left || right) && music_out_has_speaker()) {
+                music_out_set_volume(music_out_get_volume() + (left ? -VOLUME_STEP : VOLUME_STEP));
+                draw_volume_row();
+            }
+            break;
+        case MENU_TEMPO:
+            if (left || right) {
+                int bpm = pattern->bpm + (left ? -TEMPO_STEP : TEMPO_STEP);
+                bpm = bpm < DRUM_BPM_MIN ? DRUM_BPM_MIN : bpm > DRUM_BPM_MAX ? DRUM_BPM_MAX : bpm;
+                pattern->bpm = (uint16_t)bpm;
+                draw_tempo_row();
+            }
+            break;
+        case MENU_LENGTH:
+            cycle_length();
+            draw_length_row();
+            break;
+        case MENU_BEATS:
+            if (left) {
+                menu_status(load_trap() ? " Loaded the trap beat" : " 140 BPM; your loop is kept");
+            } else if (right) {
+                menu_status(load_dnb() ? " Loaded the DnB beat" : " 174 BPM; your loop is kept");
+            } else {
+                break;
+            }
+            draw_tempo_row();
+            draw_length_row();
+            draw_kit_row();
+            break;
+        case MENU_CLEAR:
+            if (right) {
+                export_loop();
+            } else if (!left) {
+                break;
+            } else if (clear_armed) {
+                memset(pattern->steps, 0, sizeof(pattern->steps));
+                memset(pattern->doubles, 0, sizeof(pattern->doubles));
+                clear_armed = false;
+                draw_clear_row(false);
+                menu_status(" Pattern cleared");
+            } else {
+                clear_armed = true;
+                draw_clear_row(true);
+                menu_status(" Tap CLEAR? again to clear");
+            }
+            break;
+        case MENU_KIT:
+            next_kit();
+            break;
+        case MENU_LATENCY:
+            music_out_next_latency_setting();
+            music_out_draw_latency_row(MENU_LATENCY);
+            menu_status(" Used from the next connect");
+            break;
+        default:
+            break;
+        }
+    }
+}
+
+/* ---- Performance screen ------------------------------------------------- */
+
+static void tap_header(int column)
+{
+    if (in_span(PLAY_SPAN, column)) {
+        bool play = !dk_is_playing();
+        dk_play(play);
+        if (!play) {
+            playhead = NO_STEP;
+        }
+    } else if (in_span(REC_SPAN, column)) {
+        recording = !recording;
+    } else if (in_span(BPM_DOWN_SPAN, column)) {
+        if (pattern->bpm > DRUM_BPM_MIN) {
+            --pattern->bpm;
+        }
+    } else if (in_span(BPM_UP_SPAN, column)) {
+        if (pattern->bpm < DRUM_BPM_MAX) {
+            ++pattern->bpm;
+        }
+    } else if (in_span(BAR_SPAN, column) && pattern->bars > 1) {
+        /* Follow, then each bar in turn, then follow again. */
+        if (follow) {
+            follow = false;
+            view_bar = 0;
+        } else if (view_bar + 1 < pattern->bars) {
+            ++view_bar;
+        } else {
+            follow = true;
+        }
+    }
+}
+
+/* The grid cell under x, y, or false when it isn't over a step. */
+static bool grid_cell(int x, int y, int *track, int *step)
+{
+    int row = y / FH - GRID_ROW;
+    if (row < 0 || row >= DRUM_TRACKS || x < LABEL_WIDTH) {
+        return false;
+    }
+    int column = (x - LABEL_WIDTH) / STEP_WIDTH;
+    *track = row;
+    *step = column < DRUM_STEPS ? column : DRUM_STEPS - 1;
+    return true;
+}
+
+/* A step tapped and maybe still held, with how it was before the tap. */
+static struct {
+    bool active;
+    int bar, track, step;
+    bool was_on, was_double;
+    TickType_t since;
+} press;
+
+static void tap_grid(int x, int y)
+{
+    int track;
+    int step;
+    if (!grid_cell(x, y, &track, &step)) {
+        if (x < LABEL_WIDTH) {
+            pattern->muted ^= (uint8_t)(1u << (y / FH - GRID_ROW));
+        }
+        return;
+    }
+    uint16_t bit = (uint16_t)(1u << step);
+    press = (typeof(press)){
+        .active = true,
+        .bar = view_bar,
+        .track = track,
+        .step = step,
+        .was_on = pattern->steps[view_bar][track] & bit,
+        .was_double = pattern->doubles[view_bar][track] & bit,
+        .since = xTaskGetTickCount(),
+    };
+    pattern->steps[view_bar][track] ^= bit;
+    pattern->doubles[view_bar][track] &= (uint16_t)~bit;
+}
+
+/* A step held for LONG_PRESS_MS plays twice; a double step held plays once.
+   The tap already toggled it, so this sets it either way. */
+static void check_long_press(void)
+{
+    if (!press.active) {
+        return;
+    }
+    cyd_touch_point_t held[5];
+    int count = cyd_touch_held(held, 5);
+    bool still = false;
+    for (int i = 0; i < count; ++i) {
+        int track;
+        int step;
+        if (grid_cell(held[i].x, held[i].y, &track, &step) && track == press.track &&
+            step == press.step) {
+            still = true;
+        }
+    }
+    if (!still || press.bar != view_bar) {
+        press.active = false;
+        return;
+    }
+    if (xTaskGetTickCount() - press.since < pdMS_TO_TICKS(LONG_PRESS_MS)) {
+        return;
+    }
+    press.active = false;
+    uint16_t bit = (uint16_t)(1u << press.step);
+    pattern->steps[press.bar][press.track] |= bit;
+    if (press.was_on && press.was_double) {
+        pattern->doubles[press.bar][press.track] &= (uint16_t)~bit;
+    } else {
+        pattern->doubles[press.bar][press.track] |= bit;
+    }
+}
+
+static void full_redraw(void)
+{
+    invalidate();
+    ESP_ERROR_CHECK(cyd_fill_rect(0, 0, CYD_LCD_WIDTH, CYD_LCD_HEIGHT, CYD_COLOR_BLACK));
+    refresh();
+}
+
+static void play_pad(int x)
+{
+    int pad = x / PAD_WIDTH;
+    if (pad >= DRUM_TRACKS) {
+        pad = DRUM_TRACKS - 1;
+    }
+    drums_hit(pad, recording && dk_is_playing());
+    atomic_fetch_or(&pads_hit, 1u << pad);
+}
+
+/* Runs in the touch task for every tap: a pad goes to the audio task at
+   once instead of waiting for this task to finish a redraw. */
+static bool on_tap(const cyd_touch_point_t *point, void *context)
+{
+    (void)context;
+    if (!pads_live || point->y < PAD_TOP) {
+        return false;
+    }
+    play_pad(point->x);
+    return true;
+}
+
+static void flash_hit_pads(void)
+{
+    unsigned hit = atomic_exchange(&pads_hit, 0);
+    TickType_t until = xTaskGetTickCount() + pdMS_TO_TICKS(FLASH_MS);
+    for (int pad = 0; pad < DRUM_TRACKS; ++pad) {
+        if (hit & (1u << pad)) {
+            flash_until[pad] = until;
+        }
+    }
+}
+
+/* The performance screen: fast multi-finger taps, pads played by on_tap. */
+static void enter_pads(QueueHandle_t touch_queue)
+{
+    full_redraw();
+    xQueueReset(touch_queue);
+    atomic_store(&pads_hit, 0);
+    pads_live = true;
+    cyd_touch_set_fast(true);
+}
+
+static void setup(void)
+{
+    pattern = dk_pattern();
+    saved_bpm = changed_bpm = pattern->bpm;
+    track_colors[DRUM_KICK] = cyd_rgb(255, 70, 40);
+    track_colors[DRUM_SNARE] = cyd_rgb(255, 200, 0);
+    track_colors[DRUM_CLAP] = cyd_rgb(255, 130, 0);
+    track_colors[DRUM_CLOSED_HAT] = cyd_rgb(0, 210, 255);
+    track_colors[DRUM_OPEN_HAT] = cyd_rgb(70, 130, 255);
+    track_colors[DRUM_TOM] = cyd_rgb(60, 220, 90);
+    track_colors[DRUM_RIM] = cyd_rgb(230, 90, 230);
+    track_colors[DRUM_EXTRA] = cyd_rgb(220, 220, 200);
+    playhead = NO_STEP;
+}
+
+/* Runs the drums screen until its KEYS button is tapped. */
+void drums_screen(QueueHandle_t touch_queue)
+{
+    static bool started;
+    if (!started) {
+        started = true;
+        setup();
+    }
+    /* The keys screen had the touch callbacks. */
+    cyd_touch_set_fingers_callback(NULL, NULL);
+    cyd_touch_set_tap_callback(on_tap, NULL);
+    enter_pads(touch_queue);
+    while (true) {
+        if (music_out_check_lost()) {
+            speaker_lost_notice = true;
+        }
+        save_tempo_when_settled();
+        cyd_touch_point_t point;
+        TickType_t wait = pdMS_TO_TICKS(REFRESH_MS);
+        /* Take every tap waiting before drawing, so pads answer first. */
+        while (xQueueReceive(touch_queue, &point, wait) == pdTRUE) {
+            wait = 0;
+            if (point.y >= PAD_TOP) {
+                play_pad(point.x); /* only if it came before pads_live */
+            } else if (point.y >= GRID_ROW * FH) {
+                tap_grid(point.x, point.y);
+            } else if (in_span(MENU_SPAN, point.x / FW)) {
+                run_menu(touch_queue);
+                enter_pads(touch_queue);
+                break;
+            } else if (in_span(SWITCH_SPAN, point.x / FW)) {
+                pads_live = false;
+                cyd_touch_set_tap_callback(NULL, NULL);
+                return;
+            } else {
+                tap_header(point.x / FW);
+            }
+        }
+        check_long_press();
+        flash_hit_pads();
+        update_playhead();
+        refresh();
+    }
+}

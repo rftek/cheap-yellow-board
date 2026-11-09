@@ -16,6 +16,7 @@ Applications for the ESP32 Cheap Yellow Display (CYD, ESP32-2432S028R), written 
 | [apps/datalogger](apps/datalogger) | Voltage logger on GPIO35 | esp32 |
 | [apps/drumloop](apps/drumloop) | Live drum pads with 808, 909, trap and DnB kits and a 1-16 bar step sequencer, played on an AirPlay speaker | esp32s3 |
 | [apps/keyboard](apps/keyboard) | Two-octave touch keyboard with 23 synthesized piano, organ and other styles, sustain and a loop recorder, played on an AirPlay speaker | esp32s3 |
+| [apps/drumkey](apps/drumkey) | Drum&Key: DrumLoop's pads and step sequencer and Keyboard's keys in one app, with a screen switch, one tempo and one AirPlay stream | esp32s3 |
 | [apps/f1_race](apps/f1_race) | F1 racing game | esp32, esp32s3 |
 | [apps/gear_roll](apps/gear_roll) | LVGL gear demo | esp32, esp32s3 |
 | [apps/screen_check](apps/screen_check) | Screen color test | esp32, esp32s3 |
