@@ -2,8 +2,8 @@
 
      row 0       transport: PLAY/STOP, REC, BPM - 120 +, MET, DRUM (to the
                  drums screen), MENU
-     row 1       sound: VOICE (piano, organ, ...), its STYLE, UNDO
-     row 2       OCT - / range / OCT +, SUS (sustain pedal)
+     row 1       sound: VOICE (piano, organ, ...), its STYLE, UNDO, SUS (sustain)
+     row 2       OCT -, a map of all 7 octaves (tap to jump), OCT +
      row 3       the loop: length, the bar and beat the speaker is on, notes
      strip       loop progress, as heard
      the rest    25 keys, C to C two octaves up, each with its note name
@@ -44,9 +44,26 @@ _Static_assert(CYD_LCD_WIDTH == 800 && CYD_TEXT_ROWS == 12,
 #define BLACK_WIDTH 34
 #define BLACK_HEIGHT (KEYS_HEIGHT * 3 / 5)
 
-#define LOWEST_BASE 36  /* C2 */
-#define HIGHEST_BASE 72 /* C5, so the top key is C7 */
+/* The keys show two octaves of seven, C1 to C8, as on an 88-key piano
+   (which starts three notes lower, at A0). */
+#define LOWEST_NOTE 24  /* C1 */
+#define HIGHEST_NOTE 108 /* C8 */
+#define LOWEST_BASE LOWEST_NOTE
+#define HIGHEST_BASE (HIGHEST_NOTE - 24) /* C6, so the top key is C8 */
 #define DEFAULT_BASE 48 /* C3 to C5 */
+
+/* The octave map in row 2: every white key of C1-C8 nine pixels wide. */
+#define MAP_WHITES 50 /* 7 octaves of 7, and the top C */
+#define MAP_KEY_WIDTH 9
+#define MAP_X 165
+#define MAP_Y (2 * FH + 3)
+#define MAP_HEIGHT (FH - 12)
+#define MAP_BLACK_WIDTH 5
+#define MAP_BLACK_HEIGHT (MAP_HEIGHT * 3 / 5)
+#define MAP_IN_VIEW 1 /* map key states */
+#define MAP_LIVE 2
+#define MAP_LOOP 4
+#define MAP_NOT_DRAWN 0xFF
 
 #define REFRESH_MS 10
 #define TEMPO_SAVE_MS 2000
@@ -69,14 +86,13 @@ static const span_t MET_SPAN = DK_SCREEN_SPAN;
 static const span_t SWITCH_SPAN = DK_SWITCH_SPAN;
 static const span_t MENU_SPAN = DK_MENU_SPAN;
 /* Row 1. */
-static const span_t VOICE_SPAN = {0, 7};
-static const span_t STYLE_SPAN = {8, 11};
-static const span_t UNDO_SPAN = {20, 6};
-/* Row 2. */
-static const span_t OCTAVE_DOWN_SPAN = {0, 6};
-static const span_t OCTAVE_SPAN = {7, 7};
-static const span_t OCTAVE_UP_SPAN = {15, 6};
-static const span_t SUS_SPAN = {22, 4};
+static const span_t VOICE_SPAN = {0, 6};
+static const span_t STYLE_SPAN = {7, 10};
+static const span_t UNDO_SPAN = {18, 4};
+static const span_t SUS_SPAN = {23, 3};
+/* Row 2, with the octave map between the buttons. */
+static const span_t OCTAVE_DOWN_SPAN = {0, 5};
+static const span_t OCTAVE_UP_SPAN = {21, 5};
 
 #define TOAST_MS 2500
 
@@ -118,6 +134,7 @@ static row_t drawn_rows[LOOP_ROW + 1];
 static char toast[COLUMNS + 1];
 static TickType_t toast_until;
 static uint8_t drawn_keys[KEYS];
+static uint8_t drawn_map[HIGHEST_NOTE + 1]; /* map key states, MAP_NOT_DRAWN to redraw */
 static int drawn_progress;
 static uint16_t drawn_progress_color;
 
@@ -336,6 +353,8 @@ static void refresh_sound(const looper_state_t *state)
              synth_style_count(voice_kind) > 1 ? CYD_COLOR_BUTTON : CYD_COLOR_BUTTON_DISABLED);
     put_span(&row, UNDO_SPAN, "UNDO", state->notes > 0 ? CYD_COLOR_WHITE : CYD_COLOR_GRAY,
              state->notes > 0 ? CYD_COLOR_BUTTON : CYD_COLOR_BUTTON_DISABLED);
+    put_span(&row, SUS_SPAN, "SUS", sustain ? CYD_COLOR_BLACK : CYD_COLOR_WHITE,
+             sustain ? CYD_COLOR_YELLOW : CYD_COLOR_BUTTON);
     draw_row(1, &row);
 
     clear_row(&row);
@@ -343,14 +362,11 @@ static void refresh_sound(const looper_state_t *state)
     bool can_up = base_note < HIGHEST_BASE;
     put_span(&row, OCTAVE_DOWN_SPAN, "OCT -", can_down ? CYD_COLOR_WHITE : CYD_COLOR_GRAY,
              can_down ? CYD_COLOR_BUTTON : CYD_COLOR_BUTTON_DISABLED);
-    char range[12];
-    int octave = base_note / 12 - 1;
-    snprintf(range, sizeof(range), "C%d-C%d", octave, octave + 2);
-    put_span(&row, OCTAVE_SPAN, range, CYD_COLOR_YELLOW, CYD_COLOR_BLACK);
     put_span(&row, OCTAVE_UP_SPAN, "OCT +", can_up ? CYD_COLOR_WHITE : CYD_COLOR_GRAY,
              can_up ? CYD_COLOR_BUTTON : CYD_COLOR_BUTTON_DISABLED);
-    put_span(&row, SUS_SPAN, "SUS", sustain ? CYD_COLOR_BLACK : CYD_COLOR_WHITE,
-             sustain ? CYD_COLOR_YELLOW : CYD_COLOR_BUTTON);
+    if (memcmp(&drawn_rows[2], &row, sizeof(row)) != 0) {
+        memset(drawn_map, MAP_NOT_DRAWN, sizeof(drawn_map)); /* the row wipes the map */
+    }
     draw_row(2, &row);
 }
 
@@ -528,6 +544,91 @@ static void refresh_keys(void)
     }
 }
 
+/* ---- The octave map -------------------------------------------------------- */
+
+static bool note_is_black(int note)
+{
+    int in_octave = note % 12;
+    return in_octave == 1 || in_octave == 3 || in_octave == 6 || in_octave == 8 || in_octave == 10;
+}
+
+/* The white key a note is on, or the one a black note sits after. */
+static int map_white(int note)
+{
+    static const int white_of[12] = {0, 0, 1, 1, 2, 3, 3, 4, 4, 5, 5, 6};
+    int from_c1 = note - LOWEST_NOTE;
+    return from_c1 / 12 * 7 + white_of[from_c1 % 12];
+}
+
+static uint8_t map_state(int note, unsigned live)
+{
+    uint8_t state = 0;
+    int key = note - base_note;
+    if (key >= 0 && key < KEYS) {
+        state |= MAP_IN_VIEW;
+        if (live & (1u << key)) {
+            state |= MAP_LIVE;
+        }
+    }
+    if (loop_sounding[note] > 0) {
+        state |= MAP_LOOP;
+    }
+    return state;
+}
+
+static uint16_t map_color(int note, uint8_t state)
+{
+    bool black = note_is_black(note);
+    if (state & MAP_LIVE) {
+        return voice_colors[voice_kind];
+    }
+    if (state & MAP_LOOP) {
+        return black ? loop_black : loop_white;
+    }
+    if (state & MAP_IN_VIEW) {
+        return black ? CYD_COLOR_BLACK : CYD_COLOR_WHITE;
+    }
+    return black ? cyd_rgb(40, 40, 40) : cyd_rgb(110, 110, 110);
+}
+
+/* All of C1-C8 in miniature: the two octaves on the keys bright, with a
+   yellow bar under them, the rest dim; loop notes in blue wherever they
+   are, so a part played an octave away still shows. */
+static void refresh_map(void)
+{
+    unsigned live = atomic_load(&live_keys);
+    bool changed = false;
+    for (int note = LOWEST_NOTE; note <= HIGHEST_NOTE; ++note) {
+        if (map_state(note, live) != drawn_map[note]) {
+            changed = true;
+            break;
+        }
+    }
+    if (!changed) {
+        return;
+    }
+    ESP_ERROR_CHECK(cyd_fill_rect(MAP_X - 2, MAP_Y - 2, MAP_WHITES * MAP_KEY_WIDTH + 3,
+                                  MAP_HEIGHT + 7, CYD_COLOR_BLACK));
+    for (int note = LOWEST_NOTE; note <= HIGHEST_NOTE; ++note) {
+        drawn_map[note] = map_state(note, live);
+        if (!note_is_black(note)) {
+            ESP_ERROR_CHECK(cyd_fill_rect(MAP_X + map_white(note) * MAP_KEY_WIDTH, MAP_Y,
+                                          MAP_KEY_WIDTH - 1, MAP_HEIGHT,
+                                          map_color(note, drawn_map[note])));
+        }
+    }
+    for (int note = LOWEST_NOTE; note <= HIGHEST_NOTE; ++note) {
+        if (note_is_black(note)) {
+            int line = MAP_X + (map_white(note) + 1) * MAP_KEY_WIDTH;
+            ESP_ERROR_CHECK(cyd_fill_rect(line - MAP_BLACK_WIDTH / 2 - 1, MAP_Y, MAP_BLACK_WIDTH,
+                                          MAP_BLACK_HEIGHT, map_color(note, drawn_map[note])));
+        }
+    }
+    int from = MAP_X + map_white(base_note) * MAP_KEY_WIDTH;
+    int to = MAP_X + (map_white(base_note + KEYS - 1) + 1) * MAP_KEY_WIDTH;
+    ESP_ERROR_CHECK(cyd_fill_rect(from, MAP_Y + MAP_HEIGHT + 2, to - from - 1, 3, CYD_COLOR_YELLOW));
+}
+
 static void take_heard_notes(const looper_state_t *state)
 {
     int note;
@@ -548,6 +649,7 @@ static void full_redraw(void)
 {
     memset(drawn_rows, 0, sizeof(drawn_rows));
     memset(drawn_keys, KEY_NOT_DRAWN, sizeof(drawn_keys));
+    memset(drawn_map, MAP_NOT_DRAWN, sizeof(drawn_map));
     drawn_progress = -1;
     ESP_ERROR_CHECK(cyd_fill_rect(0, 0, CYD_LCD_WIDTH, CYD_LCD_HEIGHT, CYD_COLOR_BLACK));
 }
@@ -827,22 +929,36 @@ static void tap_sound(int column, const looper_state_t *state)
         if (state->notes > 0) {
             keys_undo();
         }
-    }
-}
-
-static void tap_octave(int column)
-{
-    if (in_span(OCTAVE_DOWN_SPAN, column)) {
-        if (base_note > LOWEST_BASE) {
-            base_note -= 12;
-        }
-    } else if (in_span(OCTAVE_UP_SPAN, column)) {
-        if (base_note < HIGHEST_BASE) {
-            base_note += 12;
-        }
     } else if (in_span(SUS_SPAN, column)) {
         sustain = !sustain;
         keys_sustain(sustain);
+    }
+}
+
+static void set_base(int base)
+{
+    base = base < LOWEST_BASE ? LOWEST_BASE : base > HIGHEST_BASE ? HIGHEST_BASE : base;
+    if (base == base_note) {
+        return;
+    }
+    base_note = base;
+    int octave = base / 12 - 1;
+    snprintf(toast, sizeof(toast), " KEYS C%d TO C%d", octave, octave + 2);
+    toast_until = xTaskGetTickCount() + pdMS_TO_TICKS(TOAST_MS);
+}
+
+/* Row 2: OCT - and OCT + move the keys an octave; a tap on the map puts
+   the octave tapped at the left of the keys. */
+static void tap_octave(int x)
+{
+    int column = x / FW;
+    if (in_span(OCTAVE_DOWN_SPAN, column)) {
+        set_base(base_note - 12);
+    } else if (in_span(OCTAVE_UP_SPAN, column)) {
+        set_base(base_note + 12);
+    } else if (x >= MAP_X && x < MAP_X + MAP_WHITES * MAP_KEY_WIDTH) {
+        int octave = (x - MAP_X) / MAP_KEY_WIDTH / 7;
+        set_base(LOWEST_NOTE + 12 * octave);
     }
 }
 
@@ -925,7 +1041,7 @@ void keys_screen(QueueHandle_t touch_queue)
             } else if (row == 1) {
                 tap_sound(column, &state);
             } else if (row == 2) {
-                tap_octave(column);
+                tap_octave(point.x);
             }
         }
         /* An octave or voice change recolors or renumbers every key. */
@@ -939,6 +1055,7 @@ void keys_screen(QueueHandle_t touch_queue)
         refresh_transport(&state);
         refresh_sound(&state);
         refresh_loop(&state);
+        refresh_map();
         refresh_keys();
         if (wait == 0) {
             vTaskDelay(1); /* taps came in: still let the idle task run */

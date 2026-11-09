@@ -1,6 +1,6 @@
 # Drum&Key
 
-[DrumLoop](../drumloop) and [Keyboard](../keyboard) in one app for the Waveshare ESP32-S3-Touch-LCD-7. The drum pads and step sequencer are on one screen and the two-octave keyboard and its loop recorder on the other, with a button in the header to switch between them. Both play at the same time on one AirPlay speaker, and their loops share one transport and one tempo, so a keyboard part lines up with the beat.
+[DrumLoop](../drumloop) and [Keyboard](../keyboard) in one app for the Waveshare ESP32-S3-Touch-LCD-7. The drum pads and step sequencer are on one screen and the keyboard (two octaves at a time, across C1 to C8) and its loop recorder on the other, with a button in the header to switch between them. Both play at the same time on one AirPlay speaker, and their loops share one transport and one tempo, so a keyboard part lines up with the beat.
 
 This app lives in `apps/drumkey`. The [root README](../../README.md) lists every app in this repository. It targets the S3 board only (`supported-targets.txt`).
 
@@ -23,7 +23,7 @@ Both screens have the same header:
 | **KEYS / DRUM** | Switches to the other screen at once. Sounds keep playing; keys held when you leave are lifted. |
 | **MENU** | That screen's settings, as in its own app: kits, styles, export and the drum loop length on the drums side; voices, quantize and the keyboard loop length on the keys side. Wi-Fi, the speaker, volume and the AirPlay delay are shared, so they can be set from either. |
 
-Everything else works as in [DrumLoop](../drumloop/README.md) and [Keyboard](../keyboard/README.md): eight pads and a 16-step grid (hold a step to double it), 25 keys with a sustain pedal, seven voices in 23 styles, kits from an SD card, and EXPORT (which renders the drums only).
+Everything else works as in [DrumLoop](../drumloop/README.md) and [Keyboard](../keyboard/README.md): eight pads and a 16-step grid (hold a step to double it), 25 keys that move across seven octaves (OCT - / OCT + and a tappable octave map), a sustain pedal, seven voices in 23 styles, kits from an SD card, and EXPORT (which renders the drums only).
 
 The drum loop runs 1 to 16 bars and the keyboard loop 1 to 8. Both start together at bar 1, so with power-of-two lengths they stay in step.
 
@@ -70,4 +70,4 @@ The image goes in a launcher slot, like the other apps.
 
 ### 1.0 (2026-11-08)
 
-- First version: DrumLoop's drums and Keyboard's keys in one app with a screen switch, one shared transport and tempo, and both mixed into one AirPlay stream.
+- First version: DrumLoop's drums and Keyboard's keys in one app with a screen switch, one shared transport and tempo, and both mixed into one AirPlay stream. The keys move across seven octaves, C1 to C8, as in Keyboard.
