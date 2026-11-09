@@ -43,7 +43,7 @@ The grid's playhead and its bar page follow what the speaker is playing. That is
 
 All sounds are synthesized at boot from oscillators, noise and filters, the way analog drum machines make them, so there is no sample data: about 1.5 MB of 44.1 kHz audio in PSRAM for the four kits.
 
-Every kit has the same eight roles, so a beat plays on any kit. Pick the kit with **KIT** in MENU. It changes the sound at once, even while the loop plays; a hit already ringing finishes on its old kit. The kit is part of the pattern, and the TRAP and DNB starter beats bring their own.
+Every kit has the same eight roles, so a beat plays on any kit. Pick the kit with **KIT** in MENU. It changes the sound at once, even while the loop plays; a hit already ringing finishes on its old kit. The kit is part of the pattern, and the TRAP and DNB starter beats bring their own when they fill an empty loop.
 
 | Pad | 808 (classic) | 909 (punchy) | TRAP (long 808 bass) | DNB (tight breaks) |
 |---|---|---|---|---|
@@ -62,7 +62,7 @@ Every kit has the same eight roles, so a beat plays on any kit. Pick the kit wit
 - **VOL - / VOL +**: speaker volume in steps of 10%. It shows SILENT with no speaker.
 - **BPM -10 / BPM +10**.
 - **LOOP LENGTH**: 1, 2, 4, 8 or 16 bars. Each step up doubles the loop by copying the bars it has, so you can vary the copies. After 16 it goes back to 1 bar. The other bars are kept until the loop grows again.
-- **TRAP 140** (half time) and **DNB 174** (two-step): one-bar starter beats on their own kit. They replace the pattern.
+- **TRAP 140** (half time) and **DNB 174** (two-step) set the tempo. The loop's steps, length and kit stay. An empty loop gets the style's starter beat, on its own kit, in every bar.
 - **CLEAR** (left; tap twice) and **EXPORT** (right; saves the loop to the SD card, see below) share a row.
 - **KIT**: the next kit: 808, 909, TRAP, DNB, then the kits on the SD card. Past the last kit it looks for a card again, so a card put in after boot is found.
 - **AIRPLAY DELAY**: 2000, 1000, 500, 250, 150 or 100 ms, saved in NVS (namespace `drumloop`) and used from the next connect. 2000 ms is the AirPlay 1 norm and works on every speaker. Shorter delays make the pads feel more immediate, but some speakers play nothing at all below their own minimum, and don't say so: a Denon Home 250 is silent at 250 ms and plays at 500 ms. If a speaker is silent, raise the delay and pick it again. A speaker that states its minimum as it connects gets that instead; the status line shows the delay in use.

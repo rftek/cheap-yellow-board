@@ -144,20 +144,37 @@ static void save_latency_ms(uint32_t latency)
 
 /* ---- Starter beats ------------------------------------------------------ */
 
-static void load_beat(uint16_t bpm, int kit, const uint16_t steps[DRUM_TRACKS])
+static bool loop_is_empty(void)
 {
-    pattern->kit = (uint8_t)kit;
-    memset(pattern->steps, 0, sizeof(pattern->steps));
-    memcpy(pattern->steps[0], steps, sizeof(pattern->steps[0]));
-    pattern->bars = 1;
+    for (int bar = 0; bar < pattern->bars; ++bar) {
+        for (int track = 0; track < DRUM_TRACKS; ++track) {
+            if (pattern->steps[bar][track] != 0) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/* Sets the style's tempo. The loop's programming, length and kit stay; only
+   an empty loop gets the starter beat (on the style's kit) in every bar.
+   Returns whether the beat was loaded. */
+static bool load_beat(uint16_t bpm, int kit, const uint16_t steps[DRUM_TRACKS])
+{
     pattern->bpm = bpm;
-    pattern->muted = 0;
-    view_bar = 0;
+    if (!loop_is_empty()) {
+        return false;
+    }
+    pattern->kit = (uint8_t)kit;
+    for (int bar = 0; bar < pattern->bars; ++bar) {
+        memcpy(pattern->steps[bar], steps, sizeof(pattern->steps[bar]));
+    }
+    return true;
 }
 
 /* Half-time trap at 140: kick and 808 on 1 and around, snare and clap on
    3, eighth-note hats with a sixteenth roll into an open hat. */
-static void load_trap(void)
+static bool load_trap(void)
 {
     static const uint16_t steps[DRUM_TRACKS] = {
         [DRUM_KICK] = 0x0481,       /* 0, 7, 10 */
@@ -166,12 +183,12 @@ static void load_trap(void)
         [DRUM_CLOSED_HAT] = 0xB555, /* eighths, 13 and 15, not 14 */
         [DRUM_OPEN_HAT] = 0x4000,   /* 14 */
     };
-    load_beat(140, KIT_TRAP, steps);
+    return load_beat(140, KIT_TRAP, steps);
 }
 
 /* Two-step drum and bass at 174: kick on 1 and the "and" of 3, snare on 2
    and 4, eighth-note hats and ghost rim shots. */
-static void load_dnb(void)
+static bool load_dnb(void)
 {
     static const uint16_t steps[DRUM_TRACKS] = {
         [DRUM_KICK] = 0x0401,       /* 0, 10 */
@@ -179,7 +196,7 @@ static void load_dnb(void)
         [DRUM_CLOSED_HAT] = 0x5555, /* eighths */
         [DRUM_RIM] = 0x8080,        /* 7, 15 */
     };
-    load_beat(174, KIT_DNB, steps);
+    return load_beat(174, KIT_DNB, steps);
 }
 
 /* ---- Drawing ------------------------------------------------------------ */
@@ -524,7 +541,7 @@ static void draw_menu(uint32_t latency)
     draw_volume_row();
     draw_tempo_row();
     draw_length_row();
-    draw_split_row(MENU_BEATS, "TRAP 140", "LOAD BEAT", "DNB 174");
+    draw_split_row(MENU_BEATS, "TRAP 140", "STYLE", "DNB 174");
     draw_clear_row(false);
     draw_kit_row();
     draw_latency_row(latency);
@@ -689,11 +706,9 @@ static void run_menu(QueueHandle_t touch_queue)
             break;
         case MENU_BEATS:
             if (left) {
-                load_trap();
-                menu_status(" Loaded the trap beat");
+                menu_status(load_trap() ? " Loaded the trap beat" : " 140 BPM; your loop is kept");
             } else if (right) {
-                load_dnb();
-                menu_status(" Loaded the DnB beat");
+                menu_status(load_dnb() ? " Loaded the DnB beat" : " 174 BPM; your loop is kept");
             } else {
                 break;
             }
