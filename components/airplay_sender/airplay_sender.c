@@ -589,6 +589,25 @@ static esp_err_t send_volume(struct airplay_sender *s, int volume)
                         NULL);
 }
 
+/* Raises the latency to frames when that is longer. Before playing. */
+static void raise_latency(struct airplay_sender *s, uint32_t frames)
+{
+    if (frames > s->latency_frames && frames <= 10 * AIRPLAY_SAMPLE_RATE) {
+        s->latency_frames = frames;
+        s->config.latency_ms =
+            (uint32_t)(((uint64_t)frames * 1000 + AIRPLAY_SAMPLE_RATE - 1) / AIRPLAY_SAMPLE_RATE);
+    }
+}
+
+/* Speakers known to play nothing below a latency, and don't say so. */
+static const struct {
+    const char *model_prefix;
+    uint32_t min_ms;
+} min_latencies[] = {
+    /* Denon Home 250: silent at 250 ms, plays at 500 ms. */
+    {"Denon", 500},
+};
+
 static esp_err_t open_session(struct airplay_sender *s, const airplay_device_t *device)
 {
     s->remote.sin_family = AF_INET;
@@ -708,19 +727,14 @@ static esp_err_t open_session(struct airplay_sender *s, const airplay_device_t *
     }
     result = rtsp_request(s, "RECORD", s->url, record, NULL, NULL, 0, response);
     if (result == ESP_OK) {
-        /* The speaker may say how far ahead it needs audio. Some (Denon
-           HEOS, for one) play nothing at all when given less, so a shorter
+        /* The speaker may say how far ahead it needs audio; a shorter
            config.latency_ms is raised to it. */
         char value[16];
         if (header_value(response, "Audio-Latency", value, sizeof(value))) {
             uint32_t frames = strtoul(value, NULL, 10);
             ESP_LOGI(TAG, "The speaker asks for %lu frames (%lu ms) of latency",
                      (unsigned long)frames, (unsigned long)((uint64_t)frames * 1000 / AIRPLAY_SAMPLE_RATE));
-            if (frames > s->latency_frames && frames <= 10 * AIRPLAY_SAMPLE_RATE) {
-                s->latency_frames = frames;
-                s->config.latency_ms =
-                    (uint32_t)(((uint64_t)frames * 1000 + AIRPLAY_SAMPLE_RATE - 1) / AIRPLAY_SAMPLE_RATE);
-            }
+            raise_latency(s, frames);
         }
     }
     free(response);
@@ -751,6 +765,12 @@ esp_err_t airplay_sender_connect(const airplay_device_t *device,
     s->rtsp = s->audio_socket = s->control_socket = s->timing_socket = -1;
     s->config = *config;
     s->latency_frames = (uint32_t)((uint64_t)config->latency_ms * AIRPLAY_SAMPLE_RATE / 1000);
+    for (size_t i = 0; i < sizeof(min_latencies) / sizeof(min_latencies[0]); ++i) {
+        if (strncmp(device->model, min_latencies[i].model_prefix,
+                    strlen(min_latencies[i].model_prefix)) == 0) {
+            raise_latency(s, min_latencies[i].min_ms * AIRPLAY_SAMPLE_RATE / 1000);
+        }
+    }
     s->volume = config->volume < 0 ? 0 : config->volume > 100 ? 100 : config->volume;
     s->seq = (uint16_t)esp_random();
     s->next_ts = esp_random();
