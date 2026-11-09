@@ -6,7 +6,7 @@
 #define PI 3.14159265f
 #define SINE_SIZE 1024
 #define CHUNK 64              /* frames mixed at a time in float */
-#define PLUCK_MAX 1100        /* delay line frames: down to 40 Hz */
+#define PLUCK_MAX 1400        /* delay line frames: down to 31.5 Hz, below C1 */
 #define MAX_MODES 16          /* resonators in a modal (piano) voice */
 #define DETUNED_PARTIALS 4    /* partials that get a second string */
 #define MODE_LIMIT_HZ 7000.0f /* partials above this are left out */
