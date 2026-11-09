@@ -52,3 +52,11 @@ pio run -e esp32
 ## Storage and CPU
 
 The binary also runs as a launcher boot image, so it must fit in a **1.31 MB** OTA slot (1,376,256 bytes). Bluepad32 on BTstack is comparable in size to the Bluedroid dual-mode app on `apps/bluetooth_diag` (~850 KB), so it is expected to fit, though with less headroom. The authoritative size is the `firmware.bin` produced by the CI build. BTstack is event-driven: steady-state CPU use while a controller streams input (~100 Hz) is low, dominated by the Bluetooth controller and the periodic screen redraw.
+
+## Changelog
+
+The version is in [`version.txt`](version.txt) and in the image's app description, where the launcher reads it. Every change to this app bumps it and adds an entry here, newest first; the [root README](../../README.md#versions) explains when to bump MAJOR or MINOR.
+
+### 1.0 (2026-11-08)
+
+- First numbered version. Pairs an Xbox wireless controller over Bluetooth with Bluepad32 and lights up each button, D-pad direction, stick and trigger as you press it. It remembers the controller, and **Forget & re-pair** clears it.

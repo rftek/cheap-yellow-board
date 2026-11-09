@@ -8,7 +8,12 @@
 # The launcher itself is never built here: it embeds Wi-Fi credentials.
 #
 # Asset names: the esp32 image is firmware.bin, other targets
-# firmware-<target>.bin.
+# firmware-<target>.bin. Each asset's label carries the app's MAJOR.MINOR
+# version ("firmware.bin v1.2"), read from the image and checked against the
+# app's version.txt; tools/make_catalog.py copies it into the catalog.
+#
+# The versions job checks every app's version.txt and changelog, and on pull
+# requests that each changed app's version was bumped (tools/check_versions.py).
 #
 # It runs for every change, so that ci-result, the check main's branch
 # protection requires, always reports; tools/ci_plan.py builds nothing for
@@ -45,6 +50,17 @@ jobs:
           matrix=$(python3 tools/ci_plan.py "$BASE")
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
           echo "Building: $matrix"
+
+  versions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - env:
+          # Only pull requests check for bumps; main already passed them.
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: python3 tools/check_versions.py "$BASE"
 
   build:
     needs: plan
@@ -97,6 +113,17 @@ jobs:
           # build_dir in platformio.ini is under USERPROFILE, which Linux lacks.
           USERPROFILE: ${{ runner.temp }}
 
+      - name: Check the image's version
+        run: |
+          version=$(python3 tools/image_version.py "build/$TARGET/firmware.bin")
+          expected=$(tr -d '[:space:]' < "apps/$APP/version.txt")
+          echo "apps/$APP $TARGET image version: $version"
+          if [ "$version" != "$expected" ]; then
+            echo "::error::The image says $version but apps/$APP/version.txt says $expected"
+            exit 1
+          fi
+          echo "APP_VERSION=$version" >> "$GITHUB_ENV"
+
       - name: Publish the image
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         env:
@@ -117,7 +144,9 @@ jobs:
             gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" \
               -f sha="$GITHUB_SHA" -F force=true >/dev/null
           fi
-          gh release upload "$TAG" "$asset" --clobber
+          # The label shows on the release page and carries the version to
+          # the catalog.
+          gh release upload "$TAG" "$asset#$asset v$APP_VERSION" --clobber
 
   catalog:
     needs: build
@@ -140,17 +169,19 @@ jobs:
           fi
           gh release upload catalog manifest.json --clobber
 
-  # The one check main's branch protection requires: it passes when every
-  # build passed or none was needed.
+  # The one check main's branch protection requires: it passes when the
+  # versions check and every build passed, or no build was needed.
   ci-result:
-    needs: [plan, build]
+    needs: [plan, versions, build]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Check the builds
         env:
           PLAN: ${{ needs.plan.result }}
+          VERSIONS: ${{ needs.versions.result }}
           BUILD: ${{ needs.build.result }}
         run: |
-          echo "plan: $PLAN, build: $BUILD"
-          [ "$PLAN" = success ] && { [ "$BUILD" = success ] || [ "$BUILD" = skipped ]; }
+          echo "plan: $PLAN, versions: $VERSIONS, build: $BUILD"
+          [ "$PLAN" = success ] && [ "$VERSIONS" = success ] &&
+            { [ "$BUILD" = success ] || [ "$BUILD" = skipped ]; }
