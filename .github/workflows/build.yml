@@ -37,6 +37,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # Sources an app makes from other apps' code (apps/<app>/tools/make_*.py,
+      # such as Drum&Key's screens) must be made from the current code.
+      - name: Check generated sources
+        run: |
+          for script in apps/*/tools/make_*.py; do
+            [ -e "$script" ] || continue
+            python3 "$script" --check
+          done
       - id: plan
         env:
           # Empty for workflow_dispatch, which rebuilds every app.

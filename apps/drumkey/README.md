@@ -40,8 +40,8 @@ The drum loop runs 1 to 16 bars and the keyboard loop 1 to 8. Both start togethe
 |---|---|
 | `main/main.c` | Startup, and the UI task that alternates the two screens |
 | `main/dk_audio.c` | The audio task's render: shared transport and tempo, the drum engine and the looper, mixed |
-| `main/drums_ui.c` | The drums screen, adapted from DrumLoop's `ui.c` |
-| `main/keys_ui.c` | The keys screen, adapted from Keyboard's `ui.c` |
+| `main/drums_ui.c` | The drums screen, made from DrumLoop's `ui.c` by `tools/make_screens.py` |
+| `main/keys_ui.c` | The keys screen, made from Keyboard's `ui.c` by `tools/make_screens.py` |
 | `main/dk_ui.c` | The header layout and the gaps between its buttons |
 
 The engines are compiled from the other apps' folders, so a fix there reaches Drum&Key too:
@@ -49,6 +49,14 @@ The engines are compiled from the other apps' folders, so a fix there reaches Dr
 - `apps/keyboard/main`: `synth.c` and `looper.c`
 
 `uses-apps.txt` names those two apps, so CI rebuilds Drum&Key when either changes.
+
+The two screens are made from the apps' `ui.c` by `tools/make_screens.py`. It applies Drum&Key's changes: the shared header with the KEYS / DRUM button, the shared transport and tempo, and a screen that returns when the switch is tapped. After a change to `apps/drumloop/main/ui.c` or `apps/keyboard/main/ui.c`, run it from the repository root and commit the result:
+
+```bash
+python apps/drumkey/tools/make_screens.py
+```
+
+CI runs it with `--check` and fails when the screens are stale. If one of its changes no longer finds its text in the new `ui.c`, the script names that change; update it to suit.
 
 ## Limits
 
