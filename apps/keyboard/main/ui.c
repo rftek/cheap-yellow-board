@@ -1,10 +1,11 @@
 /* Keyboard screen, 800x480:
 
      row 0       transport: PLAY/STOP, REC, BPM - 120 +, MET, MENU
-     row 1       sound: VOICE, octave < C3 >, UNDO, SUS (sustain pedal)
-     row 2       the loop: length, the bar and beat the speaker is on, notes
+     row 1       sound: VOICE (piano, organ, ...), its STYLE, UNDO
+     row 2       OCT - / range / OCT +, SUS (sustain pedal)
+     row 3       the loop: length, the bar and beat the speaker is on, notes
      strip       loop progress, as heard
-     the rest    25 keys, C to C two octaves up
+     the rest    25 keys, C to C two octaves up, each with its note name
 
    Keys are played from the touch task (on_fingers), which sends each note
    to the audio task at once; this task only draws. A key lights in the
@@ -34,7 +35,8 @@ _Static_assert(CYD_LCD_WIDTH == 800 && CYD_TEXT_ROWS == 12,
 
 #define KEYS 25 /* two octaves, C to C */
 #define WHITE_KEYS 15
-#define PROGRESS_TOP (3 * FH)
+#define LOOP_ROW 3
+#define PROGRESS_TOP (4 * FH)
 #define PROGRESS_HEIGHT 6
 #define KEYS_TOP (PROGRESS_TOP + PROGRESS_HEIGHT + 4)
 #define KEYS_HEIGHT (CYD_LCD_HEIGHT - KEYS_TOP)
@@ -70,12 +72,16 @@ static const span_t BPM_UP_SPAN = {14, 2};
 static const span_t MET_SPAN = {17, 4};
 static const span_t MENU_SPAN = {22, 4};
 /* Row 1. */
-static const span_t VOICE_SPAN = {0, 8};
-static const span_t OCTAVE_DOWN_SPAN = {9, 2};
-static const span_t OCTAVE_SPAN = {11, 3};
-static const span_t OCTAVE_UP_SPAN = {14, 2};
-static const span_t UNDO_SPAN = {17, 4};
+static const span_t VOICE_SPAN = {0, 7};
+static const span_t STYLE_SPAN = {8, 11};
+static const span_t UNDO_SPAN = {20, 6};
+/* Row 2. */
+static const span_t OCTAVE_DOWN_SPAN = {0, 6};
+static const span_t OCTAVE_SPAN = {7, 7};
+static const span_t OCTAVE_UP_SPAN = {15, 6};
 static const span_t SUS_SPAN = {22, 4};
+
+#define TOAST_MS 2500
 
 typedef struct {
     int x;
@@ -84,13 +90,15 @@ typedef struct {
 } piano_key_t;
 
 static piano_key_t keys[KEYS];
-static uint16_t voice_colors[INSTRUMENTS];
+static uint16_t voice_colors[VOICE_KINDS];
 static uint16_t loop_white;
 static uint16_t loop_black;
 
 /* Read by the touch task. */
 static volatile int base_note = DEFAULT_BASE;
-static volatile int instrument = INSTRUMENT_EPIANO;
+static volatile int instrument; /* synth_instrument(voice_kind, its style) */
+static int voice_kind = VOICE_PIANO;
+static int styles[VOICE_KINDS]; /* the style picked for each voice */
 static volatile bool keys_live;
 static atomic_uint live_keys; /* bit per key under a finger */
 
@@ -108,7 +116,10 @@ typedef struct {
     uint16_t bg[COLUMNS];
 } row_t;
 
-static row_t drawn_rows[3];
+static row_t drawn_rows[LOOP_ROW + 1];
+/* A line about the style just picked, shown for a moment on the loop row. */
+static char toast[COLUMNS + 1];
+static TickType_t toast_until;
 static uint8_t drawn_keys[KEYS];
 static int drawn_progress;
 static uint16_t drawn_progress_color;
@@ -319,22 +330,27 @@ static void refresh_sound(const looper_state_t *state)
 {
     row_t row;
     clear_row(&row);
-    int voice = instrument;
-    put_span(&row, VOICE_SPAN, synth_instrument_name(voice), CYD_COLOR_BLACK, voice_colors[voice]);
-    bool can_down = base_note > LOWEST_BASE;
-    bool can_up = base_note < HIGHEST_BASE;
-    put_span(&row, OCTAVE_DOWN_SPAN, "<", CYD_COLOR_WHITE,
-             can_down ? CYD_COLOR_BUTTON : CYD_COLOR_BUTTON_DISABLED);
-    char octave[8];
-    snprintf(octave, sizeof(octave), "C%d", base_note / 12 - 1);
-    put_span(&row, OCTAVE_SPAN, octave, CYD_COLOR_YELLOW, CYD_COLOR_BLACK);
-    put_span(&row, OCTAVE_UP_SPAN, ">", CYD_COLOR_WHITE,
-             can_up ? CYD_COLOR_BUTTON : CYD_COLOR_BUTTON_DISABLED);
+    put_span(&row, VOICE_SPAN, synth_voice_name(voice_kind), CYD_COLOR_BLACK, voice_colors[voice_kind]);
+    put_span(&row, STYLE_SPAN, synth_style_name(instrument), CYD_COLOR_WHITE,
+             synth_style_count(voice_kind) > 1 ? CYD_COLOR_BUTTON : CYD_COLOR_BUTTON_DISABLED);
     put_span(&row, UNDO_SPAN, "UNDO", state->notes > 0 ? CYD_COLOR_WHITE : CYD_COLOR_GRAY,
              state->notes > 0 ? CYD_COLOR_BUTTON : CYD_COLOR_BUTTON_DISABLED);
+    draw_row(1, &row);
+
+    clear_row(&row);
+    bool can_down = base_note > LOWEST_BASE;
+    bool can_up = base_note < HIGHEST_BASE;
+    put_span(&row, OCTAVE_DOWN_SPAN, "OCT -", can_down ? CYD_COLOR_WHITE : CYD_COLOR_GRAY,
+             can_down ? CYD_COLOR_BUTTON : CYD_COLOR_BUTTON_DISABLED);
+    char range[12];
+    int octave = base_note / 12 - 1;
+    snprintf(range, sizeof(range), "C%d-C%d", octave, octave + 2);
+    put_span(&row, OCTAVE_SPAN, range, CYD_COLOR_YELLOW, CYD_COLOR_BLACK);
+    put_span(&row, OCTAVE_UP_SPAN, "OCT +", can_up ? CYD_COLOR_WHITE : CYD_COLOR_GRAY,
+             can_up ? CYD_COLOR_BUTTON : CYD_COLOR_BUTTON_DISABLED);
     put_span(&row, SUS_SPAN, "SUS", sustain ? CYD_COLOR_BLACK : CYD_COLOR_WHITE,
              sustain ? CYD_COLOR_YELLOW : CYD_COLOR_BUTTON);
-    draw_row(1, &row);
+    draw_row(2, &row);
 }
 
 /* Where the speaker is in the loop, in ticks: from the render position
@@ -390,11 +406,15 @@ static void refresh_loop(const looper_state_t *state)
             progress = (int)((int64_t)heard * CYD_LCD_WIDTH / length);
         }
     }
+    bool toasting = (int32_t)(toast_until - xTaskGetTickCount()) > 0;
+    if (toasting) {
+        snprintf(line, sizeof(line), "%s", toast);
+    }
     memcpy(row.text, line, strlen(line));
     for (int column = 0; column < COLUMNS; ++column) {
-        row.fg[column] = state->recording ? CYD_COLOR_RED : CYD_COLOR_YELLOW;
+        row.fg[column] = toasting ? CYD_COLOR_CYAN : state->recording ? CYD_COLOR_RED : CYD_COLOR_YELLOW;
     }
-    draw_row(2, &row);
+    draw_row(LOOP_ROW, &row);
 
     if (progress != drawn_progress || color != drawn_progress_color) {
         ESP_ERROR_CHECK(cyd_fill_rect(0, PROGRESS_TOP, CYD_LCD_WIDTH, PROGRESS_HEIGHT,
@@ -418,7 +438,7 @@ static uint16_t key_color(int key, uint8_t state)
         state = 0; /* a neighbor not drawn yet: it is, right after */
     }
     if (state & KEY_LIVE) {
-        return voice_colors[instrument];
+        return voice_colors[voice_kind];
     }
     if (state & KEY_LOOP) {
         return keys[key].black ? loop_black : loop_white;
@@ -426,10 +446,48 @@ static uint16_t key_color(int key, uint8_t state)
     return keys[key].black ? COLOR_BLACK_KEY : COLOR_WHITE_KEY;
 }
 
+static const char *const note_names[12] = {"C", "C#", "D", "D#", "E", "F",
+                                           "F#", "G", "G#", "A", "A#", "B"};
+
+/* The key's note name: with its octave on a white key ("C4"), without on
+   a black one ("C#"), which is too narrow for three letters. */
+static void key_label(int key, char *label, size_t size)
+{
+    int note = base_note + key;
+    if (keys[key].black) {
+        snprintf(label, size, "%s", note_names[note % 12]);
+    } else {
+        snprintf(label, size, "%s%d", note_names[note % 12], note / 12 - 1);
+    }
+}
+
+static uint16_t label_color(int key, uint8_t state)
+{
+    if (state != KEY_NOT_DRAWN && (state & (KEY_LIVE | KEY_LOOP))) {
+        return CYD_COLOR_BLACK;
+    }
+    if (base_note + key == 60) {
+        return CYD_COLOR_RED; /* middle C, to find your place */
+    }
+    return keys[key].black ? cyd_rgb(170, 170, 170) : cyd_rgb(90, 90, 90);
+}
+
+static void draw_label(int key, int bottom)
+{
+    char label[4];
+    key_label(key, label, sizeof(label));
+    int width = (int)strlen(label) * CYD_SMALL_FONT_WIDTH;
+    uint8_t state = drawn_keys[key];
+    ESP_ERROR_CHECK(cyd_draw_small_text(keys[key].x + (keys[key].width - width) / 2,
+                                        bottom - CYD_SMALL_FONT_HEIGHT - 8, label,
+                                        label_color(key, state), key_color(key, state)));
+}
+
 static void draw_black(int key)
 {
     ESP_ERROR_CHECK(cyd_fill_rect(keys[key].x, KEYS_TOP, keys[key].width, BLACK_HEIGHT,
                                   key_color(key, drawn_keys[key])));
+    draw_label(key, KEYS_TOP + BLACK_HEIGHT);
 }
 
 /* A white key, then the black keys beside it, which overlap it. */
@@ -438,13 +496,7 @@ static void draw_white(int key)
     const piano_key_t *k = &keys[key];
     ESP_ERROR_CHECK(cyd_fill_rect(k->x + 1, KEYS_TOP, k->width - 2, KEYS_HEIGHT,
                                   key_color(key, drawn_keys[key])));
-    /* A dot on each C, larger on middle C, to find your place. */
-    if ((base_note + key) % 12 == 0) {
-        int size = base_note + key == 60 ? 14 : 8;
-        ESP_ERROR_CHECK(cyd_fill_rect(k->x + k->width / 2 - size / 2,
-                                      CYD_LCD_HEIGHT - 20 - size / 2, size, size,
-                                      base_note + key == 60 ? CYD_COLOR_RED : CYD_COLOR_GRAY));
-    }
+    draw_label(key, CYD_LCD_HEIGHT);
     for (int neighbor = key - 1; neighbor <= key + 1; neighbor += 2) {
         if (neighbor >= 0 && neighbor < KEYS && keys[neighbor].black) {
             draw_black(neighbor);
@@ -757,21 +809,40 @@ static void tap_transport(int column, const looper_state_t *state)
     }
 }
 
+static void show_style(void)
+{
+    snprintf(toast, sizeof(toast), " %s: %s", synth_style_name(instrument),
+             synth_style_about(instrument));
+    toast_until = xTaskGetTickCount() + pdMS_TO_TICKS(TOAST_MS);
+}
+
 static void tap_sound(int column, const looper_state_t *state)
 {
     if (in_span(VOICE_SPAN, column)) {
-        instrument = (instrument + 1) % INSTRUMENTS;
-    } else if (in_span(OCTAVE_DOWN_SPAN, column)) {
+        voice_kind = (voice_kind + 1) % VOICE_KINDS;
+        instrument = synth_instrument(voice_kind, styles[voice_kind]);
+        show_style();
+    } else if (in_span(STYLE_SPAN, column)) {
+        int count = synth_style_count(voice_kind);
+        styles[voice_kind] = count > 0 ? (styles[voice_kind] + 1) % count : 0;
+        instrument = synth_instrument(voice_kind, styles[voice_kind]);
+        show_style();
+    } else if (in_span(UNDO_SPAN, column)) {
+        if (state->notes > 0) {
+            audio_undo();
+        }
+    }
+}
+
+static void tap_octave(int column)
+{
+    if (in_span(OCTAVE_DOWN_SPAN, column)) {
         if (base_note > LOWEST_BASE) {
             base_note -= 12;
         }
     } else if (in_span(OCTAVE_UP_SPAN, column)) {
         if (base_note < HIGHEST_BASE) {
             base_note += 12;
-        }
-    } else if (in_span(UNDO_SPAN, column)) {
-        if (state->notes > 0) {
-            audio_undo();
         }
     } else if (in_span(SUS_SPAN, column)) {
         sustain = !sustain;
@@ -798,13 +869,14 @@ static void leave_keys(void)
 
 void ui_run(QueueHandle_t touch_queue)
 {
-    voice_colors[INSTRUMENT_EPIANO] = cyd_rgb(255, 150, 30);
-    voice_colors[INSTRUMENT_ORGAN] = cyd_rgb(240, 70, 60);
-    voice_colors[INSTRUMENT_STRINGS] = cyd_rgb(70, 210, 100);
-    voice_colors[INSTRUMENT_SYNTH] = cyd_rgb(220, 90, 230);
-    voice_colors[INSTRUMENT_PLUCK] = cyd_rgb(240, 210, 40);
-    voice_colors[INSTRUMENT_BELL] = cyd_rgb(40, 210, 230);
-    voice_colors[INSTRUMENT_CHIP] = cyd_rgb(110, 140, 255);
+    voice_colors[VOICE_PIANO] = cyd_rgb(255, 150, 30);
+    voice_colors[VOICE_ORGAN] = cyd_rgb(240, 70, 60);
+    voice_colors[VOICE_STRINGS] = cyd_rgb(70, 210, 100);
+    voice_colors[VOICE_SYNTH] = cyd_rgb(220, 90, 230);
+    voice_colors[VOICE_PLUCK] = cyd_rgb(240, 210, 40);
+    voice_colors[VOICE_BELL] = cyd_rgb(40, 210, 230);
+    voice_colors[VOICE_CHIP] = cyd_rgb(110, 140, 255);
+    instrument = synth_instrument(voice_kind, styles[voice_kind]);
     loop_white = cyd_rgb(150, 200, 255);
     loop_black = cyd_rgb(50, 110, 200);
     layout_keys();
@@ -841,6 +913,8 @@ void ui_run(QueueHandle_t touch_queue)
                 tap_transport(column, &state);
             } else if (row == 1) {
                 tap_sound(column, &state);
+            } else if (row == 2) {
+                tap_octave(column);
             }
         }
         /* An octave or voice change recolors or renumbers every key. */

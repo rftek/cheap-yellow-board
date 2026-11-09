@@ -1,6 +1,6 @@
 # Keyboard
 
-A two-octave touch keyboard for the Waveshare ESP32-S3-Touch-LCD-7 (800x480, capacitive touch). It has 25 keys from C to C, seven synthesized voices, eight notes at once, a sustain pedal and a loop recorder with overdub and undo. The sound plays on an AirPlay speaker through the shared [music_out](../../components/music_out) component, the same output [DrumLoop](../drumloop) uses. You can also play with no speaker while you work out a part.
+A two-octave touch keyboard for the Waveshare ESP32-S3-Touch-LCD-7 (800x480, capacitive touch). It has 25 keys from C to C, each labelled with its note, seven synthesized voices in 23 styles (concert grand, upright, electric pianos, church and jazz organs and more), eight notes at once, a sustain pedal and a loop recorder with overdub and undo. The sound plays on an AirPlay speaker through the shared [music_out](../../components/music_out) component, the same output [DrumLoop](../drumloop) uses. You can also play with no speaker while you work out a part.
 
 It shares its tempo and its AirPlay delay with DrumLoop. If you set 140 BPM in one app, the other starts at 140, so a keyboard loop and a drum loop made one after the other fit together.
 
@@ -19,10 +19,12 @@ If the speaker drops the session, the keyboard goes silent and the MENU button t
 
 ```
  PLAY  REC   -  120 +   MET   MENU     transport
- E.PIANO   <  C3 >    UNDO   SUS       sound
+ PIANO   C7 GRAND      UNDO            voice and style
+ OCT -   C3-C5   OCT +       SUS       octave, sustain
  BAR 1.3 OF 2  37 NOTES                the loop, as heard
  ============------------------------  loop progress
- |  | | | |  |  | | | | | |  |  | ...  25 keys, C3 to C5
+ |C#| |D#|  |F#| |G#| |A#|  ...        25 keys, C3 to C5,
+ | C3 | D3 | E3 | F3 | G3 | ...        each with its note name
 ```
 
 | Control | What it does |
@@ -31,25 +33,42 @@ If the speaker drops the session, the keyboard goes silent and the MENU button t
 | **REC** | From stop: one bar of count-in clicks (orange), then the loop runs and records what you play. While playing: punches in and out. Each punch-in is a new take, layered over the others. |
 | **- / +** | Tempo, 60 to 200 BPM, one at a time (tens in MENU). The loop follows a tempo change, since notes are kept in beats. |
 | **MET** | Metronome: a click on every beat while the loop runs, accented on beat 1. |
-| **Voice** | The next voice. The key you hold keeps its voice; new notes use the new one. |
-| **< C3 >** | Octave: the lowest key from C2 to C5. |
+| **Voice** (PIANO) | The next voice: PIANO, ORGAN, STRING, SYNTH, PLUCK, BELL, CHIP. The key you hold keeps its sound; new notes use the new one. |
+| **Style** (C7 GRAND) | The next style of that voice. The loop row shows what it is for a moment. Each voice remembers its style. Recorded notes keep the style they were played with, so takes on different pianos layer. |
+| **OCT - / OCT +** | Shift the keys an octave down or up: the lowest key from C2 to C5. The range shows between them. |
 | **UNDO** | Removes the last take. |
 | **SUS** | The sustain pedal, latched: notes ring on after you lift until you tap SUS again. Recorded notes keep the length you heard. |
-| **Keys** | Play with up to five fingers at once (the GT911's limit). Slide a finger along the keys for a glissando. A key lights in the voice's color under your finger, and in blue while the loop plays it, at the moment the speaker does. Middle C has a red dot. |
+| **Keys** | Play with up to five fingers at once (the GT911's limit). Slide a finger along the keys for a glissando. A key lights in the voice's color under your finger, and in blue while the loop plays it, at the moment the speaker does. Every key shows its note: white keys with the octave (C4), black keys without (C#), which are too narrow for three letters. Middle C's label is red. |
 
-### The voices
+### The voices and styles
 
-Every sound is computed as it plays, in floating point at 44.1 kHz; there are no samples.
+Every sound is computed as it plays, in floating point at 44.1 kHz; there are no samples. The styles are named after classic instruments, the way DrumLoop's kits are named 808 and 909; they are synthesized in their spirit, not copies of them.
 
-| Voice | How it is made |
-|---|---|
-| E.PIANO | Two-operator FM, modulator at the note's pitch, with a bright attack that mellows. Higher notes die away sooner, as on a piano. |
-| ORGAN | Five sine drawbars (1, 2, 3, 4 and 6 times the pitch), held while the key is down. |
-| STRINGS | Two saws detuned by 7 cents through a two-pole low-pass, with a slow attack and release. |
-| SYNTH | Saw and square through a resonant state-variable low-pass that sweeps down. |
-| PLUCK | Karplus-Strong plucked string: a noise burst in a delay line one period long. |
-| BELL | FM with the modulator at 3.5 times the pitch, for inharmonic partials that ring on. |
-| CHIP | A 25% pulse wave, like an 8-bit console. |
+| Voice | Style | What it is | How it is made |
+|---|---|---|---|
+| PIANO | C7 GRAND | Bright concert grand, like Yamaha's C7 | Modal synthesis: up to 16 stiff-string partials (slightly sharp, as real piano strings are), struck an eighth of the way along. Each partial is a damped resonator that rings on its own, the higher ones dying sooner. The lower partials have a second string a cent apart, which beats. A short hammer thump starts it, and lifting the key drops the damper. Low notes ring for half a minute. |
+| | U1 UPRIGHT | Warm studio upright | The same, darker and shorter, with more thump |
+| | CP70 | Electric grand | The same, short and bright, strings 5 cents apart for its chorus, a little pickup drive |
+| | DX7 EP | FM electric piano | Two-operator FM, modulator at the pitch, a bright attack that mellows |
+| | MK1 EP | Tine electric piano | A tine's fundamental, octave and fast-dying bell partial through a barking pickup, with tremolo |
+| | 200A EP | Reed electric piano | Harmonics through a pickup driven hard, with tremolo |
+| | HONKYTONK | Saloon upright | The upright with its strings 16 cents apart |
+| | TOY | Toy piano | Metal rods: partials at 2.76, 5.4 and 8.9 times the pitch |
+| ORGAN | B3 JAZZ | Drawbar organ, 888 | The first three drawbars (16', 5 1/3', 8'), a decaying third-harmonic percussion, key click and vibrato |
+| | CHURCH | Pipe organ | Principal ranks (16', 8', 4', 2 2/3', 2', 1 1/3', 1') with a second 8' rank a few cents off, slow to speak, with breathy chiff and a long release into the room |
+| | GOSPEL | All drawbars, rotary | Every drawbar out, through a fast rotating-speaker tremolo and vibrato |
+| | COMBO | Transistor organ | Bright upper drawbars with a fast vibrato |
+| STRING | ENSEMBLE | String section | Two saws 7 cents apart through a two-pole low-pass, slow attack and release |
+| | SOLO | Solo violin | One saw, brighter, with vibrato after a quarter second |
+| SYNTH | LEAD | Synth lead | Saw and square through a resonant low-pass that sweeps down |
+| | BRASS | Synth brass | A saw whose filter swells open, then settles |
+| PLUCK | GUITAR | Plucked string | Karplus-Strong: a noise burst in a delay line one period long |
+| | HARP | Harp | The same, softer and ringing longer |
+| BELL | BELL | Bell | FM with the modulator at 3.5 times the pitch |
+| | VIBES | Vibraphone | FM at 4 times, short, with the motor's tremolo |
+| | MARIMBA | Marimba | Wooden bars: partials at 3.9 and 9.9 times the pitch, dying fast |
+| CHIP | PULSE | 8-bit pulse | A 25% pulse wave |
+| | SQUARE | Square wave | A 50% square |
 
 Eight voices play at once. A ninth note takes the quietest released voice, or the oldest one.
 
@@ -74,10 +93,10 @@ Recording allows for the delay. A note is recorded where you heard the loop when
 | File | Contents |
 |---|---|
 | `main/main.c` | start-up: NVS, shared tempo, touch, audio, UI task |
-| `main/ui.c` | screen and menu. The touch task plays the keys through `cyd_touch_set_fingers_callback`, which reports every finger with its id, so notes start and stop as fingers land, slide and lift |
+| `main/ui.c` | screen and menu. Key labels use `cyd_draw_small_text`, the text font at half size. The touch task plays the keys through `cyd_touch_set_fingers_callback`, which reports every finger with its id, so notes start and stop as fingers land, slide and lift |
 | `main/audio.c` | the command queue from the touch and UI tasks, and the render callback that `music_out` calls every 8 ms |
 | `main/looper.c` | transport, loop notes in ticks (960 a beat), takes, quantize, count-in and metronome |
-| `main/synth.c` | the eight voices, the seven instruments, the click and the soft-clipping mixer |
+| `main/synth.c` | the eight voices; the instruments as voices and styles over seven engines (modal, FM, organ, strings, synth, pluck, chip); the click and the soft-clipping mixer |
 
 ## Limits
 

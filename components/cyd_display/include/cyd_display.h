@@ -113,6 +113,22 @@ esp_err_t cyd_draw_cells(int row, const char *text,
 
 esp_err_t cyd_text_row(int row, uint16_t foreground, uint16_t background, const char *text);
 
+/* A small font for labels placed anywhere, such as note names on keys:
+   the text font at half size on the S3 (15x20, anti-aliased), the plain
+   5x7 font in 6x8 cells on the CYD. */
+#if CYD_FONT_SMOOTH
+#define CYD_SMALL_FONT_WIDTH (CYD_FONT_WIDTH / 2)
+#define CYD_SMALL_FONT_HEIGHT (CYD_FONT_HEIGHT / 2)
+#else
+#define CYD_SMALL_FONT_WIDTH 6
+#define CYD_SMALL_FONT_HEIGHT 8
+#endif
+
+/* Draws text at pixel (x, y) in the small font, on its own background.
+   It must fit on the display. */
+esp_err_t cyd_draw_small_text(int x, int y, const char *text, uint16_t foreground,
+                              uint16_t background);
+
 /* Starts the touchscreen and a task that posts one cyd_touch_point_t per tap,
    in display coordinates, to the returned queue. It loads the calibration
    saved in NVS, if any. */

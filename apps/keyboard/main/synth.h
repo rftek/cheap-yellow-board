@@ -3,7 +3,13 @@
 /* The synthesizer: eight voices, each playing one note on one of the
    instruments below, plus a metronome click, mixed to 44100 Hz mono
    16-bit audio. Everything is computed as it plays; there are no samples.
-   Not thread safe: only the audio task calls it. */
+   Not thread safe: only the audio task calls it, apart from the name and
+   lookup functions, which read constant tables.
+
+   Instruments come in voices (PIANO, ORGAN, ...), each with styles, the
+   way DrumLoop's sounds come in kits: PIANO has C7 GRAND, U1 UPRIGHT,
+   DX7 EP and more. An instrument is one style of one voice, identified by
+   a number; a recorded note keeps the instrument it was played with. */
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -13,15 +19,15 @@
 #define SYNTH_VOICES 8
 
 typedef enum {
-    INSTRUMENT_EPIANO,  /* FM electric piano: bright attack, long decay */
-    INSTRUMENT_ORGAN,   /* drawbar organ: sine harmonics, held */
-    INSTRUMENT_STRINGS, /* two detuned saws, slow attack and release */
-    INSTRUMENT_SYNTH,   /* saw and square through a sweeping low-pass */
-    INSTRUMENT_PLUCK,   /* plucked string (Karplus-Strong) */
-    INSTRUMENT_BELL,    /* FM bell: inharmonic, rings on */
-    INSTRUMENT_CHIP,    /* pulse wave, like an 8-bit console */
-    INSTRUMENTS,
-} instrument_t;
+    VOICE_PIANO,
+    VOICE_ORGAN,
+    VOICE_STRINGS,
+    VOICE_SYNTH,
+    VOICE_PLUCK,
+    VOICE_BELL,
+    VOICE_CHIP,
+    VOICE_KINDS,
+} voice_kind_t;
 
 /* Who played a note, so a key lifted live never stops a note the loop
    plays, and the other way round. */
@@ -32,8 +38,24 @@ typedef enum {
 
 void synth_init(void);
 
-/* The instrument's name, at most 7 characters ("E.PIANO"). */
-const char *synth_instrument_name(int instrument);
+/* ---- Instruments ----------------------------------------------------------- */
+
+/* The voice's name, at most 6 characters ("PIANO", "STRING"). */
+const char *synth_voice_name(int voice);
+
+/* How many styles a voice has, and the instrument number of one. */
+int synth_style_count(int voice);
+int synth_instrument(int voice, int style);
+
+/* All instruments, for bounds checks. */
+int synth_instrument_count(void);
+
+/* An instrument's style name, at most 10 characters ("C7 GRAND"), and a
+   few words about it ("BRIGHT CONCERT GRAND"). */
+const char *synth_style_name(int instrument);
+const char *synth_style_about(int instrument);
+
+/* ---- Notes ----------------------------------------------------------------- */
 
 /* Starts a note (MIDI number, 60 is middle C). When all eight voices are
    busy it takes the one that matters least: the quietest released one,
