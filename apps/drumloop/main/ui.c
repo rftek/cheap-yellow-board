@@ -18,8 +18,7 @@
 #include "audio.h"
 #include "cyd_display.h"
 #include "export.h"
-#include "nvs.h"
-#include "output.h"
+#include "music_out.h"
 #include "sdcard.h"
 
 /* Screen lines are cut to the display's width on purpose. */
@@ -52,9 +51,8 @@ _Static_assert(CYD_LCD_WIDTH == 800 && CYD_TEXT_ROWS == 12,
 #define COLOR_PLAYING 0x0560
 #define COLOR_MUTED CYD_COLOR_BUTTON_DISABLED
 
-#define SETTINGS_NAMESPACE "drumloop"
-#define SETTINGS_LATENCY "latency_ms"
-#define DEFAULT_LATENCY_MS 2000
+/* The tempo is saved for the other music apps once it has settled. */
+#define TEMPO_SAVE_MS 2000
 
 typedef struct {
     int column;
@@ -123,24 +121,22 @@ static void put_span(char *text, uint16_t *fg, uint16_t *bg, span_t span, const 
 
 /* ---- Settings ----------------------------------------------------------- */
 
-uint32_t ui_saved_latency_ms(void)
-{
-    uint32_t latency = DEFAULT_LATENCY_MS;
-    nvs_handle_t nvs;
-    if (nvs_open(SETTINGS_NAMESPACE, NVS_READONLY, &nvs) == ESP_OK) {
-        nvs_get_u32(nvs, SETTINGS_LATENCY, &latency);
-        nvs_close(nvs);
-    }
-    return latency;
-}
+static uint16_t saved_bpm;
+static uint16_t changed_bpm;
+static TickType_t bpm_changed_at;
 
-static void save_latency_ms(uint32_t latency)
+/* Saves the tempo in the music apps' shared settings (music_out) once it
+   has stayed the same for a moment, so a run of taps on + is one write. */
+static void save_tempo_when_settled(void)
 {
-    nvs_handle_t nvs;
-    if (nvs_open(SETTINGS_NAMESPACE, NVS_READWRITE, &nvs) == ESP_OK) {
-        nvs_set_u32(nvs, SETTINGS_LATENCY, latency);
-        nvs_commit(nvs);
-        nvs_close(nvs);
+    TickType_t now = xTaskGetTickCount();
+    if (pattern->bpm != changed_bpm) {
+        changed_bpm = pattern->bpm;
+        bpm_changed_at = now;
+    }
+    if (changed_bpm != saved_bpm && now - bpm_changed_at >= pdMS_TO_TICKS(TEMPO_SAVE_MS)) {
+        music_out_save_tempo(changed_bpm);
+        saved_bpm = changed_bpm;
     }
 }
 
@@ -443,8 +439,6 @@ static void update_playhead(void)
 #define VOLUME_STEP 10
 #define TEMPO_STEP 10
 
-static const uint32_t latency_choices[] = {2000, 1000, 500, 250, 150, 100};
-
 /* The menu's info line, kept between visits. */
 static char status_text[COLUMNS + 1] = " No speaker: silent";
 
@@ -480,41 +474,11 @@ static void draw_button_row(int row, const char *label)
     ESP_ERROR_CHECK(cyd_text_row(row, CYD_COLOR_WHITE, CYD_COLOR_BUTTON, label));
 }
 
-static void draw_wifi_row(void)
-{
-    char line[COLUMNS + 1];
-    if (!output_wifi_saved()) {
-        ESP_ERROR_CHECK(cyd_text_row(MENU_WIFI, CYD_COLOR_GRAY, CYD_COLOR_BUTTON_DISABLED,
-                                     " WI-FI     NONE SAVED"));
-        return;
-    }
-    if (!output_wifi_on()) {
-        snprintf(line, sizeof(line), " WI-FI     OFF");
-    } else if (output_wifi_joined()) {
-        snprintf(line, sizeof(line), " WI-FI     ON  %s", output_wifi_ssid());
-    } else {
-        snprintf(line, sizeof(line), " WI-FI     NOT JOINED");
-    }
-    draw_button_row(MENU_WIFI, line);
-}
-
-static void draw_output_row(void)
-{
-    char line[COLUMNS + 1];
-    const char *name = output_speaker_name();
-    if (name != NULL) {
-        snprintf(line, sizeof(line), " OUTPUT    %s", name);
-    } else {
-        snprintf(line, sizeof(line), " OUTPUT    NONE (SILENT)");
-    }
-    draw_button_row(MENU_OUTPUT, line);
-}
-
 static void draw_volume_row(void)
 {
     char value[8];
-    if (audio_has_speaker()) {
-        snprintf(value, sizeof(value), "%d%%", audio_get_volume());
+    if (music_out_has_speaker()) {
+        snprintf(value, sizeof(value), "%d%%", music_out_get_volume());
     } else {
         snprintf(value, sizeof(value), "SILENT");
     }
@@ -548,26 +512,19 @@ static void draw_kit_row(void)
     draw_button_row(MENU_KIT, line);
 }
 
-static void draw_latency_row(uint32_t latency)
-{
-    char line[COLUMNS + 1];
-    snprintf(line, sizeof(line), " AIRPLAY DELAY %lu MS", (unsigned long)latency);
-    draw_button_row(MENU_LATENCY, line);
-}
-
-static void draw_menu(uint32_t latency)
+static void draw_menu(void)
 {
     ESP_ERROR_CHECK(cyd_text_row(0, CYD_COLOR_BLACK, CYD_COLOR_YELLOW, " DRUMLOOP SETTINGS"));
     ESP_ERROR_CHECK(cyd_text_row(MENU_INFO, CYD_COLOR_YELLOW, CYD_COLOR_BLACK, status_text));
-    draw_wifi_row();
-    draw_output_row();
+    music_out_draw_wifi_row(MENU_WIFI);
+    music_out_draw_output_row(MENU_OUTPUT);
     draw_volume_row();
     draw_tempo_row();
     draw_length_row();
     draw_split_row(MENU_BEATS, "TRAP 140", "STYLE", "DNB 174");
     draw_clear_row(false);
     draw_kit_row();
-    draw_latency_row(latency);
+    music_out_draw_latency_row(MENU_LATENCY);
     draw_button_row(MENU_BACK, " BACK TO PADS");
 }
 
@@ -652,13 +609,12 @@ static void next_kit(void)
 
 static void run_menu(QueueHandle_t touch_queue)
 {
-    uint32_t latency = ui_saved_latency_ms();
     bool clear_armed = false;
     if (speaker_lost_notice) {
         speaker_lost_notice = false;
         snprintf(status_text, sizeof(status_text), " Speaker disconnected");
     }
-    draw_menu(latency);
+    draw_menu();
     /* Menu buttons get ordinary taps: one finger, with a gap between taps. */
     pads_live = false;
     cyd_touch_set_fast(false);
@@ -666,11 +622,12 @@ static void run_menu(QueueHandle_t touch_queue)
     while (true) {
         cyd_touch_point_t point;
         if (xQueueReceive(touch_queue, &point, pdMS_TO_TICKS(50)) != pdTRUE) {
-            if (output_check_lost()) {
+            if (music_out_check_lost()) {
                 menu_status(" Speaker disconnected");
-                draw_output_row();
+                music_out_draw_output_row(MENU_OUTPUT);
                 draw_volume_row();
             }
+            save_tempo_when_settled();
             /* Keep up with the playhead, so the grid is current on return. */
             update_playhead();
             continue;
@@ -689,30 +646,23 @@ static void run_menu(QueueHandle_t touch_queue)
         case MENU_BACK:
             return;
         case MENU_WIFI:
-            if (!output_wifi_saved()) {
-                menu_status(" Set Wi-Fi in the launcher");
-            } else if (output_wifi_on()) {
-                output_wifi_stop();
-                menu_status(" Wi-Fi off");
-                draw_wifi_row();
-                draw_output_row();
-                draw_volume_row();
-            } else {
-                output_wifi_start(status, sizeof(status));
+            if (music_out_tap_wifi(status, sizeof(status))) {
                 snprintf(status_text, sizeof(status_text), "%s", status);
-                draw_menu(latency);
+                draw_menu();
                 xQueueReset(touch_queue);
+            } else {
+                menu_status(status);
             }
             break;
         case MENU_OUTPUT:
-            output_pick_speaker(status, sizeof(status));
+            music_out_pick_speaker(status, sizeof(status));
             snprintf(status_text, sizeof(status_text), "%s", status);
-            draw_menu(latency);
+            draw_menu();
             xQueueReset(touch_queue);
             break;
         case MENU_VOLUME:
-            if ((left || right) && audio_has_speaker()) {
-                audio_set_volume(audio_get_volume() + (left ? -VOLUME_STEP : VOLUME_STEP));
+            if ((left || right) && music_out_has_speaker()) {
+                music_out_set_volume(music_out_get_volume() + (left ? -VOLUME_STEP : VOLUME_STEP));
                 draw_volume_row();
             }
             break;
@@ -760,20 +710,11 @@ static void run_menu(QueueHandle_t touch_queue)
         case MENU_KIT:
             next_kit();
             break;
-        case MENU_LATENCY: {
-            size_t count = sizeof(latency_choices) / sizeof(latency_choices[0]);
-            size_t next = 0;
-            for (size_t i = 0; i < count; ++i) {
-                if (latency_choices[i] == latency) {
-                    next = (i + 1) % count;
-                }
-            }
-            latency = latency_choices[next];
-            save_latency_ms(latency);
-            draw_latency_row(latency);
+        case MENU_LATENCY:
+            music_out_next_latency_setting();
+            music_out_draw_latency_row(MENU_LATENCY);
             menu_status(" Used from the next connect");
             break;
-        }
         default:
             break;
         }
@@ -946,6 +887,7 @@ static void enter_pads(QueueHandle_t touch_queue)
 void ui_run(QueueHandle_t touch_queue, drum_pattern_t *loop_pattern)
 {
     pattern = loop_pattern;
+    saved_bpm = changed_bpm = pattern->bpm;
     track_colors[DRUM_KICK] = cyd_rgb(255, 70, 40);
     track_colors[DRUM_SNARE] = cyd_rgb(255, 200, 0);
     track_colors[DRUM_CLAP] = cyd_rgb(255, 130, 0);
@@ -959,9 +901,10 @@ void ui_run(QueueHandle_t touch_queue, drum_pattern_t *loop_pattern)
     cyd_touch_set_tap_callback(on_tap, NULL);
     enter_pads(touch_queue);
     while (true) {
-        if (output_check_lost()) {
+        if (music_out_check_lost()) {
             speaker_lost_notice = true;
         }
+        save_tempo_when_settled();
         cyd_touch_point_t point;
         TickType_t wait = pdMS_TO_TICKS(REFRESH_MS);
         /* Take every tap waiting before drawing, so pads answer first. */

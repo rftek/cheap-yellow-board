@@ -4,8 +4,8 @@
    sequencer of up to 16 bars. It boots straight to the pads with Wi-Fi off
    and no speaker; Wi-Fi and the AirPlay speaker are chosen in the menu.
 
-   ui.c is the performance screen and menu, output.c Wi-Fi and the
-   speaker, audio.c streams the engine (engine.c) to the speaker, kit.c
+   ui.c is the performance screen and menu, audio.c runs the engine
+   (engine.c) through music_out (Wi-Fi, speaker and streaming), kit.c
    makes the sounds and export.c renders the loop for a future export. */
 
 #include "audio.h"
@@ -16,8 +16,8 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "kit.h"
+#include "music_out.h"
 #include "nvs_flash.h"
-#include "output.h"
 #include "sdcard.h"
 #include "ui.h"
 
@@ -55,10 +55,12 @@ void app_main(void)
         kit_scan(KIT_FOLDER);
     }
 
+    /* The tempo the music apps share (Keyboard's, or the last one set). */
+    pattern.bpm = music_out_load_tempo(DEFAULT_BPM);
+
     /* Starts silent: no speaker until one is picked in the menu. */
-    ESP_ERROR_CHECK(audio_start(&pattern));
     ESP_ERROR_CHECK(cyd_touch_start(&touch_queue));
-    output_init(touch_queue);
+    ESP_ERROR_CHECK(audio_start(&pattern, touch_queue));
 
     BaseType_t result = xTaskCreate(ui_task, "ui", 8192, NULL, 5, NULL);
     ESP_ERROR_CHECK(result == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);

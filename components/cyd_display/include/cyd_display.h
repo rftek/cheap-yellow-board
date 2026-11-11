@@ -113,6 +113,22 @@ esp_err_t cyd_draw_cells(int row, const char *text,
 
 esp_err_t cyd_text_row(int row, uint16_t foreground, uint16_t background, const char *text);
 
+/* A small font for labels placed anywhere, such as note names on keys:
+   the text font at half size on the S3 (15x20, anti-aliased), the plain
+   5x7 font in 6x8 cells on the CYD. */
+#if CYD_FONT_SMOOTH
+#define CYD_SMALL_FONT_WIDTH (CYD_FONT_WIDTH / 2)
+#define CYD_SMALL_FONT_HEIGHT (CYD_FONT_HEIGHT / 2)
+#else
+#define CYD_SMALL_FONT_WIDTH 6
+#define CYD_SMALL_FONT_HEIGHT 8
+#endif
+
+/* Draws text at pixel (x, y) in the small font, on its own background.
+   It must fit on the display. */
+esp_err_t cyd_draw_small_text(int x, int y, const char *text, uint16_t foreground,
+                              uint16_t background);
+
 /* Starts the touchscreen and a task that posts one cyd_touch_point_t per tap,
    in display coordinates, to the returned queue. It loads the calibration
    saved in NVS, if any. */
@@ -133,6 +149,28 @@ typedef bool (*cyd_tap_fn)(const cyd_touch_point_t *point, void *context);
 
 /* Sets the tap callback; NULL removes it. */
 void cyd_touch_set_tap_callback(cyd_tap_fn tap, void *context);
+
+/* Every finger on the screen at one moment, for instruments that need to
+   know how long a key is held and where each finger slides to, such as a
+   keyboard. A finger keeps its id while it stays down. */
+#define CYD_TOUCH_MAX_FINGERS 5
+
+typedef struct {
+    uint8_t count;
+    uint8_t ids[CYD_TOUCH_MAX_FINGERS];
+    cyd_touch_point_t points[CYD_TOUCH_MAX_FINGERS];
+} cyd_touch_fingers_t;
+
+/* Called by the touch task with the fingers that are down each time the
+   panel reports, and once with count 0 when the last one lifts. Taps are
+   still posted as before (the tap callback can swallow them). Reports come
+   every 5-10 ms in fast mode, every 25 ms otherwise. On the GT911 that is
+   up to 5 fingers; on the CYD's resistive panel one, with id 0. Runs in the
+   touch task: keep it short and don't draw from it. */
+typedef void (*cyd_fingers_fn)(const cyd_touch_fingers_t *fingers, void *context);
+
+/* Sets the fingers callback; NULL removes it. */
+void cyd_touch_set_fingers_callback(cyd_fingers_fn fingers, void *context);
 
 /* For long presses, with cyd_touch_start: copies up to max of the fingers
    down at the touch task's last poll into points and returns how many. The

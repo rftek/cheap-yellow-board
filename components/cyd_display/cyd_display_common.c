@@ -239,6 +239,41 @@ esp_err_t cyd_draw_cells(int row, const char *text,
     return ESP_OK;
 }
 
+esp_err_t cyd_draw_small_text(int x, int y, const char *text, uint16_t foreground,
+                              uint16_t background)
+{
+    int length = (int)strlen(text);
+    ESP_RETURN_ON_FALSE(inside_display(x, y, length * CYD_SMALL_FONT_WIDTH, CYD_SMALL_FONT_HEIGHT),
+                        ESP_ERR_INVALID_ARG, TAG, "small text outside display");
+    for (int i = 0; i < length; ++i) {
+        int glyph = glyph_index(text[i]);
+        for (int gy = 0; gy < CYD_SMALL_FONT_HEIGHT; ++gy) {
+            for (int gx = 0; gx < CYD_SMALL_FONT_WIDTH; ++gx) {
+#if CYD_FONT_SMOOTH
+                /* Each pixel averages a 2x2 block of the large glyph. */
+                unsigned sum = 0;
+                for (int dy = 0; dy < 2; ++dy) {
+                    for (int dx = 0; dx < 2; ++dx) {
+                        int px = gx * 2 + dx;
+                        int shift = px % 2 == 0 ? 4 : 0;
+                        sum += (smooth_font[glyph][gy * 2 + dy][px / 2] >> shift) & 0x0F;
+                    }
+                }
+                uint16_t color = blend565(background, foreground, (sum + 2) / 4);
+#else
+                bool on = gx < 5 && gy >= 1 && gy < 8 && (font5x7[glyph][gx] & (1U << (gy - 1)));
+                uint16_t color = on ? foreground : background;
+#endif
+                chunk[gy * CYD_SMALL_FONT_WIDTH + gx] = color;
+            }
+        }
+        ESP_RETURN_ON_ERROR(cyd_backend_blit(x + i * CYD_SMALL_FONT_WIDTH, y, CYD_SMALL_FONT_WIDTH,
+                                             CYD_SMALL_FONT_HEIGHT, chunk),
+                            TAG, "send small text");
+    }
+    return ESP_OK;
+}
+
 esp_err_t cyd_text_row(int row, uint16_t foreground, uint16_t background, const char *text)
 {
     uint16_t foregrounds[CYD_TEXT_COLUMNS];
@@ -280,6 +315,29 @@ void cyd_backend_post_tap(QueueHandle_t queue, const cyd_touch_point_t *point)
         return;
     }
     xQueueSend(queue, point, 0);
+}
+
+static cyd_fingers_fn fingers_callback;
+static void *fingers_context;
+
+void cyd_touch_set_fingers_callback(cyd_fingers_fn fingers, void *context)
+{
+    fingers_callback = NULL;
+    fingers_context = context;
+    fingers_callback = fingers;
+}
+
+bool cyd_backend_wants_fingers(void)
+{
+    return fingers_callback != NULL;
+}
+
+void cyd_backend_post_fingers(const cyd_touch_fingers_t *fingers)
+{
+    cyd_fingers_fn callback = fingers_callback;
+    if (callback != NULL) {
+        callback(fingers, fingers_context);
+    }
 }
 
 #define HELD_MAX 5

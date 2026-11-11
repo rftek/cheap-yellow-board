@@ -1,19 +1,19 @@
-#include "output.h"
+/* Wi-Fi, the speaker picker and the settings the music apps share. */
 
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "airplay_sender.h"
-#include "audio.h"
 #include "cyd_display.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
 #include "freertos/event_groups.h"
+#include "music_out.h"
+#include "music_out_internal.h"
 #include "nvs.h"
-#include "ui.h"
 
 /* Screen lines are cut to the display's width on purpose. */
 #pragma GCC diagnostic ignored "-Wformat-truncation"
@@ -34,7 +34,9 @@
 #define ARROW_UP_COLUMN (ARROW_DOWN_COLUMN - ARROW_COLUMNS - 1)
 #define BUTTON_COLUMNS (CYD_TEXT_COLUMNS / 2)
 
-static const char *TAG = "output";
+static const char *TAG = "music_out";
+
+static const char *app_title = " MUSIC";
 
 static QueueHandle_t touch_queue;
 static EventGroupHandle_t wifi_events;
@@ -124,7 +126,7 @@ static void clear_rows(int first, int last)
 /* A full-screen message: a yellow title and up to two lines under it. */
 static void show_message(const char *title, const char *line1, const char *line2)
 {
-    ESP_ERROR_CHECK(cyd_text_row(HEADER_ROW, CYD_COLOR_BLACK, CYD_COLOR_YELLOW, " DRUMLOOP"));
+    ESP_ERROR_CHECK(cyd_text_row(HEADER_ROW, CYD_COLOR_BLACK, CYD_COLOR_YELLOW, app_title));
     clear_rows(LIST_FIRST_ROW, FOOTER_ROW);
     int row = CYD_TEXT_ROWS / 2 - 2;
     ESP_ERROR_CHECK(cyd_text_row(row, CYD_COLOR_YELLOW, CYD_COLOR_BLACK, title));
@@ -136,33 +138,33 @@ static void show_message(const char *title, const char *line1, const char *line2
     }
 }
 
-bool output_wifi_saved(void)
+bool music_out_wifi_saved(void)
 {
     return have_wifi_settings;
 }
 
-bool output_wifi_on(void)
+bool music_out_wifi_on(void)
 {
     return wifi_running;
 }
 
-bool output_wifi_joined(void)
+bool music_out_wifi_joined(void)
 {
     return wifi_running && (xEventGroupGetBits(wifi_events) & WIFI_CONNECTED_BIT) != 0;
 }
 
-const char *output_wifi_ssid(void)
+const char *music_out_wifi_ssid(void)
 {
     return wifi_ssid;
 }
 
-bool output_wifi_start(char *status, size_t status_size)
+bool music_out_wifi_start(char *status, size_t status_size)
 {
     if (!have_wifi_settings) {
         snprintf(status, status_size, " Set Wi-Fi in the launcher");
         return false;
     }
-    if (output_wifi_joined()) {
+    if (music_out_wifi_joined()) {
         snprintf(status, status_size, " Joined %s", wifi_ssid);
         return true;
     }
@@ -197,7 +199,7 @@ static void disconnect_speaker(void)
         return;
     }
     airplay_sender_handle_t old = speaker;
-    audio_set_output(NULL);
+    music_out_stream_set_output(NULL);
     speaker = NULL;
     speaker_name[0] = '\0';
     if (!speaker_lost) {
@@ -207,7 +209,7 @@ static void disconnect_speaker(void)
     ESP_LOGI(TAG, "Speaker disconnected");
 }
 
-void output_wifi_stop(void)
+void music_out_wifi_stop(void)
 {
     disconnect_speaker();
     if (wifi_running) {
@@ -230,12 +232,12 @@ static void on_speaker_event(airplay_sender_handle_t sender, airplay_event_t eve
     }
 }
 
-const char *output_speaker_name(void)
+const char *music_out_speaker_name(void)
 {
     return speaker != NULL ? speaker_name : NULL;
 }
 
-bool output_check_lost(void)
+bool music_out_check_lost(void)
 {
     if (speaker == NULL || !speaker_lost) {
         return false;
@@ -345,8 +347,8 @@ static bool connect_to(const airplay_device_t *device, char *status, size_t stat
 
     airplay_sender_config_t config = AIRPLAY_SENDER_DEFAULT_CONFIG();
     config.channels = 1;
-    config.latency_ms = ui_saved_latency_ms();
-    config.lead_packets = 1; /* a pad hit is sent 8 ms ahead, not 32 */
+    config.latency_ms = music_out_latency_setting_ms();
+    config.lead_packets = 1; /* a note is sent 8 ms ahead, not 32 */
     config.on_event = on_speaker_event;
     airplay_sender_handle_t sender;
     speaker_lost = false;
@@ -360,16 +362,16 @@ static bool connect_to(const airplay_device_t *device, char *status, size_t stat
              (unsigned long)airplay_sender_latency_ms(sender));
     speaker = sender;
     snprintf(speaker_name, sizeof(speaker_name), "%s", device->name);
-    audio_set_output(sender);
+    music_out_stream_set_output(sender);
     /* The speaker may have asked for a longer delay than the menu's. */
     snprintf(status, status_size, " Playing on %s, %lu ms delay", device->name,
              (unsigned long)airplay_sender_latency_ms(sender));
     return true;
 }
 
-void output_pick_speaker(char *status, size_t status_size)
+void music_out_pick_speaker(char *status, size_t status_size)
 {
-    if (!output_wifi_joined() && !output_wifi_start(status, status_size)) {
+    if (!music_out_wifi_joined() && !music_out_wifi_start(status, status_size)) {
         return;
     }
     search();
@@ -423,11 +425,138 @@ void output_pick_speaker(char *status, size_t status_size)
     }
 }
 
-void output_init(QueueHandle_t queue)
+esp_err_t music_out_start(const music_out_config_t *config, QueueHandle_t queue)
 {
+    if (config == NULL || config->render == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (config->title != NULL) {
+        app_title = config->title;
+    }
     touch_queue = queue;
     load_wifi_settings();
     if (!have_wifi_settings) {
         ESP_LOGW(TAG, "No Wi-Fi network saved in NVS %s", CYD_CONFIG_NAMESPACE);
+    }
+    return music_out_stream_start(config);
+}
+
+/* ---- Menu rows ---------------------------------------------------------- */
+
+void music_out_draw_wifi_row(int row)
+{
+    char line[CYD_TEXT_COLUMNS + 1];
+    if (!have_wifi_settings) {
+        ESP_ERROR_CHECK(cyd_text_row(row, CYD_COLOR_GRAY, CYD_COLOR_BUTTON_DISABLED,
+                                     " WI-FI     NONE SAVED"));
+        return;
+    }
+    if (!wifi_running) {
+        snprintf(line, sizeof(line), " WI-FI     OFF");
+    } else if (music_out_wifi_joined()) {
+        snprintf(line, sizeof(line), " WI-FI     ON  %s", wifi_ssid);
+    } else {
+        snprintf(line, sizeof(line), " WI-FI     NOT JOINED");
+    }
+    ESP_ERROR_CHECK(cyd_text_row(row, CYD_COLOR_WHITE, CYD_COLOR_BUTTON, line));
+}
+
+void music_out_draw_output_row(int row)
+{
+    char line[CYD_TEXT_COLUMNS + 1];
+    if (speaker != NULL) {
+        snprintf(line, sizeof(line), " OUTPUT    %s", speaker_name);
+    } else {
+        snprintf(line, sizeof(line), " OUTPUT    NONE (SILENT)");
+    }
+    ESP_ERROR_CHECK(cyd_text_row(row, CYD_COLOR_WHITE, CYD_COLOR_BUTTON, line));
+}
+
+void music_out_draw_latency_row(int row)
+{
+    char line[CYD_TEXT_COLUMNS + 1];
+    snprintf(line, sizeof(line), " AIRPLAY DELAY %lu MS",
+             (unsigned long)music_out_latency_setting_ms());
+    ESP_ERROR_CHECK(cyd_text_row(row, CYD_COLOR_WHITE, CYD_COLOR_BUTTON, line));
+}
+
+bool music_out_tap_wifi(char *status, size_t status_size)
+{
+    if (!have_wifi_settings) {
+        snprintf(status, status_size, " Set Wi-Fi in the launcher");
+        return false;
+    }
+    if (wifi_running) {
+        music_out_wifi_stop();
+        snprintf(status, status_size, " Wi-Fi off");
+        return true;
+    }
+    music_out_wifi_start(status, status_size);
+    return true;
+}
+
+/* ---- Shared settings ---------------------------------------------------- */
+
+#define SETTINGS_NAMESPACE "music"
+#define SETTINGS_LATENCY "latency_ms"
+#define SETTINGS_TEMPO "tempo"
+
+static const uint32_t latency_choices[] = {2000, 1000, 500, 250, 150, 100};
+
+uint32_t music_out_latency_setting_ms(void)
+{
+    uint32_t latency = MUSIC_OUT_DEFAULT_LATENCY_MS;
+    nvs_handle_t nvs;
+    if (nvs_open(SETTINGS_NAMESPACE, NVS_READONLY, &nvs) == ESP_OK) {
+        nvs_get_u32(nvs, SETTINGS_LATENCY, &latency);
+        nvs_close(nvs);
+    }
+    return latency;
+}
+
+uint32_t music_out_next_latency_setting(void)
+{
+    uint32_t latency = music_out_latency_setting_ms();
+    size_t count = sizeof(latency_choices) / sizeof(latency_choices[0]);
+    size_t next = 0;
+    for (size_t i = 0; i < count; ++i) {
+        if (latency_choices[i] == latency) {
+            next = (i + 1) % count;
+        }
+    }
+    latency = latency_choices[next];
+    nvs_handle_t nvs;
+    if (nvs_open(SETTINGS_NAMESPACE, NVS_READWRITE, &nvs) == ESP_OK) {
+        nvs_set_u32(nvs, SETTINGS_LATENCY, latency);
+        nvs_commit(nvs);
+        nvs_close(nvs);
+    }
+    return latency;
+}
+
+uint16_t music_out_load_tempo(uint16_t fallback)
+{
+    uint16_t bpm = fallback;
+    nvs_handle_t nvs;
+    if (nvs_open(SETTINGS_NAMESPACE, NVS_READONLY, &nvs) == ESP_OK) {
+        nvs_get_u16(nvs, SETTINGS_TEMPO, &bpm);
+        nvs_close(nvs);
+    }
+    if (bpm < MUSIC_TEMPO_MIN || bpm > MUSIC_TEMPO_MAX) {
+        bpm = fallback;
+    }
+    return bpm;
+}
+
+void music_out_save_tempo(uint16_t bpm)
+{
+    nvs_handle_t nvs;
+    if (nvs_open(SETTINGS_NAMESPACE, NVS_READWRITE, &nvs) == ESP_OK) {
+        uint16_t saved = 0;
+        if (nvs_get_u16(nvs, SETTINGS_TEMPO, &saved) != ESP_OK || saved != bpm) {
+            nvs_set_u16(nvs, SETTINGS_TEMPO, bpm);
+            nvs_commit(nvs);
+        }
+        nvs_close(nvs);
     }
 }
