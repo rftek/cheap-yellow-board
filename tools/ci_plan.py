@@ -2,7 +2,9 @@
 changed since BASE and per chip target in its supported-targets.txt.
 
 A change to the shared code (components/, external/, tools/ or the
-workflow) rebuilds every app, as does an empty or unknown BASE.
+workflow) rebuilds every app, as does an empty or unknown BASE. An app that
+compiles another app's sources lists that app in its uses-apps.txt, and is
+rebuilt when that app changes.
 
 Usage: python tools/ci_plan.py [BASE]   (run from the repository root)
 """
@@ -26,6 +28,12 @@ def changed_files(base):
     return result.stdout.split()
 
 
+def uses(app):
+    """The other apps whose sources app compiles (its uses-apps.txt)."""
+    path = Path("apps", app, "uses-apps.txt")
+    return set(path.read_text().split()) if path.is_file() else set()
+
+
 def main():
     apps = sorted(p.name for p in Path("apps").iterdir()
                   if (p / "supported-targets.txt").is_file())
@@ -33,9 +41,10 @@ def main():
     if files is None or any(f.startswith(SHARED) for f in files):
         selected = apps
     else:
-        selected = sorted({f.split("/")[1] for f in files
-                           if f.startswith("apps/") and not f.endswith(".md")
-                           and f.split("/")[1] in apps})
+        changed = {f.split("/")[1] for f in files
+                   if f.startswith("apps/") and not f.endswith(".md")
+                   and f.split("/")[1] in apps}
+        selected = sorted(changed | {app for app in apps if uses(app) & changed})
 
     matrix = []
     for app in selected:
