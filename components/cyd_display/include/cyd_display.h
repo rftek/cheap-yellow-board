@@ -74,6 +74,14 @@ bool cyd_has_psram(void);
    brightness saved in NVS (full brightness if none). */
 esp_err_t cyd_display_init(void);
 
+/* Selects (true) or releases the board's microSD card. On the Waveshare S3
+   board the card's chip select is pin EXIO4 of the I/O expander, which an
+   SPI driver can't toggle: select the card once and mount it over SPI
+   (MOSI 11, MISO 13, SCK 12) with no CS pin (SDSPI_SLOT_NO_CS), as
+   Waveshare's example does. ESP_ERR_NOT_SUPPORTED on the CYD, whose card
+   has an ordinary GPIO chip select. Call after cyd_display_init. */
+esp_err_t cyd_sd_select(bool selected);
+
 /* Sets the backlight, clamped to CYD_BRIGHTNESS_MIN..MAX; does not save it. */
 esp_err_t cyd_set_brightness(int percent);
 int cyd_get_brightness(void);
@@ -109,6 +117,27 @@ esp_err_t cyd_text_row(int row, uint16_t foreground, uint16_t background, const 
    in display coordinates, to the returned queue. It loads the calibration
    saved in NVS, if any. */
 esp_err_t cyd_touch_start(QueueHandle_t *queue);
+
+/* For instruments, such as drum pads, where a tap must act at once. Fast
+   mode polls the panel every few milliseconds instead of every 25, drops
+   the 250 ms gap between taps (to 60 ms on the resistive CYD) and, on a
+   multi-touch panel, makes each new finger its own tap. Off by default;
+   it can be switched at any time, for example off while a menu is open. */
+void cyd_touch_set_fast(bool fast);
+
+/* Called by the touch task for each tap before it is queued, so an app can
+   react without waiting for its UI task to finish drawing. Return true when
+   the tap was handled and should not be queued. Runs in the touch task:
+   keep it short and don't draw from it. */
+typedef bool (*cyd_tap_fn)(const cyd_touch_point_t *point, void *context);
+
+/* Sets the tap callback; NULL removes it. */
+void cyd_touch_set_tap_callback(cyd_tap_fn tap, void *context);
+
+/* For long presses, with cyd_touch_start: copies up to max of the fingers
+   down at the touch task's last poll into points and returns how many. The
+   resistive CYD reports one, where its press began. */
+int cyd_touch_held(cyd_touch_point_t *points, int max);
 
 /* For UI libraries that poll (such as LVGL) instead of taking taps: sets
    up the touchscreen and loads the saved calibration, without the tap

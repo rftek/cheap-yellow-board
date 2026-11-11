@@ -1,0 +1,10 @@
+# Settings for every target. The board files are in sdkconfig.defaults.<target>.
+
+# mDNS answers can arrive in large bursts on a busy network with several
+# AirPlay devices; give the mDNS task a little more room than the default.
+CONFIG_MDNS_TASK_STACK_SIZE=6144
+CONFIG_MDNS_MAX_SERVICES=4
+
+# A 1 ms tick lets the touch driver poll every 5 ms and the audio task wake
+# on time; at 100 Hz every wait rounds to 10 ms.
+CONFIG_FREERTOS_HZ=1000
