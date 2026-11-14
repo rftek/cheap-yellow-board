@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 640" width="980" height="640" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="14">
+  <title>PCM5102A DAC module to Waveshare ESP32-S3-Touch-LCD-7 wiring</title>
+  <rect width="980" height="640" fill="#ffffff"/>
+
+  <!-- Waveshare board -->
+  <rect x="20" y="40" width="320" height="400" rx="10" fill="#eef5ee" stroke="#2f6b2f" stroke-width="2"/>
+  <text x="180" y="66" text-anchor="middle" font-weight="bold" font-size="16">Waveshare ESP32-S3-Touch-LCD-7</text>
+  <text x="180" y="86" text-anchor="middle" fill="#444">V1.2, headers by silkscreen label</text>
+
+  <rect x="190" y="100" width="150" height="160" fill="#ffffff" stroke="#2f6b2f"/>
+  <text x="200" y="118" font-weight="bold">UART2 (H3)</text>
+  <text x="200" y="152">3V3</text>
+  <text x="200" y="182">GND</text>
+  <text x="200" y="212">RXD = GPIO44</text>
+  <text x="200" y="250">TXD = GPIO43</text>
+  <circle cx="340" cy="147" r="5" fill="#d62f2f"/>
+  <circle cx="340" cy="177" r="5" fill="#000"/>
+  <circle cx="340" cy="207" r="5" fill="#d9822b"/>
+  <circle cx="340" cy="245" r="5" fill="#2b6cd9"/>
+
+  <rect x="190" y="300" width="150" height="110" fill="#ffffff" stroke="#2f6b2f"/>
+  <text x="200" y="318" font-weight="bold">Sensor AD (J8)</text>
+  <text x="200" y="345" fill="#999">3V3</text>
+  <text x="200" y="372" fill="#999">GND</text>
+  <text x="200" y="399">AD = GPIO6</text>
+  <circle cx="340" cy="340" r="4" fill="#bbb"/>
+  <circle cx="340" cy="367" r="4" fill="#bbb"/>
+  <circle cx="340" cy="394" r="5" fill="#2e9e4f"/>
+
+  <rect x="30" y="110" width="154" height="70" fill="#fff8e0" stroke="#c9a227"/>
+  <text x="44" y="130" font-weight="bold">SW1 UART switch</text>
+  <text x="44" y="150">run: UART2</text>
+  <text x="44" y="170">flash: UART1 (COM13)</text>
+
+  <text x="34" y="300" fill="#444">The ESP32-S3 drives</text>
+  <text x="34" y="318" fill="#444">all three clocks and</text>
+  <text x="34" y="336" fill="#444">data lines. Tap STOP</text>
+  <text x="34" y="354" fill="#444">before moving SW1 to</text>
+  <text x="34" y="372" fill="#444">UART1: on UART1 the</text>
+  <text x="34" y="390" fill="#444">CH343 drives GPIO44.</text>
+
+  <!-- PCM5102A module -->
+  <rect x="620" y="40" width="340" height="400" rx="10" fill="#f1eefa" stroke="#5b3f9e" stroke-width="2"/>
+  <text x="790" y="66" text-anchor="middle" font-weight="bold" font-size="16">PCM5102A DAC module</text>
+  <text x="790" y="86" text-anchor="middle" fill="#444">the common purple board; wire by function</text>
+
+  <rect x="620" y="100" width="130" height="290" fill="#ffffff" stroke="#5b3f9e"/>
+  <text x="640" y="118" font-weight="bold">header</text>
+  <text x="640" y="152">VIN</text>
+  <text x="640" y="182">GND</text>
+  <text x="640" y="212">BCK</text>
+  <text x="640" y="250">LCK</text>
+  <text x="640" y="280">DIN</text>
+  <text x="640" y="320">SCK</text>
+  <circle cx="620" cy="147" r="5" fill="#d62f2f"/>
+  <circle cx="620" cy="177" r="5" fill="#000"/>
+  <circle cx="620" cy="207" r="5" fill="#d9822b"/>
+  <circle cx="620" cy="245" r="5" fill="#2b6cd9"/>
+  <circle cx="620" cy="275" r="5" fill="#2e9e4f"/>
+  <circle cx="620" cy="315" r="5" fill="#000"/>
+  <polyline points="690,177 725,177 725,315 690,315" fill="none" stroke="#000" stroke-width="3"/>
+  <text x="632" y="340" fill="#444" font-size="12">SCK to GND: a wire</text>
+  <text x="632" y="354" fill="#444" font-size="12">or the SCK pad. The</text>
+  <text x="632" y="368" fill="#444" font-size="12">PLL then makes its</text>
+  <text x="632" y="382" fill="#444" font-size="12">clock from BCK.</text>
+
+  <text x="770" y="118" font-weight="bold">Jumpers (back)</text>
+  <text x="770" y="142">H1 FLT: L</text>
+  <text x="770" y="158" fill="#444" font-size="12">H = low-latency filter,</text>
+  <text x="770" y="172" fill="#444" font-size="12">3.5 instead of 20 samples</text>
+  <text x="770" y="196">H2 DEMP: L</text>
+  <text x="770" y="220">H3 XSMT: H</text>
+  <text x="770" y="236" fill="#444" font-size="12">high = playing</text>
+  <text x="770" y="260">H4 FMT: L</text>
+  <text x="770" y="276" fill="#444" font-size="12">low = I2S</text>
+  <text x="770" y="300" fill="#444" font-size="12">(factory settings; H1</text>
+  <text x="770" y="314" fill="#444" font-size="12">to H is optional)</text>
+
+  <rect x="760" y="335" width="190" height="90" fill="#ffffff" stroke="#5b3f9e"/>
+  <text x="772" y="355" font-weight="bold">Line out</text>
+  <text x="772" y="375">3.5 mm jack, or L G R</text>
+  <text x="772" y="395" fill="#444">2.1 Vrms, centred on 0 V,</text>
+  <text x="772" y="413" fill="#444">loads of 1 kΩ or more</text>
+
+  <!-- Wires -->
+  <polyline points="340,147 620,147" fill="none" stroke="#d62f2f" stroke-width="3"/>
+  <text x="470" y="140" text-anchor="middle" fill="#a32020">3.3 V (VIN takes 3.3-5 V)</text>
+
+  <polyline points="340,177 620,177" fill="none" stroke="#000" stroke-width="3"/>
+  <text x="470" y="170" text-anchor="middle">GND</text>
+
+  <polyline points="340,207 620,207" fill="none" stroke="#d9822b" stroke-width="3"/>
+  <text x="470" y="200" text-anchor="middle" fill="#a85d12">BCK (2.8224 MHz at 44.1 kHz)</text>
+
+  <polyline points="340,245 620,245" fill="none" stroke="#2b6cd9" stroke-width="3"/>
+  <text x="470" y="238" text-anchor="middle" fill="#1d4fa3">LRCK (44.1 kHz)</text>
+
+  <polyline points="340,394 560,394 560,275 620,275" fill="none" stroke="#2e9e4f" stroke-width="3"/>
+  <text x="450" y="387" text-anchor="middle" fill="#1f7038">DIN (audio data)</text>
+
+  <!-- Output chain -->
+  <rect x="660" y="500" width="290" height="60" rx="8" fill="#f6f6f6" stroke="#666"/>
+  <text x="805" y="524" text-anchor="middle" font-weight="bold">Amplifier or powered speakers</text>
+  <text x="805" y="544" text-anchor="middle" fill="#444">line input; start with the volume low</text>
+  <polyline points="855,425 855,500" fill="none" stroke="#666" stroke-width="3"/>
+  <text x="865" y="470" fill="#444">3.5 mm cable</text>
+
+  <rect x="20" y="500" width="400" height="60" rx="8" fill="#f6f6f6" stroke="#666"/>
+  <text x="220" y="522" text-anchor="middle" font-weight="bold">Later: loopback into the PCM1808</text>
+  <text x="220" y="542" text-anchor="middle" fill="#444">needs a fourth GPIO (both share BCK and LRCK,</text>
+  <text x="220" y="558" text-anchor="middle" fill="#444">plus DIN out and DOUT in), so not on this board yet</text>
+
+  <text x="20" y="600" fill="#444">Three wires of I2S plus power: the ESP32-S3 is the clock master and the DAC's PLL makes its own system clock from BCK (64 fs).</text>
+  <text x="20" y="620" fill="#444">Same pins and roles as the PCM1808 wiring: BCK on GPIO44, LRCK on GPIO43, data on GPIO6. Only one of the two boards can be wired at a time.</text>
+</svg>
