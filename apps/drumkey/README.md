@@ -23,7 +23,7 @@ Both screens have the same header:
 | **KEYS / DRUM** | Switches to the other screen at once. Sounds keep playing; keys held when you leave are lifted. |
 | **MENU** | That screen's settings, as in its own app: kits, styles, export and the drum loop length on the drums side; voices, quantize and the keyboard loop length on the keys side. Wi-Fi, the speaker, volume and the AirPlay delay are shared, so they can be set from either. |
 
-Everything else works as in [DrumLoop](../drumloop/README.md) and [Keyboard](../keyboard/README.md): eight pads and a 16-step grid (hold a step to double it), 25 keys that move across seven octaves (OCT - / OCT + and a tappable octave map), a sustain pedal, seven voices in 23 styles, kits from an SD card, and EXPORT (which renders the drums only).
+Everything else works as in [DrumLoop](../drumloop/README.md) and [Keyboard](../keyboard/README.md): eight pads and a 16-step grid (hold a step to double it, hold a track label for its filter, EQ and level), 25 keys that move across seven octaves (OCT - / OCT + and a tappable octave map), a sustain pedal, seven voices in 23 styles, kits from an SD card, and EXPORT (which renders the drums only).
 
 The drum loop runs 1 to 16 bars and the keyboard loop 1 to 8. Both start together at bar 1, so with power-of-two lengths they stay in step.
 
@@ -45,7 +45,7 @@ The drum loop runs 1 to 16 bars and the keyboard loop 1 to 8. Both start togethe
 | `main/dk_ui.c` | The header layout and the gaps between its buttons |
 
 The engines are compiled from the other apps' folders, so a fix there reaches Drum&Key too:
-- `apps/drumloop/main`: `engine.c`, `kit.c`, `export.c`, `sdcard.c` and `wav.c`
+- `apps/drumloop/main`: `engine.c`, `kit.c`, `export.c`, `sdcard.c`, `tone.c` and `wav.c`
 - `apps/keyboard/main`: `synth.c` and `looper.c`
 
 `uses-apps.txt` names those two apps, so CI rebuilds Drum&Key when either changes.
@@ -75,6 +75,10 @@ pio run -e esp32s3
 The image goes in a launcher slot, like the other apps.
 
 ## Changelog
+
+### 1.1 (2026-11-14)
+
+- Drum tracks get DrumLoop's tone editor: hold a track label for a resonant filter (low, high or band pass), a three-band EQ and a level, adjustable while the loop plays.
 
 ### 1.0 (2026-11-08)
 

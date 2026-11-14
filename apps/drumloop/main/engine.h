@@ -10,6 +10,7 @@
 #include <stdint.h>
 
 #include "kit.h"
+#include "tone.h"
 
 #define DRUM_STEPS 16 /* sixteenth notes in a bar */
 #define DRUM_MAX_BARS 16
@@ -26,6 +27,7 @@ typedef struct {
     uint16_t bpm;
     uint8_t muted; /* bit per track */
     uint8_t kit;   /* drum_kit_t; changing it changes the sound at once */
+    drum_tone_t tone[DRUM_TRACKS]; /* each track's filter, EQ and level */
 } drum_pattern_t;
 
 /* Called as each step starts, with the frame it starts at (the count of
@@ -51,6 +53,7 @@ typedef struct {
     uint8_t half_tracks;    /* tracks to hit again half a step in, bit each */
     double half_frame;      /* the frame of that second hit */
     drum_voice_t voices[DRUM_TRACKS];
+    tone_state_t tones[DRUM_TRACKS]; /* the filters running each track's tone */
     drum_step_cb_t on_step;
     void *context;
 } drum_engine_t;

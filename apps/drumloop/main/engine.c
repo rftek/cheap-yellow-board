@@ -144,32 +144,57 @@ static float soft_clip(float x)
     return x * (27.0f + x * x) / (27.0f + 9.0f * x * x);
 }
 
+/* Adds a track's hit, and the one fading out under it, into acc. */
+static void add_voice(drum_voice_t *voice, float *acc, size_t frames)
+{
+    const drum_sound_t *sound = voice->sound;
+    if (sound != NULL) {
+        float gain = sound->gain / 32768.0f;
+        size_t i = 0;
+        for (; i < frames && voice->pos < sound->frames; ++i) {
+            acc[i] += sound->pcm[voice->pos++] * gain;
+        }
+        if (voice->pos >= sound->frames) {
+            voice->sound = NULL;
+        }
+    }
+    const drum_sound_t *fading = voice->fade_sound;
+    for (size_t i = 0; i < frames && voice->fade_left > 0; ++i) {
+        if (voice->fade_pos >= fading->frames) {
+            voice->fade_left = 0;
+            break;
+        }
+        float fade = (float)voice->fade_left / RETRIGGER_FADE;
+        acc[i] += fading->pcm[voice->fade_pos++] * (fading->gain / 32768.0f) * fade;
+        --voice->fade_left;
+    }
+}
+
 static void mix(drum_engine_t *engine, int16_t *out, size_t frames)
 {
     float acc[MIX_CHUNK];
+    float track_acc[MIX_CHUNK];
     memset(acc, 0, frames * sizeof(float));
     for (int track = 0; track < DRUM_TRACKS; ++track) {
         drum_voice_t *voice = &engine->voices[track];
-        const drum_sound_t *sound = voice->sound;
-        if (sound != NULL) {
-            float gain = sound->gain / 32768.0f;
-            size_t i = 0;
-            for (; i < frames && voice->pos < sound->frames; ++i) {
-                acc[i] += sound->pcm[voice->pos++] * gain;
-            }
-            if (voice->pos >= sound->frames) {
-                voice->sound = NULL;
-            }
+        const drum_tone_t *tone = &engine->pattern->tone[track];
+        tone_state_t *state = &engine->tones[track];
+        if (tone_is_flat(tone)) {
+            add_voice(voice, acc, frames); /* nothing to run it through */
+            continue;
         }
-        const drum_sound_t *fading = voice->fade_sound;
-        for (size_t i = 0; i < frames && voice->fade_left > 0; ++i) {
-            if (voice->fade_pos >= fading->frames) {
-                voice->fade_left = 0;
-                break;
-            }
-            float fade = (float)voice->fade_left / RETRIGGER_FADE;
-            acc[i] += fading->pcm[voice->fade_pos++] * (fading->gain / 32768.0f) * fade;
-            --voice->fade_left;
+        /* A track with a tone is mixed on its own and run through it. A
+           filter can ring on after the hit, so it runs until it is quiet. */
+        tone_update(state, tone);
+        bool sounding = voice->sound != NULL || voice->fade_left > 0;
+        if (!sounding && !tone_ringing(state)) {
+            continue;
+        }
+        memset(track_acc, 0, frames * sizeof(float));
+        add_voice(voice, track_acc, frames);
+        tone_process(state, track_acc, frames);
+        for (size_t i = 0; i < frames; ++i) {
+            acc[i] += track_acc[i];
         }
     }
     for (size_t i = 0; i < frames; ++i) {
