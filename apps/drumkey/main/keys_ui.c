@@ -1267,3 +1267,18 @@ void keys_menu(QueueHandle_t touch_queue)
 {
     run_menu(touch_queue);
 }
+
+/* Makes chosen the keys' style (voice and style together), for the
+   Piano Roll's INST. */
+void keys_select_instrument(int chosen)
+{
+    int voice = synth_instrument_voice(chosen);
+    for (int style = 0; style < synth_style_count(voice); ++style) {
+        if (synth_instrument(voice, style) == chosen) {
+            voice_kind = voice;
+            styles[voice] = style;
+            instrument = chosen;
+            return;
+        }
+    }
+}

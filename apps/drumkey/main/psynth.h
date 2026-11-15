@@ -17,7 +17,14 @@
        per-note random value onto pitch, wavetable positions, detune,
        cutoffs, resonance, the second oscillator's level and the amp
      - effects: drive, chorus, tempo-synced delay and reverb
-   Up to 6 notes sound at once across the patches. The output is mono. */
+   Up to 6 notes sound at once across the patches. The output is mono.
+
+   The rack: each patch has a level, and in LAYER mode a note on any patch
+   plays every patch switched on in the rack, stacked.
+
+   Samples: a patch can be rendered (a note held, then released, with its
+   effects) into one of four sample slots, which play as styles too, after
+   the patches, pitched from the note they were rendered at. */
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -26,6 +33,8 @@
 #define PSYNTH_UNISON_MAX 7
 #define PSYNTH_MODS 8
 #define PSYNTH_NAME_MAX 10
+#define PSYNTH_SAMPLES 4
+#define PSYNTH_SAMPLE_NOTE 60 /* rendered at middle C */
 
 typedef enum {
     OSC_SAW,
@@ -155,6 +164,25 @@ typedef struct {
     uint8_t reverb_size, reverb_mix;
     uint8_t volume; /* 0-100 */
 } psynth_patch_t;
+
+typedef struct {
+    uint8_t layer;                 /* 0 off, 1 on */
+    uint8_t on[PSYNTH_SLOTS];      /* in the layer */
+    uint8_t level[PSYNTH_SLOTS];   /* 0-100 */
+} psynth_rack_t;
+
+psynth_rack_t *psynth_rack(void);
+
+/* Renders patch slot playing PSYNTH_SAMPLE_NOTE (held for a second, then
+   released and its effects rung out, up to 5 s) into sample slot sample;
+   it plays as style PSYNTH_SLOTS + sample. Runs in the calling task, with
+   effects of its own, so the patch keeps playing meanwhile. False when
+   there is no memory. */
+bool psynth_render_sample(int slot, int sample);
+
+/* A sample slot's length in seconds, 0 when empty, and its name. */
+float psynth_sample_seconds(int sample);
+const char *psynth_sample_name(int sample);
 
 /* Builds the wavetables (in PSRAM), loads the presets (SUPERSAW, REESE,
    PLUCK, WOBBLE) and hands the engine to Keyboard's synth. Call after

@@ -8,7 +8,8 @@
                  MENU is the keys' settings menu)
      strip       where the speaker is in the loop
      the grid    14 pitches by up to 2 bars; a key column on the left
-     row 11      OCT- OCT+  <  1-2/4  >  DEL  UNDO
+     row 11      OC- OC+  1-2/4  INST  DEL  UNDO   (tap the bars to page;
+                 INST picks the style new notes are drawn in, samples too)
 
    The key column is labelled and plays, while held, in the style the keys
    screen has selected, as new notes do.
@@ -86,12 +87,11 @@ static const span_t SNAP_SPAN = DK_SCREEN_SPAN;
 static const span_t SWITCH_SPAN = DK_SWITCH_SPAN;
 static const span_t MENU_SPAN = DK_MENU_SPAN;
 
-static const span_t OCT_DOWN_SPAN = {0, 4};
-static const span_t OCT_UP_SPAN = {4, 4};
-static const span_t PAGE_DOWN_SPAN = {8, 2};
-static const span_t PAGE_SPAN = {10, 5};
-static const span_t PAGE_UP_SPAN = {15, 2};
-static const span_t DEL_SPAN = {17, 4};
+static const span_t OCT_DOWN_SPAN = {0, 3};
+static const span_t OCT_UP_SPAN = {3, 3};
+static const span_t PAGE_SPAN = {6, 5};  /* tap for the next bars */
+static const span_t INST_SPAN = {11, 8}; /* the style new notes use */
+static const span_t DEL_SPAN = {19, 3};
 static const span_t UNDO_SPAN = {22, 4};
 
 /* Snap steps in ticks: a quarter, an eighth, a 16th, a 32nd, or off. */
@@ -343,13 +343,11 @@ static void draw_tools(const looper_state_t *state)
     clear_row(&row);
     bool can_down = bottom_note > LOWEST_NOTE;
     bool can_up = bottom_note + ROWS - 1 < HIGHEST_NOTE;
-    put_span(&row, OCT_DOWN_SPAN, "OCT-", can_down ? CYD_COLOR_WHITE : CYD_COLOR_GRAY,
+    put_span(&row, OCT_DOWN_SPAN, "OC-", can_down ? CYD_COLOR_WHITE : CYD_COLOR_GRAY,
              can_down ? CYD_COLOR_BUTTON : CYD_COLOR_BUTTON_DISABLED);
-    put_span(&row, OCT_UP_SPAN, "OCT+", can_up ? CYD_COLOR_WHITE : CYD_COLOR_GRAY,
+    put_span(&row, OCT_UP_SPAN, "OC+", can_up ? CYD_COLOR_WHITE : CYD_COLOR_GRAY,
              can_up ? CYD_COLOR_BUTTON : CYD_COLOR_BUTTON_DISABLED);
     bool pages = state->bars > VIEW_BARS_MAX;
-    put_span(&row, PAGE_DOWN_SPAN, "<", pages ? CYD_COLOR_WHITE : CYD_COLOR_GRAY,
-             pages ? CYD_COLOR_BUTTON : CYD_COLOR_BUTTON_DISABLED);
     char page[16];
     if (view_bars(state) > 1) {
         snprintf(page, sizeof(page), "%d-%d/%u", first_bar + 1, first_bar + view_bars(state),
@@ -357,9 +355,11 @@ static void draw_tools(const looper_state_t *state)
     } else {
         snprintf(page, sizeof(page), "%d/%u", first_bar + 1, state->bars);
     }
-    put_span(&row, PAGE_SPAN, page, CYD_COLOR_YELLOW, CYD_COLOR_BLACK);
-    put_span(&row, PAGE_UP_SPAN, ">", pages ? CYD_COLOR_WHITE : CYD_COLOR_GRAY,
-             pages ? CYD_COLOR_BUTTON : CYD_COLOR_BUTTON_DISABLED);
+    put_span(&row, PAGE_SPAN, page, pages ? CYD_COLOR_BLACK : CYD_COLOR_YELLOW,
+             pages ? CYD_COLOR_YELLOW : CYD_COLOR_BLACK);
+    int instrument = keys_current_instrument();
+    put_span(&row, INST_SPAN, synth_style_name(instrument), CYD_COLOR_BLACK,
+             voice_color(instrument));
     bool can_delete = selected_count > 0;
     put_span(&row, DEL_SPAN, "DEL", can_delete ? CYD_COLOR_WHITE : CYD_COLOR_GRAY,
              can_delete ? CYD_COLOR_RED : CYD_COLOR_BUTTON_DISABLED);
@@ -718,10 +718,7 @@ static void tap_tools(int column, const looper_state_t *state)
     } else if (in_span(OCT_UP_SPAN, column)) {
         int top = HIGHEST_NOTE - (ROWS - 1);
         bottom_note = bottom_note + 12 > top ? top : bottom_note + 12;
-    } else if (state->bars > VIEW_BARS_MAX && in_span(PAGE_DOWN_SPAN, column)) {
-        first_bar = first_bar - VIEW_BARS_MAX < 0 ? state->bars - VIEW_BARS_MAX
-                                                  : first_bar - VIEW_BARS_MAX;
-    } else if (state->bars > VIEW_BARS_MAX && in_span(PAGE_UP_SPAN, column)) {
+    } else if (state->bars > VIEW_BARS_MAX && in_span(PAGE_SPAN, column)) {
         first_bar = first_bar + VIEW_BARS_MAX >= state->bars ? 0 : first_bar + VIEW_BARS_MAX;
     } else if (in_span(DEL_SPAN, column) && selected_count > 0) {
         for (int i = 0; i < selected_count; ++i) {
@@ -731,6 +728,90 @@ static void tap_tools(int column, const looper_state_t *state)
         grid_dirty = true;
     } else if (in_span(UNDO_SPAN, column) && state->notes > 0) {
         keys_undo();
+    }
+}
+
+/* ---- Style picker -------------------------------------------------------------- */
+
+/* Every style of every voice (the patches and samples too), two columns of
+   ten a page; tapping one makes it the keys' style, which new notes use. */
+#define PICK_ROWS 10
+#define PICK_PER_PAGE (2 * PICK_ROWS)
+static const span_t PICK_TITLE_SPAN = {0, 22};
+static const span_t PICK_BACK_SPAN = {22, 4};
+static const span_t PICK_PREV_SPAN = {0, 4};
+static const span_t PICK_PAGE_SPAN = {4, 18};
+static const span_t PICK_NEXT_SPAN = {22, 4};
+
+static void draw_picker(int pick_page)
+{
+    int count = synth_instrument_count();
+    int pages = (count + PICK_PER_PAGE - 1) / PICK_PER_PAGE;
+    int current = keys_current_instrument();
+    row_t row;
+    clear_row(&row);
+    put_span(&row, PICK_TITLE_SPAN, "STYLE FOR NEW NOTES", CYD_COLOR_BLACK, CYD_COLOR_YELLOW);
+    put_span(&row, PICK_BACK_SPAN, "BACK", CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
+    ESP_ERROR_CHECK(cyd_draw_cells(0, row.text, row.fg, row.bg));
+    for (int r = 0; r < PICK_ROWS; ++r) {
+        clear_row(&row);
+        for (int c = 0; c < 2; ++c) {
+            int i = pick_page * PICK_PER_PAGE + c * PICK_ROWS + r;
+            if (i >= count) {
+                continue;
+            }
+            span_t span = {c * 13, 12};
+            bool chosen = i == current;
+            put_span(&row, span, synth_style_name(i), chosen ? CYD_COLOR_WHITE : CYD_COLOR_BLACK,
+                     chosen ? CYD_COLOR_BLACK : voice_color(i));
+        }
+        ESP_ERROR_CHECK(cyd_draw_cells(1 + r, row.text, row.fg, row.bg));
+    }
+    clear_row(&row);
+    char label[24];
+    snprintf(label, sizeof(label), "PAGE %d OF %d", pick_page + 1, pages);
+    put_span(&row, PICK_PREV_SPAN, "<", CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
+    put_span(&row, PICK_PAGE_SPAN, label, CYD_COLOR_YELLOW, CYD_COLOR_BLACK);
+    put_span(&row, PICK_NEXT_SPAN, ">", CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
+    ESP_ERROR_CHECK(cyd_draw_cells(TOOL_ROW, row.text, row.fg, row.bg));
+}
+
+static void run_picker(QueueHandle_t touch_queue)
+{
+    int count = synth_instrument_count();
+    int pages = (count + PICK_PER_PAGE - 1) / PICK_PER_PAGE;
+    int pick_page = keys_current_instrument() / PICK_PER_PAGE;
+    ESP_ERROR_CHECK(cyd_fill_rect(0, 0, CYD_LCD_WIDTH, CYD_LCD_HEIGHT, CYD_COLOR_BLACK));
+    draw_picker(pick_page);
+    xQueueReset(touch_queue);
+    while (true) {
+        cyd_touch_point_t point;
+        if (xQueueReceive(touch_queue, &point, pdMS_TO_TICKS(50)) != pdTRUE) {
+            continue;
+        }
+        int row = point.y / FH;
+        int column = point.x / FW;
+        if (row == 0 && in_span(PICK_BACK_SPAN, column)) {
+            return;
+        }
+        if (row == TOOL_ROW) {
+            if (in_span(PICK_PREV_SPAN, column)) {
+                pick_page = (pick_page + pages - 1) % pages;
+            } else if (in_span(PICK_NEXT_SPAN, column)) {
+                pick_page = (pick_page + 1) % pages;
+            }
+            ESP_ERROR_CHECK(cyd_fill_rect(0, FH, CYD_LCD_WIDTH, PICK_ROWS * FH, CYD_COLOR_BLACK));
+            draw_picker(pick_page);
+            continue;
+        }
+        if (row >= 1 && row <= PICK_ROWS) {
+            int c = column >= 13 ? 1 : 0;
+            int i = pick_page * PICK_PER_PAGE + c * PICK_ROWS + (row - 1);
+            if (i < count) {
+                keys_select_instrument(i);
+                return;
+            }
+        }
     }
 }
 
@@ -812,6 +893,11 @@ void roll_screen(QueueHandle_t touch_queue)
                     return; /* on to the SYNTH screen */
                 }
                 tap_header(column, &state);
+            } else if (row == TOOL_ROW && in_span(INST_SPAN, column)) {
+                run_picker(touch_queue);
+                full_redraw();
+                xQueueReset(touch_queue);
+                break;
             } else if (row == TOOL_ROW) {
                 tap_tools(column, &state);
             } else if (point.y >= GRID_Y && point.y < GRID_BOTTOM && point.x < GRID_X) {
