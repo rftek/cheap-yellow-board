@@ -8,8 +8,9 @@
    The engines are the apps' own: apps/drumloop/main (engine, kits, export,
    SD card) and apps/keyboard/main (synth, looper) are compiled in from
    there. dk_audio.c runs both in the audio task; drums_ui.c and keys_ui.c
-   are the two screens, adapted from the apps' ui.c, and roll_ui.c is the
-   Piano Roll, which edits the keyboard loop. */
+   are the two screens, adapted from the apps' ui.c, roll_ui.c is the
+   Piano Roll, which edits the keyboard loop, and synth_ui.c edits the
+   patch synth (psynth.c), whose patches the keys play as PATCH styles. */
 
 #include "cyd_display.h"
 #include "dk_audio.h"
@@ -42,8 +43,12 @@ static void ui_task(void *argument)
             keys_screen(touch_queue);
             break;
         case DK_ROLL:
-            dk_next_screen = DK_KEYS;
+            dk_next_screen = DK_SYNTH;
             roll_screen(touch_queue);
+            break;
+        case DK_SYNTH:
+            dk_next_screen = DK_KEYS;
+            synth_screen(touch_queue);
             break;
         default:
             dk_next_screen = DK_ROLL;

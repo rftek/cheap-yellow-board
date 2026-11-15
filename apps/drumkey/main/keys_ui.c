@@ -934,7 +934,9 @@ static int tone_instrument = -1;
 static void tap_sound(int column, const looper_state_t *state)
 {
     if (in_span(VOICE_SPAN, column)) {
-        voice_kind = (voice_kind + 1) % VOICE_KINDS;
+        do {
+            voice_kind = (voice_kind + 1) % VOICE_KINDS;
+        } while (synth_style_count(voice_kind) == 0); /* PATCH, with no engine */
         instrument = synth_instrument(voice_kind, styles[voice_kind]);
         show_style();
     } else if (in_span(STYLE_SPAN, column)) {
@@ -1163,6 +1165,7 @@ static void setup(void)
     voice_colors[VOICE_PLUCK] = cyd_rgb(240, 210, 40);
     voice_colors[VOICE_BELL] = cyd_rgb(40, 210, 230);
     voice_colors[VOICE_CHIP] = cyd_rgb(110, 140, 255);
+    voice_colors[VOICE_PATCH] = cyd_rgb(255, 90, 150);
     instrument = synth_instrument(voice_kind, styles[voice_kind]);
     loop_white = cyd_rgb(150, 200, 255);
     loop_black = cyd_rgb(50, 110, 200);
