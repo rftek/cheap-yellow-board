@@ -2,18 +2,27 @@
 
 For each folder in apps/, it takes the release tagged with the folder name
 and lists one asset per chip target: firmware.bin is the esp32 image and
-firmware-<target>.bin the image for any other target. An asset's version is
-its updated_at time, which is what the launcher saves for a downloaded slot.
+firmware-<target>.bin the image for any other target. Each image has:
+- "version": the asset's updated_at time, which changes with every upload.
+  The launcher saves it for a downloaded slot to tell whether a newer build
+  is out, so it stays as it was for launchers already in use.
+- "app_version": the app's MAJOR.MINOR version (apps/<name>/version.txt),
+  read from the asset's label "<file> v<version>", which the workflow sets
+  from the version stored in the image. Absent for images uploaded before
+  versions existed.
 
 Usage: GH_TOKEN=... GITHUB_REPOSITORY=owner/repo python tools/make_catalog.py OUT
 """
 
 import json
 import os
+import re
 import sys
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+
+LABEL_VERSION = re.compile(r"\sv(\d+\.\d+)$")
 
 
 def releases(repository, token):
@@ -61,6 +70,9 @@ def main():
                     "size": asset["size"],
                     "version": asset["updated_at"],
                 }
+                label = LABEL_VERSION.search(asset.get("label") or "")
+                if label:
+                    assets[target]["app_version"] = label[1]
         for target in targets_file.read_text().split():
             if target not in assets:
                 print(f"::warning::{folder.name} has no {target} image yet")

@@ -32,3 +32,11 @@ The first build downloads `espressif/mdns` through the ESP-IDF component manager
 - **Over USB into a launcher slot**: see the [launcher README](../../launcher/README.md). The board is on COM13. Set the UART DIP switch first.
 
 Monitor with `& $pio device monitor --port COM13 --baud 115200`.
+
+## Changelog
+
+The version is in [`version.txt`](version.txt) and in the image's app description, where the launcher reads it. Every change to this app bumps it and adds an entry here, newest first; the [root README](../../README.md#versions) explains when to bump MAJOR or MINOR.
+
+### 1.0 (2026-11-08)
+
+- First numbered version. Searches the network for AirPlay speakers over mDNS and lists them, saying why any can't be used, then plays a C-major test tone through the `airplay_sender` component, with stop, volume and disconnect buttons. ESP32-S3 board only.

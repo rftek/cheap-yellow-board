@@ -34,3 +34,11 @@ The app binary is `%USERPROFILE%\.platformio\cyd-touch-cal-build\esp32\firmware.
 
 Display pins: MOSI GPIO13, SCLK GPIO14, CS GPIO15, D/C GPIO2, backlight GPIO21, PWM-dimmed to the brightness saved by the launcher. The panel fills a drawing window column by column, so pixel data is sent column-major.
 Touch pins: MOSI GPIO32, MISO GPIO39, SCLK GPIO25, CS GPIO33, IRQ GPIO36 (XPT2046, 12-bit, differential mode).
+
+## Changelog
+
+The version is in [`version.txt`](version.txt) and in the image's app description, where the launcher reads it. Every change to this app bumps it and adds an entry here, newest first; the [root README](../../README.md#versions) explains when to bump MAJOR or MINOR.
+
+### 1.0 (2026-11-08)
+
+- First numbered version. Four-corner affine touch calibration with a center check, saved in NVS (`cyd_config/touch_cal`) for every app, then a test screen that draws a dot at each tap.

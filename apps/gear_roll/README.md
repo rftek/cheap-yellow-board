@@ -45,3 +45,11 @@ The app binary is `%USERPROFILE%\.platformio\cyd-gear-roll-build\esp32\firmware.
 
 Display pins: MOSI GPIO13, SCLK GPIO14, CS GPIO15, D/C GPIO2, backlight GPIO21, PWM-dimmed to the brightness saved by the launcher.
 Touch pins: MOSI GPIO32, MISO GPIO39, SCLK GPIO25, CS GPIO33, IRQ GPIO36 (XPT2046).
+
+## Changelog
+
+The version is in [`version.txt`](version.txt) and in the image's app description, where the launcher reads it. Every change to this app bumps it and adds an entry here, newest first; the [root README](../../README.md#versions) explains when to bump MAJOR or MINOR.
+
+### 1.0 (2026-11-08)
+
+- First numbered version. An LVGL demo of two random spur gears that mesh and roll together. Tap a gear to re-cut it with a new number of teeth.
