@@ -11,7 +11,7 @@ Both screens have the same header:
 ```
  PLAY REC - 120 + [1/4] ROLL MENU     drums screen
  PLAY REC - 120 + [MET] DRUM MENU     keys screen
- PLAY REC - 120 + [1/16] KEYS         Piano Roll
+ PLAY REC - 120 + [1/16] KEYS MENU    Piano Roll
 ```
 
 | Control | What it does |
@@ -33,7 +33,7 @@ The drum loop runs 1 to 16 bars and the keyboard loop 1 to 8. Both start togethe
 The screen button in the header goes round **KEYS → DRUM → ROLL**: tap **ROLL** on the drums screen to open the Piano Roll (or tap the keys screen's loop row). It works on an empty loop too, so you can draw a part from scratch. It is the keyboard loop drawn as a grid of pitch against time, in the spirit of LMMS's piano roll. Recorded takes show up there, and drawn notes play on the keys' loop in time with the drums.
 
 ```
- PLAY REC - 120 + 1/16 KEYS          header: SNAP, and on to the KEYS screen
+ PLAY REC - 120 + 1/16 KEYS MENU     header: SNAP, on to the KEYS screen, the keys' MENU
  ==========|---------------------     where the speaker is in the loop
  C4 |  ##      ####        |   ##     14 pitches by 2 bars; key column on the left
     |      ##          ##  |
@@ -53,13 +53,14 @@ With one finger on the grid:
 |---|---|
 | **SNAP** (`1/16`) | The grid notes snap to: 1/4, 1/8, 1/16, 1/32 or OFF. |
 | **KEYS** | On to the keys screen. |
+| **MENU** | The keys screen's settings menu: loop length, quantize, clear loop, Wi-Fi, speaker, volume and AirPlay delay. BACK returns to the roll. |
 | **OCT- / OCT+** | Moves the 14 pitches shown by an octave, from C1 up to C8. |
 | **< 1-2/4 >** | The bars shown. Loops longer than 2 bars page 2 at a time. |
 | **DEL** | Deletes the selected notes. |
 | **UNDO** | Removes the last take. Each drawn note is a take of its own, so it removes the last note drawn. Moves and deletes aren't undone. |
 | **PLAY / REC / tempo** | As on the other screens. REC records the keys while you watch the notes appear. |
 
-Notes of every style are shown in their voice's color. The loop's length and quantize are set in the keys screen's MENU.
+Notes of every style are shown in their voice's color. The loop's length and quantize are in MENU, here or on the keys screen.
 
 ## Latency and load
 

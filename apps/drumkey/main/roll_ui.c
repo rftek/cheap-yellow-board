@@ -4,7 +4,8 @@
    KEYS -> DRUM -> ROLL) or the keys screen's loop row; it works on an
    empty loop too, so notes can be drawn from scratch.
 
-     row 0       PLAY REC - 120 + SNAP KEYS   (the shared header)
+     row 0       PLAY REC - 120 + SNAP KEYS MENU   (the shared header;
+                 MENU is the keys' settings menu)
      strip       where the speaker is in the loop
      the grid    14 pitches by up to 2 bars; a key column on the left
      row 11      OCT- OCT+  <  1-2/4  >  DEL  UNDO
@@ -80,6 +81,7 @@ static const span_t BPM_SPAN = DK_BPM_SPAN;
 static const span_t BPM_UP_SPAN = DK_BPM_UP_SPAN;
 static const span_t SNAP_SPAN = DK_SCREEN_SPAN;
 static const span_t SWITCH_SPAN = DK_SWITCH_SPAN;
+static const span_t MENU_SPAN = DK_MENU_SPAN;
 
 static const span_t OCT_DOWN_SPAN = {0, 4};
 static const span_t OCT_UP_SPAN = {4, 4};
@@ -120,6 +122,8 @@ static int drawn_head = -2;
 static row_t drawn_header;
 static row_t drawn_tools;
 static bool grid_dirty;
+/* The speaker dropped the session: MENU is red until the menu is opened. */
+static bool speaker_lost;
 
 /* The selected notes, by start, pitch and style (which identify a note
    to the looper). A selected note that has since gone is just skipped. */
@@ -310,6 +314,8 @@ static void draw_header(const looper_state_t *state)
     put_span(&row, BPM_UP_SPAN, "+", CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
     put_span(&row, SNAP_SPAN, snap_names[snap_index], CYD_COLOR_BLACK, CYD_COLOR_CYAN);
     put_span(&row, SWITCH_SPAN, "KEYS", CYD_COLOR_WHITE, DK_KEYS_COLOR);
+    put_span(&row, MENU_SPAN, "MENU", CYD_COLOR_WHITE,
+             speaker_lost ? CYD_COLOR_RED : CYD_COLOR_BUTTON);
     if (memcmp(&row, &drawn_header, sizeof(row)) != 0) {
         ESP_ERROR_CHECK(cyd_draw_cells(0, row.text, row.fg, row.bg));
         dk_header_gaps();
@@ -731,6 +737,9 @@ void roll_screen(QueueHandle_t touch_queue)
     cyd_touch_set_fast(true); /* drags follow every 5 ms */
     drag.mode = DRAG_NONE;
     while (true) {
+        if (music_out_check_lost()) {
+            speaker_lost = true;
+        }
         looper_state_t state;
         looper_get_state(&state);
         if (first_bar >= state.bars || first_bar % VIEW_BARS_MAX != 0) {
@@ -743,6 +752,22 @@ void roll_screen(QueueHandle_t touch_queue)
             int row = point.y / FH;
             int column = point.x / FW;
             if (row == 0) {
+                if (in_span(MENU_SPAN, column)) {
+                    /* The keys' menu: loop length, quantize, clear, speaker. */
+                    end_audition(true);
+                    if (key_note >= 0) {
+                        keys_note_off(key_note, key_instrument);
+                        key_note = -1;
+                    }
+                    drag.mode = DRAG_NONE;
+                    speaker_lost = false;
+                    cyd_touch_set_fast(false);
+                    keys_menu(touch_queue);
+                    cyd_touch_set_fast(true);
+                    full_redraw();
+                    xQueueReset(touch_queue);
+                    break;
+                }
                 if (in_span(SWITCH_SPAN, column)) {
                     end_audition(true);
                     if (key_note >= 0) {

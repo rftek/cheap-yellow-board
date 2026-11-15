@@ -1258,3 +1258,9 @@ int keys_current_instrument(void)
 {
     return instrument;
 }
+
+/* The keys' settings menu, which the Piano Roll's MENU opens too. */
+void keys_menu(QueueHandle_t touch_queue)
+{
+    run_menu(touch_queue);
+}
