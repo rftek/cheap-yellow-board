@@ -15,7 +15,6 @@
 
 #include <stdatomic.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #include "dk_audio.h"
@@ -23,6 +22,7 @@
 #include "export.h"
 #include "music_out.h"
 #include "sdcard.h"
+#include "tone_editor.h"
 
 /* Screen lines are cut to the display's width on purpose. */
 #pragma GCC diagnostic ignored "-Wformat-truncation"
@@ -921,302 +921,68 @@ static void flash_hit_pads(void)
 
 /* ---- Tone editor ------------------------------------------------------ */
 
-/* One track's tone, with the pads still live below it to hear it:
+/* A track's tone, in the music apps' shared editor (tone_editor.h), with
+   the pads live below it and the loop playing on. */
 
-     row 0       < BD TONE >   BACK
-     row 1       FILTER  OFF  LP  HP  BP
-     rows 2-7    sliders: cutoff, resonance, low, mid, high, level
-     row 8       FLAT (resets the track's tone)
-     rows 9-11   the pads
-
-   A slider follows a finger dragged along it, so a filter can be swept
-   while the loop plays. */
-
-#define TONE_ROW_HEADER 0
-#define TONE_ROW_FILTER 1
-#define TONE_ROW_CUTOFF 2
-#define TONE_ROW_RESONANCE 3
-#define TONE_ROW_LOW 4
-#define TONE_ROW_MID 5
-#define TONE_ROW_HIGH 6
-#define TONE_ROW_LEVEL 7
-#define TONE_ROW_FLAT 8
-#define TONE_SLIDERS 6
-#define SLIDER_LABEL_COLUMNS 8
-#define SLIDER_X (SLIDER_LABEL_COLUMNS * FW + 8)
-#define SLIDER_WIDTH (CYD_LCD_WIDTH - SLIDER_X - 12)
-
-static const span_t TONE_PREV_SPAN = {0, 3};
-static const span_t TONE_TITLE_SPAN = {3, 16};
-static const span_t TONE_NEXT_SPAN = {19, 3};
-static const span_t TONE_BACK_SPAN = {22, 4};
-static const span_t TONE_FILTER_LABEL_SPAN = {0, 6};
-static const span_t TONE_FILTER_SPANS[TONE_FILTERS] = {{6, 5}, {11, 5}, {16, 5}, {21, 5}};
-static const char *const TONE_FILTER_NAMES[TONE_FILTERS] = {"OFF", "LP", "HP", "BP"};
-static const span_t TONE_FLAT_SPAN = {0, 8};
-
-typedef struct {
-    int row;
-    int min;
-    int max;
-    bool bipolar; /* drawn from the middle, as a boost or a cut */
-} slider_t;
-
-static const slider_t sliders[TONE_SLIDERS] = {
-    {TONE_ROW_CUTOFF, 0, TONE_CUTOFF_MAX, false},
-    {TONE_ROW_RESONANCE, 0, TONE_RESONANCE_MAX, false},
-    {TONE_ROW_LOW, TONE_EQ_MIN, TONE_EQ_MAX, true},
-    {TONE_ROW_MID, TONE_EQ_MIN, TONE_EQ_MAX, true},
-    {TONE_ROW_HIGH, TONE_EQ_MIN, TONE_EQ_MAX, true},
-    {TONE_ROW_LEVEL, TONE_LEVEL_MIN, TONE_LEVEL_MAX, true},
-};
-
-static int slider_value(const drum_tone_t *tone, int index)
+static tone_settings_t *track_tone(int track, void *context)
 {
-    switch (index) {
-    case 0:
-        return tone->cutoff;
-    case 1:
-        return tone->resonance;
-    case 2:
-        return tone->low;
-    case 3:
-        return tone->mid;
-    case 4:
-        return tone->high;
-    default:
-        return tone->level;
-    }
+    (void)context;
+    return &pattern->tone[track];
 }
 
-static void set_slider_value(drum_tone_t *tone, int index, int value)
+static const char *track_name(int track, void *context)
 {
-    const slider_t *slider = &sliders[index];
-    value = value < slider->min ? slider->min : value > slider->max ? slider->max : value;
-    switch (index) {
-    case 0:
-        tone->cutoff = (uint8_t)value;
-        break;
-    case 1:
-        tone->resonance = (uint8_t)value;
-        break;
-    case 2:
-        tone->low = (int8_t)value;
-        break;
-    case 3:
-        tone->mid = (int8_t)value;
-        break;
-    case 4:
-        tone->high = (int8_t)value;
-        break;
-    default:
-        tone->level = (int8_t)value;
-        break;
-    }
+    (void)context;
+    return kit_sound(pattern->kit, track)->label;
 }
 
-static void slider_label(const drum_tone_t *tone, int index, char *label, size_t size)
+static uint16_t track_color(int track, void *context)
 {
-    int value = slider_value(tone, index);
-    if (index == 0) {
-        float hz = tone_cutoff_hz(value);
-        if (hz < 1000.0f) {
-            snprintf(label, size, "CUT %4.0f", (double)hz);
-        } else if (hz < 10000.0f) {
-            snprintf(label, size, "CUT %3.1fk", (double)(hz / 1000.0f));
-        } else {
-            snprintf(label, size, "CUT %3.0fk", (double)(hz / 1000.0f));
-        }
-    } else if (index == 1) {
-        snprintf(label, size, "RES %4.1f", (double)tone_q(value));
-    } else {
-        static const char *const names[] = {"LOW", "MID", "HIGH", "LVL"};
-        snprintf(label, size, "%-4s%+4d", names[index - 2], value);
-    }
+    (void)context;
+    return track_colors[track];
 }
 
-/* The slider's value for a finger at x. Bipolar sliders snap to 0 near
-   the middle, so flat is easy to find. */
-static int slider_at(int index, int x)
+static void tone_draw_pads(int track, void *context)
 {
-    const slider_t *slider = &sliders[index];
-    int span = slider->max - slider->min;
-    int value = slider->min + ((x - SLIDER_X) * span + SLIDER_WIDTH / 2) / SLIDER_WIDTH;
-    if (slider->bipolar && value != 0 && abs(value) <= span / 24) {
-        value = 0;
-    }
-    return value;
+    (void)track;
+    (void)context;
+    drawn_flash = -1; /* refresh_pads draws them */
 }
 
-static void draw_slider(int track, int index, bool enabled)
+static void tone_tick(int track, void *context)
 {
-    const slider_t *slider = &sliders[index];
-    const drum_tone_t *tone = &pattern->tone[track];
-    char text[COLUMNS + 1];
-    uint16_t fg[COLUMNS];
-    uint16_t bg[COLUMNS];
-    memset(text, ' ', COLUMNS);
-    text[COLUMNS] = '\0';
-    for (int column = 0; column < COLUMNS; ++column) {
-        fg[column] = enabled ? CYD_COLOR_WHITE : CYD_COLOR_GRAY;
-        bg[column] = CYD_COLOR_BLACK;
+    (void)track;
+    (void)context;
+    if (music_out_check_lost()) {
+        speaker_lost_notice = true;
     }
-    char label[SLIDER_LABEL_COLUMNS + 4];
-    slider_label(tone, index, label, sizeof(label));
-    memcpy(text, label, strnlen(label, SLIDER_LABEL_COLUMNS));
-    ESP_ERROR_CHECK(cyd_draw_cells(slider->row, text, fg, bg));
-
-    int y = slider->row * FH + FH / 4;
-    int height = FH / 2;
-    int span = slider->max - slider->min;
-    int value = slider_value(tone, index);
-    int position = SLIDER_X + (value - slider->min) * SLIDER_WIDTH / span;
-    int zero = slider->bipolar ? SLIDER_X + (0 - slider->min) * SLIDER_WIDTH / span : SLIDER_X;
-    uint16_t color = enabled ? track_colors[track] : COLOR_MUTED;
-    ESP_ERROR_CHECK(cyd_fill_rect(SLIDER_X, y, SLIDER_WIDTH, height, COLOR_OFF));
-    int from = position < zero ? position : zero;
-    int to = position < zero ? zero : position;
-    if (to > from) {
-        ESP_ERROR_CHECK(cyd_fill_rect(from, y, to - from, height, color));
-    }
-    if (slider->bipolar) {
-        ESP_ERROR_CHECK(cyd_fill_rect(zero - 1, y - 4, 2, height + 8, COLOR_HEAD));
-    }
-    int thumb = position - 3 < SLIDER_X ? SLIDER_X : position - 3;
-    if (thumb + 6 > SLIDER_X + SLIDER_WIDTH) {
-        thumb = SLIDER_X + SLIDER_WIDTH - 6;
-    }
-    ESP_ERROR_CHECK(cyd_fill_rect(thumb, y - 6, 6, height + 12,
-                                  enabled ? CYD_COLOR_WHITE : CYD_COLOR_GRAY));
+    flash_hit_pads();
+    refresh_pads();
+    update_playhead();
 }
 
-static void draw_tone_buttons(int track)
+static void tone_tap(const cyd_touch_point_t *point, int track, void *context)
 {
-    const drum_tone_t *tone = &pattern->tone[track];
-    char text[COLUMNS + 1];
-    uint16_t fg[COLUMNS];
-    uint16_t bg[COLUMNS];
-
-    memset(text, ' ', COLUMNS);
-    text[COLUMNS] = '\0';
-    for (int column = 0; column < COLUMNS; ++column) {
-        fg[column] = CYD_COLOR_WHITE;
-        bg[column] = CYD_COLOR_BLACK;
-    }
-    char title[24];
-    snprintf(title, sizeof(title), "%s TONE", kit_sound(pattern->kit, track)->label);
-    put_span(text, fg, bg, TONE_PREV_SPAN, "<", CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
-    put_span(text, fg, bg, TONE_TITLE_SPAN, title, CYD_COLOR_BLACK, track_colors[track]);
-    put_span(text, fg, bg, TONE_NEXT_SPAN, ">", CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
-    put_span(text, fg, bg, TONE_BACK_SPAN, "BACK", CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
-    ESP_ERROR_CHECK(cyd_draw_cells(TONE_ROW_HEADER, text, fg, bg));
-
-    memset(text, ' ', COLUMNS);
-    for (int column = 0; column < COLUMNS; ++column) {
-        fg[column] = CYD_COLOR_WHITE;
-        bg[column] = CYD_COLOR_BLACK;
-    }
-    put_span(text, fg, bg, TONE_FILTER_LABEL_SPAN, "FILTER", CYD_COLOR_WHITE, CYD_COLOR_BLACK);
-    for (int filter = 0; filter < TONE_FILTERS; ++filter) {
-        bool on = tone->filter == filter;
-        put_span(text, fg, bg, TONE_FILTER_SPANS[filter], TONE_FILTER_NAMES[filter],
-                 on ? CYD_COLOR_BLACK : CYD_COLOR_WHITE, on ? CYD_COLOR_CYAN : CYD_COLOR_BUTTON);
-    }
-    ESP_ERROR_CHECK(cyd_draw_cells(TONE_ROW_FILTER, text, fg, bg));
-    /* Gaps between the side-by-side filter buttons. */
-    for (int filter = 1; filter < TONE_FILTERS; ++filter) {
-        ESP_ERROR_CHECK(cyd_fill_rect(TONE_FILTER_SPANS[filter].column * FW - 1,
-                                      TONE_ROW_FILTER * FH, 2, FH, CYD_COLOR_BLACK));
-    }
-
-    memset(text, ' ', COLUMNS);
-    for (int column = 0; column < COLUMNS; ++column) {
-        fg[column] = CYD_COLOR_GRAY;
-        bg[column] = CYD_COLOR_BLACK;
-    }
-    put_span(text, fg, bg, TONE_FLAT_SPAN, "FLAT", CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
-    memcpy(text + 9, "Drag a slider; pads play", 24 < COLUMNS - 9 ? 24 : COLUMNS - 9);
-    ESP_ERROR_CHECK(cyd_draw_cells(TONE_ROW_FLAT, text, fg, bg));
+    (void)track;
+    (void)context;
+    play_pad(point->x); /* only if it came before pads_live */
 }
 
 /* The tone editor for tone_track, until BACK. */
 static void run_tone(QueueHandle_t touch_queue)
 {
+    static const tone_editor_t editor = {
+        .count = DRUM_TRACKS,
+        .settings = track_tone,
+        .name = track_name,
+        .color = track_color,
+        .draw_bottom = tone_draw_pads,
+        .tick = tone_tick,
+        .tap = tone_tap,
+    };
     int track = tone_track;
     tone_track = -1;
-    drum_tone_t drawn_tone = {0};
-    int drawn_track = -1;
-    bool drawn_filter_on = false;
-    invalidate();
-    ESP_ERROR_CHECK(cyd_fill_rect(0, 0, CYD_LCD_WIDTH, CYD_LCD_HEIGHT, CYD_COLOR_BLACK));
-    xQueueReset(touch_queue);
-    while (true) {
-        if (music_out_check_lost()) {
-            speaker_lost_notice = true;
-        }
-        drum_tone_t *tone = &pattern->tone[track];
-        cyd_touch_point_t point;
-        TickType_t wait = pdMS_TO_TICKS(REFRESH_MS);
-        while (xQueueReceive(touch_queue, &point, wait) == pdTRUE) {
-            wait = 0;
-            int row = point.y / FH;
-            int column = point.x / FW;
-            if (point.y >= PAD_TOP) {
-                play_pad(point.x); /* only if it came before pads_live */
-            } else if (row == TONE_ROW_HEADER) {
-                if (in_span(TONE_BACK_SPAN, column)) {
-                    return;
-                }
-                if (in_span(TONE_PREV_SPAN, column)) {
-                    track = (track + DRUM_TRACKS - 1) % DRUM_TRACKS;
-                } else if (in_span(TONE_NEXT_SPAN, column)) {
-                    track = (track + 1) % DRUM_TRACKS;
-                }
-                tone = &pattern->tone[track];
-            } else if (row == TONE_ROW_FILTER) {
-                for (int filter = 0; filter < TONE_FILTERS; ++filter) {
-                    if (in_span(TONE_FILTER_SPANS[filter], column)) {
-                        if (tone->filter == TONE_FILTER_OFF && filter != TONE_FILTER_OFF &&
-                            tone->cutoff == 0 && tone->resonance == 0) {
-                            tone->cutoff = TONE_DEFAULT_CUTOFF;
-                            tone->resonance = TONE_DEFAULT_RESONANCE;
-                        }
-                        tone->filter = (uint8_t)filter;
-                    }
-                }
-            } else if (row == TONE_ROW_FLAT && in_span(TONE_FLAT_SPAN, column)) {
-                memset(tone, 0, sizeof(*tone));
-            }
-        }
-        /* Fingers on the sliders, tapped or dragged. */
-        cyd_touch_point_t held[5];
-        int count = cyd_touch_held(held, 5);
-        for (int i = 0; i < count; ++i) {
-            int row = held[i].y / FH;
-            for (int index = 0; index < TONE_SLIDERS; ++index) {
-                if (row == sliders[index].row && held[i].x >= SLIDER_X - FW) {
-                    set_slider_value(tone, index, slider_at(index, held[i].x));
-                }
-            }
-        }
-        bool filter_on = tone->filter != TONE_FILTER_OFF;
-        if (track != drawn_track || tone->filter != drawn_tone.filter) {
-            draw_tone_buttons(track);
-        }
-        for (int index = 0; index < TONE_SLIDERS; ++index) {
-            bool enabled = index >= 2 || filter_on;
-            if (track != drawn_track || filter_on != drawn_filter_on ||
-                slider_value(tone, index) != slider_value(&drawn_tone, index)) {
-                draw_slider(track, index, enabled);
-            }
-        }
-        drawn_tone = *tone;
-        drawn_track = track;
-        drawn_filter_on = filter_on;
-        flash_hit_pads();
-        refresh_pads();
-        update_playhead();
-    }
+    tone_editor_run(touch_queue, &editor, track);
 }
 
 /* The performance screen: fast multi-finger taps, pads played by on_tap. */

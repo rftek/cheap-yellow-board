@@ -1,13 +1,16 @@
 #pragma once
 
-/* Each drum track's tone: a resonant filter, a three-band EQ and a level.
-   The engine runs them on the track as it mixes, so they can be changed
-   while the loop plays (a filter sweep), and they are part of the pattern,
-   so an export has them too. */
+/* A tone for one instrument of the music apps: a resonant filter, a
+   three-band EQ and a level, run on the instrument's sound as it is mixed
+   at 44100 Hz, so they can be changed while it plays (a filter sweep).
+   DrumLoop has one per drum track, Keyboard one per style; tone_editor.h
+   is the screen that sets them. */
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+#define TONE_RATE 44100
 
 typedef enum {
     TONE_FILTER_OFF,
@@ -37,9 +40,9 @@ typedef struct {
     int8_t mid;        /* dB, a peak at 1 kHz */
     int8_t high;       /* dB, a high shelf at 6 kHz */
     int8_t level;      /* dB */
-} drum_tone_t;
+} tone_settings_t;
 
-bool tone_is_flat(const drum_tone_t *tone);
+bool tone_is_flat(const tone_settings_t *tone);
 float tone_cutoff_hz(int cutoff);
 float tone_q(int resonance);
 
@@ -52,7 +55,7 @@ typedef struct {
 
 /* One track's filters. All zero is a valid start. */
 typedef struct {
-    drum_tone_t applied; /* the settings the coefficients are for */
+    tone_settings_t applied; /* the settings the coefficients are for */
     bool valid;
     bool filter_on, low_on, mid_on, high_on;
     float gain;
@@ -61,7 +64,7 @@ typedef struct {
 
 /* Brings the coefficients up to tone; cheap when it hasn't changed. The
    filters keep their state, so a change while a sound rings doesn't click. */
-void tone_update(tone_state_t *state, const drum_tone_t *tone);
+void tone_update(tone_state_t *state, const tone_settings_t *tone);
 
 /* Runs frames samples through the filters, EQ and level, in place. */
 void tone_process(tone_state_t *state, float *samples, size_t frames);

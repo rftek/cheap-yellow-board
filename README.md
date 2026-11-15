@@ -45,6 +45,7 @@ components/cyd_display/      display, fonts, patterns and touch, shared by every
 components/cyd_gamepad/      Xbox / Bluetooth gamepad input on Bluepad32
 components/airplay_sender/   AirPlay 1 (RAOP) audio output to network speakers
 components/music_out/        Wi-Fi, speaker picker and audio task for the music apps
+components/music_tone/       per-instrument filter, EQ and level, and their editor screen
 external/bluepad32/          Bluepad32 git submodule, with BTstack nested in it
 docs/                        build environment and installation guide
 tools/ci_plan.py             picks the apps a change needs built

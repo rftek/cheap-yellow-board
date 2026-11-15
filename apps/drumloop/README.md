@@ -41,7 +41,7 @@ The grid's playhead and its bar page follow what the speaker is playing. That is
 
 ### Track tone: filter, EQ and level
 
-Hold a track's label to shape that instrument:
+Hold a track's label to shape that instrument, in the editor the music apps share ([music_tone](../../components/music_tone)):
 
 ```
  <    BD TONE    >  BACK     track (< > for the others)
@@ -141,7 +141,6 @@ The card is mounted at boot through the I/O expander's chip select, as in Wavesh
 | `main/ui.c` | performance screen and menu |
 | `main/audio.c` | the engine's side of the audio task: transport, pad hits and recording, rendered 8 ms at a time through [music_out](../../components/music_out), which also does Wi-Fi, the speaker picker and the silent clock |
 | `main/engine.c` | step sequencer (sample-accurate steps) and mixer (retrigger fades, hat choke, each track's tone, soft clipping) |
-| `main/tone.c` | each track's tone: a resonant filter, a three-band EQ and a level, as biquads |
 | `main/kit.c` | the four kits' synthesis, and kits read from the SD card |
 | `main/wav.c` | WAV reader: PCM and float, any channels and rate, to 44.1 kHz mono |
 | `main/sdcard.c` | mounts the microSD card |

@@ -177,7 +177,7 @@ static void mix(drum_engine_t *engine, int16_t *out, size_t frames)
     memset(acc, 0, frames * sizeof(float));
     for (int track = 0; track < DRUM_TRACKS; ++track) {
         drum_voice_t *voice = &engine->voices[track];
-        const drum_tone_t *tone = &engine->pattern->tone[track];
+        const tone_settings_t *tone = &engine->pattern->tone[track];
         tone_state_t *state = &engine->tones[track];
         if (tone_is_flat(tone)) {
             add_voice(voice, acc, frames); /* nothing to run it through */

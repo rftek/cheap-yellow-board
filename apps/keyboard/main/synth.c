@@ -3,6 +3,8 @@
 #include <math.h>
 #include <string.h>
 
+#include "tone.h"
+
 #define PI 3.14159265f
 #define SINE_SIZE 1024
 #define CHUNK 64              /* frames mixed at a time in float */
@@ -306,6 +308,10 @@ typedef struct {
 
 static float sine_table[SINE_SIZE + 1];
 static voice_t voices[SYNTH_VOICES];
+/* Each instrument's tone (filter, EQ, level), set from the UI, and the
+   filters running it. All zero is flat. */
+static tone_settings_t tones[INSTRUMENTS];
+static tone_state_t tone_states[INSTRUMENTS];
 static int16_t pluck_lines[SYNTH_VOICES][PLUCK_MAX];
 static uint32_t note_count;
 static bool sustain_down;
@@ -933,6 +939,14 @@ int synth_instrument_count(void)
     return INSTRUMENTS;
 }
 
+int synth_instrument_voice(int instrument)
+{
+    if (instrument < 0 || instrument >= INSTRUMENTS) {
+        return 0;
+    }
+    return instruments[instrument].voice;
+}
+
 const char *synth_style_name(int instrument)
 {
     return instrument >= 0 && instrument < INSTRUMENTS ? instruments[instrument].name : "?";
@@ -1021,6 +1035,46 @@ static inline float soft_clip(float x)
     return x * (27.0f + x * x) / (27.0f + 9.0f * x * x);
 }
 
+tone_settings_t *synth_tone(int instrument)
+{
+    if (instrument < 0 || instrument >= INSTRUMENTS) {
+        instrument = 0;
+    }
+    return &tones[instrument];
+}
+
+/* Mixes the voices of each instrument with a tone on their own and runs
+   them through it. A filter can ring on after its notes end, so it runs
+   until it is quiet. */
+static void render_toned(float *mix, int n)
+{
+    float part[CHUNK];
+    for (int instrument = 0; instrument < INSTRUMENTS; ++instrument) {
+        if (tone_is_flat(&tones[instrument])) {
+            continue;
+        }
+        tone_state_t *state = &tone_states[instrument];
+        tone_update(state, &tones[instrument]);
+        bool sounding = false;
+        for (int i = 0; i < SYNTH_VOICES; ++i) {
+            sounding |= voices[i].stage != STAGE_OFF && voices[i].instrument == instrument;
+        }
+        if (!sounding && !tone_ringing(state)) {
+            continue;
+        }
+        memset(part, 0, sizeof(float) * (size_t)n);
+        for (int i = 0; i < SYNTH_VOICES; ++i) {
+            if (voices[i].stage != STAGE_OFF && voices[i].instrument == instrument) {
+                render_voice(&voices[i], part, n);
+            }
+        }
+        tone_process(state, part, (size_t)n);
+        for (int i = 0; i < n; ++i) {
+            mix[i] += part[i];
+        }
+    }
+}
+
 void synth_render(int16_t *out, size_t frames)
 {
     float mix[CHUNK];
@@ -1028,10 +1082,11 @@ void synth_render(int16_t *out, size_t frames)
         int n = frames > CHUNK ? CHUNK : (int)frames;
         memset(mix, 0, sizeof(float) * (size_t)n);
         for (int i = 0; i < SYNTH_VOICES; ++i) {
-            if (voices[i].stage != STAGE_OFF) {
+            if (voices[i].stage != STAGE_OFF && tone_is_flat(&tones[voices[i].instrument])) {
                 render_voice(&voices[i], mix, n);
             }
         }
+        render_toned(mix, n);
         if (click.level > SILENT) {
             for (int i = 0; i < n; ++i) {
                 mix[i] += click.level * sine(click.phase) / MASTER_GAIN;

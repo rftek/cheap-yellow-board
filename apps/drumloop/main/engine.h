@@ -27,7 +27,7 @@ typedef struct {
     uint16_t bpm;
     uint8_t muted; /* bit per track */
     uint8_t kit;   /* drum_kit_t; changing it changes the sound at once */
-    drum_tone_t tone[DRUM_TRACKS]; /* each track's filter, EQ and level */
+    tone_settings_t tone[DRUM_TRACKS]; /* each track's filter, EQ and level */
 } drum_pattern_t;
 
 /* Called as each step starts, with the frame it starts at (the count of

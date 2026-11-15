@@ -3,7 +3,6 @@
 #include <math.h>
 #include <string.h>
 
-#include "kit.h" /* DRUM_RATE */
 
 #define TWO_PI (2.0f * (float)M_PI)
 #define CUTOFF_LOW_HZ 30.0f
@@ -17,7 +16,7 @@
 /* Below this the filters' state is treated as silent. */
 #define RING_FLOOR 1e-6f
 
-bool tone_is_flat(const drum_tone_t *tone)
+bool tone_is_flat(const tone_settings_t *tone)
 {
     return tone->filter == TONE_FILTER_OFF && tone->low == 0 && tone->mid == 0 &&
            tone->high == 0 && tone->level == 0;
@@ -48,7 +47,7 @@ static void set(tone_biquad_t *f, float b0, float b1, float b2, float a0, float 
 
 static void set_filter(tone_biquad_t *f, tone_filter_t type, float freq, float q)
 {
-    float w0 = TWO_PI * freq / DRUM_RATE;
+    float w0 = TWO_PI * freq / TONE_RATE;
     float cosw = cosf(w0);
     float alpha = sinf(w0) / (2.0f * q);
     switch (type) {
@@ -69,7 +68,7 @@ static void set_filter(tone_biquad_t *f, tone_filter_t type, float freq, float q
 static void set_peak(tone_biquad_t *f, float freq, float q, float db)
 {
     float a = powf(10.0f, db / 40.0f);
-    float w0 = TWO_PI * freq / DRUM_RATE;
+    float w0 = TWO_PI * freq / TONE_RATE;
     float cosw = cosf(w0);
     float alpha = sinf(w0) / (2.0f * q);
     set(f, 1.0f + alpha * a, -2.0f * cosw, 1.0f - alpha * a, 1.0f + alpha / a, -2.0f * cosw,
@@ -80,7 +79,7 @@ static void set_peak(tone_biquad_t *f, float freq, float q, float db)
 static void set_shelf(tone_biquad_t *f, bool high, float freq, float db)
 {
     float a = powf(10.0f, db / 40.0f);
-    float w0 = TWO_PI * freq / DRUM_RATE;
+    float w0 = TWO_PI * freq / TONE_RATE;
     float cosw = cosf(w0);
     float k = 2.0f * sqrtf(a) * sinf(w0) / 2.0f * sqrtf(2.0f);
     float p = a + 1.0f;
@@ -104,7 +103,7 @@ static inline float run(tone_biquad_t *f, float x)
 
 /* ---- Tracks ------------------------------------------------------------------ */
 
-void tone_update(tone_state_t *state, const drum_tone_t *tone)
+void tone_update(tone_state_t *state, const tone_settings_t *tone)
 {
     if (state->valid && memcmp(&state->applied, tone, sizeof(*tone)) == 0) {
         return;
