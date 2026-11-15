@@ -10,7 +10,7 @@ Both screens have the same header:
 
 ```
  PLAY REC - 120 + [1/4] KEYS MENU     drums screen
- PLAY REC - 120 + [MET] DRUM MENU     keys screen
+ PLAY REC - 120 + [ROLL] DRUM MENU    keys screen
 ```
 
 | Control | What it does |
@@ -19,7 +19,7 @@ Both screens have the same header:
 | **REC** | Per screen. On the drums screen, pad hits are written into the grid while the loop plays. On the keys screen, it records a keyboard take; from stop it also starts both loops, with no count-in, since the drums keep time. |
 | **- / +** | The shared tempo, 60 to 200 BPM. Both loops follow it. |
 | **1/4** (drums) | The bar page, as in DrumLoop. Past 9 bars it shows `B12` and so on. |
-| **MET** (keys) | The keyboard's metronome. |
+| **ROLL** (keys) | Opens the Piano Roll (below). It takes the place of Keyboard's metronome, since the drums keep time. |
 | **KEYS / DRUM** | Switches to the other screen at once. Sounds keep playing; keys held when you leave are lifted. |
 | **MENU** | That screen's settings, as in its own app: kits, styles, export and the drum loop length on the drums side; voices, quantize and the keyboard loop length on the keys side. Wi-Fi, the speaker, volume and the AirPlay delay are shared, so they can be set from either. |
 
@@ -29,7 +29,7 @@ The drum loop runs 1 to 16 bars and the keyboard loop 1 to 8. Both start togethe
 
 ## Piano Roll
 
-Tap the keys screen's loop row (`LOOP 2 BARS  37 NOTES`, or `BAR 1.3 OF 2` while it plays) to open the Piano Roll. It is the keyboard loop drawn as a grid of pitch against time, in the spirit of LMMS's piano roll. Recorded takes show up there, and drawn notes play on the keys' loop in time with the drums.
+Tap **ROLL** in the keys screen's header (or the loop row under the keys' octave buttons) to open the Piano Roll. It works on an empty loop too, so you can draw a part from scratch. It is the keyboard loop drawn as a grid of pitch against time, in the spirit of LMMS's piano roll. Recorded takes show up there, and drawn notes play on the keys' loop in time with the drums.
 
 ```
  PLAY REC - 120 + 1/16 KEYS DRUM     header: SNAP, back to KEYS, or to the DRUM screen
@@ -109,7 +109,7 @@ The image goes in a launcher slot, like the other apps.
 
 ### 1.2 (2026-11-15)
 
-- Piano Roll: tap the keys screen's loop row to edit the keyboard loop as a grid. Draw, move, resize and delete notes with a snap, while the loop plays.
+- Piano Roll: tap ROLL on the keys screen to edit the keyboard loop as a grid, even an empty one. Draw, move, resize and delete notes with a snap, while the loop plays.
 
 ### 1.1 (2026-11-14)
 

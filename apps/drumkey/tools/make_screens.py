@@ -196,6 +196,15 @@ k.rep('''    if (in_span(PLAY_SPAN, column)) {
             dk_play(true);
         }
         keys_record(!state->recording);''')
+# In Drum&Key the drums keep time, so the keys' MET slot opens the Piano Roll.
+k.rep('''    bool met = keys_settings.metronome;
+    put_span(&row, MET_SPAN, "MET", met ? CYD_COLOR_BLACK : CYD_COLOR_WHITE,
+             met ? CYD_COLOR_CYAN : CYD_COLOR_BUTTON);
+''', '''    put_span(&row, MET_SPAN, "ROLL", CYD_COLOR_WHITE, DK_ROLL_COLOR);
+''')
+k.rep('''    } else if (in_span(MET_SPAN, column)) {
+        keys_settings.metronome = !keys_settings.metronome;
+    }''', '''    }''')
 k.rep('''    put_span(&row, MENU_SPAN, "MENU", CYD_COLOR_WHITE,
              speaker_lost_notice ? CYD_COLOR_RED : CYD_COLOR_BUTTON);
     draw_row(0, &row);''', '''    put_span(&row, SWITCH_SPAN, "DRUM", CYD_COLOR_WHITE, DK_DRUMS_COLOR);
@@ -263,8 +272,8 @@ k.rep('''            if (row == 0 && in_span(MENU_SPAN, column)) {
                 cyd_touch_set_tap_callback(NULL, NULL);
                 return;
             }
-            if (row == LOOP_ROW) {
-                /* The loop row opens the Piano Roll, which edits the loop. */
+            if ((row == 0 && in_span(MET_SPAN, column)) || row == LOOP_ROW) {
+                /* ROLL, or the loop row, opens the Piano Roll. */
                 leave_keys();
                 cyd_touch_set_fingers_callback(NULL, NULL);
                 cyd_touch_set_tap_callback(NULL, NULL);

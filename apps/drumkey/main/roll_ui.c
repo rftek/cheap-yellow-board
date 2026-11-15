@@ -1,6 +1,7 @@
 /* Drum&Key's Piano Roll: the keyboard loop as a grid of pitch against
    time, to draw, move, resize and delete notes while the loop plays.
-   Opened by tapping the keys screen's loop row.
+   Opened with the keys screen's ROLL button (or its loop row); it works
+   on an empty loop too, so notes can be drawn from scratch.
 
      row 0       PLAY REC - 120 + SNAP KEYS DRUM   (the shared header)
      strip       where the speaker is in the loop
@@ -396,10 +397,16 @@ static void draw_strip(const looper_state_t *state)
         return;
     }
     ESP_ERROR_CHECK(cyd_fill_rect(GRID_X, STRIP_Y, GRID_WIDTH, STRIP_HEIGHT, COLOR_STRIP));
-    if (head >= 0) {
+    if (head > GRID_X) { /* nothing to fill when it is at the first step in view */
         ESP_ERROR_CHECK(cyd_fill_rect(GRID_X, STRIP_Y, head - GRID_X, STRIP_HEIGHT,
                                       state->recording ? CYD_COLOR_RED : COLOR_PLAYING));
-        ESP_ERROR_CHECK(cyd_fill_rect(head - 1, STRIP_Y, 3, STRIP_HEIGHT, COLOR_HEAD));
+    }
+    if (head >= 0) {
+        int marker = head - 1 < GRID_X ? GRID_X : head - 1;
+        if (marker > CYD_LCD_WIDTH - 3) {
+            marker = CYD_LCD_WIDTH - 3;
+        }
+        ESP_ERROR_CHECK(cyd_fill_rect(marker, STRIP_Y, 3, STRIP_HEIGHT, COLOR_HEAD));
     }
     drawn_head = head;
 }

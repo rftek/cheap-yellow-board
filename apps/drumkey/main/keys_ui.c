@@ -337,9 +337,7 @@ static void refresh_transport(const looper_state_t *state)
     snprintf(number, sizeof(number), "%u", dk_tempo());
     put_span(&row, BPM_SPAN, number, CYD_COLOR_YELLOW, CYD_COLOR_BLACK);
     put_span(&row, BPM_UP_SPAN, "+", CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
-    bool met = keys_settings.metronome;
-    put_span(&row, MET_SPAN, "MET", met ? CYD_COLOR_BLACK : CYD_COLOR_WHITE,
-             met ? CYD_COLOR_CYAN : CYD_COLOR_BUTTON);
+    put_span(&row, MET_SPAN, "ROLL", CYD_COLOR_WHITE, DK_ROLL_COLOR);
     put_span(&row, SWITCH_SPAN, "DRUM", CYD_COLOR_WHITE, DK_DRUMS_COLOR);
     put_span(&row, MENU_SPAN, "MENU", CYD_COLOR_WHITE,
              speaker_lost_notice ? CYD_COLOR_RED : CYD_COLOR_BUTTON);
@@ -908,8 +906,6 @@ static void tap_transport(int column, const looper_state_t *state)
         set_bpm(dk_tempo() - 1);
     } else if (in_span(BPM_UP_SPAN, column)) {
         set_bpm(dk_tempo() + 1);
-    } else if (in_span(MET_SPAN, column)) {
-        keys_settings.metronome = !keys_settings.metronome;
     }
 }
 
@@ -1211,8 +1207,8 @@ void keys_screen(QueueHandle_t touch_queue)
                 cyd_touch_set_tap_callback(NULL, NULL);
                 return;
             }
-            if (row == LOOP_ROW) {
-                /* The loop row opens the Piano Roll, which edits the loop. */
+            if ((row == 0 && in_span(MET_SPAN, column)) || row == LOOP_ROW) {
+                /* ROLL, or the loop row, opens the Piano Roll. */
                 leave_keys();
                 cyd_touch_set_fingers_callback(NULL, NULL);
                 cyd_touch_set_tap_callback(NULL, NULL);
