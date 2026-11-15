@@ -45,6 +45,7 @@ The key column on the left names every key (C4, C#4, D4 …) and plays it while 
 With one finger on the grid:
 - **Empty spot:** adds a note on the keys' current style, at the snapped step. Drag right before lifting to draw it longer. The next note takes the last length you drew. With notes selected, it clears the selection instead.
 - **Tap a note:** selects it (it turns white), or deselects it.
+- **Double tap** anywhere on the grid: turns the whole selection off. If the first tap drew a note, that note goes too.
 - **Drag a note:** moves it in time and pitch. Drag a selected note to move the whole selection together.
 - **Drag a note's right end** (the dark handle): resizes it.
 - Notes sound briefly as you place or move them, except while REC is on.

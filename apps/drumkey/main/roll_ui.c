@@ -20,7 +20,8 @@
      - on a note: tap to select or deselect it; drag to move it, or the
        whole selection when it is selected (in time and pitch); drag from
        its right end to resize it
-   DEL deletes the selected notes.
+   A double tap anywhere on the grid turns the selection off. DEL deletes
+   the selected notes.
    The notes are the looper's (looper.h), shared with the keys screen:
    what you record shows here, and what you draw plays there. Each drawn
    note is a take of its own, so UNDO removes the last one. */
@@ -64,6 +65,8 @@
 #define RESIZE_HANDLE 12 /* px at a note's right end that resize it */
 #define MOVE_SLOP 8      /* px a finger may drift and still be a tap */
 #define AUDITION_MS 180
+#define DOUBLE_TAP_MS 350 /* two taps this close together are a double tap */
+#define DOUBLE_TAP_PX 40  /* and this close in place */
 
 #define COLOR_WHITE_ROW 0x18E3
 #define COLOR_BLACK_ROW 0x0861
@@ -171,6 +174,16 @@ static struct {
 /* A key of the key column held down, playing in the keys' style. */
 static int key_note = -1;
 static int key_instrument;
+
+/* The last tap on the grid, for spotting a double tap, and the note it
+   added, if any, which a double tap takes back. */
+static struct {
+    TickType_t at;
+    int x, y;
+    bool valid;
+    bool added;
+    looper_note_t note;
+} last_tap;
 
 static TickType_t audition_until;
 static int audition_note = -1;
@@ -510,6 +523,23 @@ static int note_at(const looper_state_t *state, int x, int y, bool *on_end)
 
 static void press_grid(const looper_state_t *state, int x, int y)
 {
+    /* A double tap turns the selection off. If its first tap drew a note,
+       that note goes too: it was half of a double tap, not a new note. */
+    TickType_t now = xTaskGetTickCount();
+    if (last_tap.valid && now - last_tap.at < pdMS_TO_TICKS(DOUBLE_TAP_MS) &&
+        abs(x - last_tap.x) < DOUBLE_TAP_PX && abs(y - last_tap.y) < DOUBLE_TAP_PX) {
+        if (last_tap.added) {
+            looper_remove_note(&last_tap.note);
+        }
+        selected_count = 0;
+        last_tap.valid = false;
+        drag.mode = DRAG_NONE;
+        end_audition(true);
+        grid_dirty = true;
+        return;
+    }
+    last_tap = (typeof(last_tap)){.at = now, .x = x, .y = y, .valid = true};
+
     bool on_end = false;
     int index = note_at(state, x, y, &on_end);
     drag.press_x = x;
@@ -537,7 +567,9 @@ static void press_grid(const looper_state_t *state, int x, int y)
         }
         drag.note = note;
         drag.mode = DRAG_RESIZE; /* drag right to draw it longer */
-        drag.moved = true;       /* a new note isn't deleted on lift */
+        drag.moved = true;       /* a new note isn't selected on lift */
+        last_tap.added = true;
+        last_tap.note = note;
         audition(note.note, note.instrument, state);
     }
     grid_dirty = true;
@@ -589,6 +621,7 @@ static void follow_drag(const looper_state_t *state)
     }
     if (abs(finger->x - drag.press_x) > MOVE_SLOP || abs(finger->y - drag.press_y) > MOVE_SLOP) {
         drag.moved = true;
+        last_tap.valid = false; /* a drag isn't half of a double tap */
     }
     if (!drag.moved) {
         return;
