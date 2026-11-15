@@ -34,6 +34,20 @@ typedef struct {
    row 0. */
 void dk_header_gaps(void);
 
-/* The screens. Each runs until its switch button is tapped. */
+/* The screens. Each runs until a button takes it to another; it sets
+   dk_next_screen first when that isn't the usual one (drums and keys
+   switch with each other; the Piano Roll returns to the keys). */
+typedef enum {
+    DK_DRUMS,
+    DK_KEYS,
+    DK_ROLL,
+} dk_screen_t;
+
+extern dk_screen_t dk_next_screen;
+
 void drums_screen(QueueHandle_t touch_queue);
-void keys_screen(QueueHandle_t touch_queue);
+void keys_screen(QueueHandle_t touch_queue); /* its loop row opens the roll */
+void roll_screen(QueueHandle_t touch_queue);
+
+/* The style the keys play, for notes drawn in the Piano Roll. */
+int keys_current_instrument(void);

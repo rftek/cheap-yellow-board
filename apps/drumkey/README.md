@@ -27,6 +27,36 @@ Everything else works as in [DrumLoop](../drumloop/README.md) and [Keyboard](../
 
 The drum loop runs 1 to 16 bars and the keyboard loop 1 to 8. Both start together at bar 1, so with power-of-two lengths they stay in step.
 
+## Piano Roll
+
+Tap the keys screen's loop row (`LOOP 2 BARS  37 NOTES`, or `BAR 1.3 OF 2` while it plays) to open the Piano Roll. It is the keyboard loop drawn as a grid of pitch against time, in the spirit of LMMS's piano roll. Recorded takes show up there, and drawn notes play on the keys' loop in time with the drums.
+
+```
+ PLAY REC - 120 + 1/16 KEYS DRUM     header: SNAP, back to KEYS, or to the DRUM screen
+ ==========|---------------------     where the speaker is in the loop
+ C4 |  ##      ####        |   ##     14 pitches by 2 bars; key column on the left
+    |      ##          ##  |
+ OCT- OCT+   <  1-2/4  >   UNDO      octave, bar page, undo
+```
+
+With one finger on the grid:
+- **Empty spot:** adds a note on the keys' current style, at the snapped step. Drag right before lifting to draw it longer. The next note takes the last length you drew.
+- **Drag a note:** moves it in time and pitch.
+- **Drag a note's right end** (the dark handle): resizes it.
+- **Tap a note** without moving: deletes it.
+- Notes sound briefly as you place or move them, except while REC is on.
+
+| Control | What it does |
+|---|---|
+| **SNAP** (`1/16`) | The grid notes snap to: 1/4, 1/8, 1/16, 1/32 or OFF. |
+| **KEYS** / **DRUM** | Back to the keys screen, or straight to the drums. |
+| **OCT- / OCT+** | Moves the 14 pitches shown by an octave, from C1 up to C8. |
+| **< 1-2/4 >** | The bars shown. Loops longer than 2 bars page 2 at a time. |
+| **UNDO** | Removes the last take. Each drawn note is a take of its own, so it removes the last note drawn. Moves and deletes aren't undone. |
+| **PLAY / REC / tempo** | As on the other screens. REC records the keys while you watch the notes appear. |
+
+Notes of every style are shown in their voice's color. The loop's length and quantize are set in the keys screen's MENU.
+
 ## Latency and load
 
 - Pads and keys play from the touch task's callbacks, as in the two apps, so a hit goes straight to the audio task without waiting for the screen to redraw.
@@ -42,7 +72,8 @@ The drum loop runs 1 to 16 bars and the keyboard loop 1 to 8. Both start togethe
 | `main/dk_audio.c` | The audio task's render: shared transport and tempo, the drum engine and the looper, mixed |
 | `main/drums_ui.c` | The drums screen, made from DrumLoop's `ui.c` by `tools/make_screens.py` |
 | `main/keys_ui.c` | The keys screen, made from Keyboard's `ui.c` by `tools/make_screens.py` |
-| `main/dk_ui.c` | The header layout and the gaps between its buttons |
+| `main/roll_ui.c` | The Piano Roll, which edits the keyboard loop through looper.h |
+| `main/dk_ui.c` | The header layout, the gaps between its buttons, and which screen is next |
 
 The engines are compiled from the other apps' folders, so a fix there reaches Drum&Key too:
 - `apps/drumloop/main`: `engine.c`, `kit.c`, `export.c`, `sdcard.c` and `wav.c`
@@ -75,6 +106,10 @@ pio run -e esp32s3
 The image goes in a launcher slot, like the other apps.
 
 ## Changelog
+
+### 1.2 (2026-11-15)
+
+- Piano Roll: tap the keys screen's loop row to edit the keyboard loop as a grid. Draw, move, resize and delete notes with a snap, while the loop plays.
 
 ### 1.1 (2026-11-14)
 

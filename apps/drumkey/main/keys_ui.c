@@ -1211,6 +1211,14 @@ void keys_screen(QueueHandle_t touch_queue)
                 cyd_touch_set_tap_callback(NULL, NULL);
                 return;
             }
+            if (row == LOOP_ROW) {
+                /* The loop row opens the Piano Roll, which edits the loop. */
+                leave_keys();
+                cyd_touch_set_fingers_callback(NULL, NULL);
+                cyd_touch_set_tap_callback(NULL, NULL);
+                dk_next_screen = DK_ROLL;
+                return;
+            }
             if (row == 0) {
                 tap_transport(column, &state);
             } else if (row == 1) {
@@ -1243,4 +1251,10 @@ void keys_screen(QueueHandle_t touch_queue)
             vTaskDelay(1); /* taps came in: still let the idle task run */
         }
     }
+}
+
+/* The style the keys play, for notes drawn in the Piano Roll. */
+int keys_current_instrument(void)
+{
+    return instrument;
 }

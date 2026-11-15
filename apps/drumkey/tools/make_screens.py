@@ -262,7 +262,22 @@ k.rep('''            if (row == 0 && in_span(MENU_SPAN, column)) {
                 cyd_touch_set_fingers_callback(NULL, NULL);
                 cyd_touch_set_tap_callback(NULL, NULL);
                 return;
+            }
+            if (row == LOOP_ROW) {
+                /* The loop row opens the Piano Roll, which edits the loop. */
+                leave_keys();
+                cyd_touch_set_fingers_callback(NULL, NULL);
+                cyd_touch_set_tap_callback(NULL, NULL);
+                dk_next_screen = DK_ROLL;
+                return;
             }''')
+k.s += '''
+/* The style the keys play, for notes drawn in the Piano Roll. */
+int keys_current_instrument(void)
+{
+    return instrument;
+}
+'''
 save('drumkey/main/keys_ui.c', k.s)
 if stale:
     print("Out of date; run python apps/drumkey/tools/make_screens.py: " + ", ".join(stale))
