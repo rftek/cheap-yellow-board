@@ -9,6 +9,9 @@
      the grid    14 pitches by up to 2 bars; a key column on the left
      row 11      OCT- OCT+   <  BARS 1-2/4  >   UNDO
 
+   The key column is labelled and plays, while held, in the style the keys
+   screen has selected, as new notes do.
+
    On the grid, with one finger:
      - on an empty spot: a new note on the keys' style, at the snapped
        step; drag right before lifting to make it longer
@@ -122,6 +125,10 @@ static struct {
     int press_x, press_y;
     bool moved;
 } drag;
+
+/* A key of the key column held down, playing in the keys' style. */
+static int key_note = -1;
+static int key_instrument;
 
 static TickType_t audition_until;
 static int audition_note = -1;
@@ -312,12 +319,14 @@ static void draw_keys_column(void)
         ESP_ERROR_CHECK(cyd_fill_rect(0, y, KEY_WIDTH - 2, ROW_HEIGHT - 1,
                                       black ? CYD_COLOR_BLACK : CYD_COLOR_WHITE));
         ESP_ERROR_CHECK(cyd_fill_rect(0, y + ROW_HEIGHT - 1, KEY_WIDTH - 2, 1, COLOR_STEP_LINE));
-        if (note % 12 == 0) {
-            char name[6];
-            snprintf(name, sizeof(name), "C%d", note / 12 - 1);
-            ESP_ERROR_CHECK(cyd_draw_small_text(4, y + (ROW_HEIGHT - CYD_SMALL_FONT_HEIGHT) / 2,
-                                                name, CYD_COLOR_BLACK, CYD_COLOR_WHITE));
-        }
+        /* Every key's name: C4, C#4, D4 ... */
+        static const char *const names[12] = {"C", "C#", "D", "D#", "E", "F",
+                                              "F#", "G", "G#", "A", "A#", "B"};
+        char name[8];
+        snprintf(name, sizeof(name), "%s%d", names[note % 12], note / 12 - 1);
+        ESP_ERROR_CHECK(cyd_draw_small_text(4, y + (ROW_HEIGHT - CYD_SMALL_FONT_HEIGHT) / 2, name,
+                                            black ? CYD_COLOR_WHITE : CYD_COLOR_BLACK,
+                                            black ? CYD_COLOR_BLACK : CYD_COLOR_WHITE));
     }
 }
 
@@ -530,6 +539,38 @@ static void follow_drag(const looper_state_t *state)
     }
 }
 
+/* The key column is a keyboard in the keys screen's style: a key plays
+   while it is held (and is recorded while REC is on, as on the keys). */
+static void press_key(int note)
+{
+    if (key_note >= 0) {
+        keys_note_off(key_note, key_instrument);
+    }
+    key_note = note;
+    key_instrument = keys_current_instrument();
+    keys_note_on(key_note, key_instrument);
+}
+
+static void follow_key(void)
+{
+    if (key_note < 0) {
+        return;
+    }
+    cyd_touch_point_t held[5];
+    int count = cyd_touch_held(held, 5);
+    for (int i = 0; i < count; ++i) {
+        if (held[i].x < GRID_X + MOVE_SLOP && held[i].y >= GRID_Y && held[i].y < GRID_BOTTOM) {
+            int note = row_note(held[i].y);
+            if (note != key_note) {
+                press_key(note); /* slid to another key */
+            }
+            return;
+        }
+    }
+    keys_note_off(key_note, key_instrument);
+    key_note = -1;
+}
+
 static void tap_header(int column, const looper_state_t *state)
 {
     if (in_span(PLAY_SPAN, column)) {
@@ -617,12 +658,18 @@ void roll_screen(QueueHandle_t touch_queue)
             if (row == 0) {
                 if (in_span(SWITCH_SPAN, column)) {
                     end_audition(true);
+                    if (key_note >= 0) {
+                        keys_note_off(key_note, key_instrument);
+                        key_note = -1;
+                    }
                     cyd_touch_set_fast(false);
                     return; /* on to the keys */
                 }
                 tap_header(column, &state);
             } else if (row == TOOL_ROW) {
                 tap_tools(column, &state);
+            } else if (point.y >= GRID_Y && point.y < GRID_BOTTOM && point.x < GRID_X) {
+                press_key(row_note(point.y));
             } else if (point.y >= GRID_Y && point.y < GRID_BOTTOM && point.x >= GRID_X &&
                        drag.mode == DRAG_NONE) {
                 looper_get_state(&state);
@@ -633,6 +680,7 @@ void roll_screen(QueueHandle_t touch_queue)
         if (drag.mode != DRAG_NONE) {
             follow_drag(&state);
         }
+        follow_key();
         end_audition(false);
 
         /* The loop's notes change from here, from recording and from UNDO. */

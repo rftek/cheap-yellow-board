@@ -40,6 +40,8 @@ The screen button in the header goes round **KEYS → DRUM → ROLL**: tap **ROL
  OCT- OCT+   <  1-2/4  >   UNDO      octave, bar page, undo
 ```
 
+The key column on the left names every key (C4, C#4, D4 …) and plays it while you hold it, in the style picked on the keys screen. Slide along it to play a run. While REC is on, it records like the keys.
+
 With one finger on the grid:
 - **Empty spot:** adds a note on the keys' current style, at the snapped step. Drag right before lifting to draw it longer. The next note takes the last length you drew.
 - **Drag a note:** moves it in time and pitch.
