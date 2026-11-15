@@ -55,6 +55,11 @@ These are for the common purple PCM5102A module (labels VIN, GND, LCK, DIN, BCK,
 | H3 XSMT | H | Playing (low mutes) |
 | H4 FMT | L | I2S, which is what the ESP32 sends |
 
+Each jumper bridges its middle pad to the L or H pad; go by the letters printed beside the pads, not by left or right. Some modules come with no jumpers bridged, and then the pins float. With a meter, the L pad reads 0 Ω to GND and the H pad 3.3 V. How wrong settings sound:
+
+- **No sound at all:** H3 (XSMT) open or on L, which mutes the DAC, or SCK not tied to GND.
+- **Distorted, crackly snare, hat and sweep, worst on loud and high sounds:** H1, H2 or H4 set wrong. H4 on H makes the DAC read the I2S data one bit off (left-justified), and H2 on H adds de-emphasis. Bridge all three to L.
+
 ### Output
 
 The line output gives 2.1 Vrms full scale into 1 kΩ or more. Connect it to an amplifier's or powered speakers' line input, and start with the volume low: a 0 dB tone is loud. Headphones are a lower load than the DAC is rated for.
