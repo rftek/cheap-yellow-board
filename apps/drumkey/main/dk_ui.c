@@ -2,6 +2,8 @@
 
 #include "esp_check.h"
 
+dk_screen_t dk_next_screen = DK_DRUMS;
+
 void dk_header_gaps(void)
 {
     static const int boundaries[] = {4, 7, 14, 18, 22};

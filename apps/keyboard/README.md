@@ -34,12 +34,31 @@ If the speaker drops the session, the keyboard goes silent and the MENU button t
 | **- / +** | Tempo, 60 to 200 BPM, one at a time (tens in MENU). The loop follows a tempo change, since notes are kept in beats. |
 | **MET** | Metronome: a click on every beat while the loop runs, accented on beat 1. |
 | **Voice** (PIANO) | The next voice: PIANO, ORGAN, STRING, SYNTH, PLUCK, BELL, CHIP. The key you hold keeps its sound; new notes use the new one. |
-| **Style** (C7 GRAND) | The next style of that voice. The loop row shows what it is for a moment. Each voice remembers its style. Recorded notes keep the style they were played with, so takes on different pianos layer. |
+| **Style** (C7 GRAND) | The next style of that voice. The loop row shows what it is for a moment. Each voice remembers its style. Recorded notes keep the style they were played with, so takes on different pianos layer. Hold it (about half a second) for the style's tone editor (see below); a `~` after the name marks a style with a tone. |
 | **OCT - / OCT +** | Shift the keys an octave down or up, anywhere from C1-C3 to C6-C8. The loop row says which two octaves for a moment. |
 | **Octave map** | All seven octaves, C1 to C8, in miniature between OCT - and OCT +. The two on the keys are bright, with a yellow bar under them, and the rest are dim. Loop notes light blue on it wherever they are, so a bass line recorded two octaves down still shows. Tap an octave on the map to put it at the left of the keys. |
 | **UNDO** | Removes the last take. |
 | **SUS** | The sustain pedal, latched: notes ring on after you lift until you tap SUS again. Recorded notes keep the length you heard. |
 | **Keys** | Play with up to five fingers at once (the GT911's limit). Slide a finger along the keys for a glissando. A key lights in the voice's color under your finger, and in blue while the loop plays it, at the moment the speaker does. Every key shows its note: white keys with the octave (C4), black keys without (C#), which are too narrow for three letters. Middle C's label is red. |
+
+### Style tone: filter, EQ and level
+
+Hold **Style** to shape the style on it, with the same editor as DrumLoop's tracks ([music_tone](../../components/music_tone)):
+
+```
+ <  C7 GRAND TONE  >  BACK   the style; < > for every style of every voice
+ FILTER OFF  LP   HP   BP    resonant filter type
+ CUT 1.4k [=======|-----]    cutoff, 30 Hz to 18 kHz
+ RES  1.1 [==|----------]    resonance, Q 0.5 to 10
+ LOW / MID / HIGH            low shelf 100 Hz, peak 1 kHz, high shelf 6 kHz, +-12 dB
+ LVL                         level, -24 to +6 dB
+ FLAT                        resets the style
+ [C4][D4][E4][F4][G4][A4][B4][C5]   test keys, to hear it
+```
+
+- Drag a slider to change it while you play or the loop runs. The test keys play the style being edited. While REC is on they record too, like the keys.
+- Each style has its own tone, so every note on it, live or in the loop, goes through it. A style without one costs nothing extra, and one that has gone quiet stops costing once its filter has rung out.
+- Tones aren't saved across power cycles.
 
 ### The voices and styles
 
@@ -96,8 +115,8 @@ Recording allows for the delay. A note is recorded where you heard the loop when
 | `main/main.c` | start-up: NVS, shared tempo, touch, audio, UI task |
 | `main/ui.c` | screen and menu. Key labels use `cyd_draw_small_text`, the text font at half size. The touch task plays the keys through `cyd_touch_set_fingers_callback`, which reports every finger with its id, so notes start and stop as fingers land, slide and lift |
 | `main/audio.c` | the command queue from the touch and UI tasks, and the render callback that `music_out` calls every 8 ms |
-| `main/looper.c` | transport, loop notes in ticks (960 a beat), takes, quantize, count-in and metronome |
-| `main/synth.c` | the eight voices; the instruments as voices and styles over seven engines (modal, FM, organ, strings, synth, pluck, chip); the click and the soft-clipping mixer |
+| `main/looper.c` | transport, loop notes in ticks (960 a beat), takes, quantize, count-in and metronome; a lock and calls to read and edit the notes, for Drum&Key's Piano Roll |
+| `main/synth.c` | the eight voices; the instruments as voices and styles over seven engines (modal, FM, organ, strings, synth, pluck, chip); each style's tone; the click and the soft-clipping mixer; a hook for an external engine whose patches play as a PATCH voice (Drum&Key's patch synth) |
 
 ## Limits
 

@@ -2,9 +2,10 @@
 
      row 0       transport: PLAY/STOP, REC, BPM - 140 +, bar page, KEYS
                  (to the keys screen), MENU
-     rows 1-8    the step grid: a track per row, its label (tap to mute)
-                 and 16 steps of the bar on view (tap to toggle; hold to
-                 play the step twice, or once again)
+     rows 1-8    the step grid: a track per row, its label (tap to mute,
+                 hold for the track's tone: filter, EQ and level) and 16
+                 steps of the bar on view (tap to toggle; hold to play the
+                 step twice, or once again)
      rows 9-11   eight pads that play the sounds live
 
    The grid's playhead follows what the speaker is playing, which is the
@@ -21,6 +22,7 @@
 #include "export.h"
 #include "music_out.h"
 #include "sdcard.h"
+#include "tone_editor.h"
 
 /* Screen lines are cut to the display's width on purpose. */
 #pragma GCC diagnostic ignored "-Wformat-truncation"
@@ -86,6 +88,7 @@ static uint16_t drawn_header_fg[COLUMNS];
 static uint16_t drawn_header_bg[COLUMNS];
 static uint32_t drawn_cells[DRUM_TRACKS][DRUM_STEPS];
 static int drawn_muted;
+static int drawn_toned;
 static int drawn_flash;
 
 #define NOT_DRAWN 0xFFFFFFFFu
@@ -206,6 +209,7 @@ static void invalidate(void)
         }
     }
     drawn_muted = -1;
+    drawn_toned = -1;
     drawn_flash = -1;
 }
 
@@ -240,7 +244,7 @@ static void refresh_header(void)
                                          : CYD_COLOR_BUTTON;
     put_span(text, fg, bg, BAR_SPAN, bar,
              follow && pattern->bars > 1 ? CYD_COLOR_BLACK : CYD_COLOR_WHITE, bar_bg);
-    put_span(text, fg, bg, SWITCH_SPAN, "KEYS", CYD_COLOR_WHITE, DK_KEYS_COLOR);
+    put_span(text, fg, bg, SWITCH_SPAN, "ROLL", CYD_COLOR_WHITE, DK_ROLL_COLOR);
     put_span(text, fg, bg, MENU_SPAN, "MENU", CYD_COLOR_WHITE,
              speaker_lost_notice ? CYD_COLOR_RED : CYD_COLOR_BUTTON);
 
@@ -269,8 +273,12 @@ static void draw_track_label(int track)
     }
     bool muted = (pattern->muted >> track) & 1;
     span_t label = {0, LABEL_WIDTH / FW};
-    put_span(text, fg, bg, label, kit_sound(pattern->kit, track)->label,
-             muted ? CYD_COLOR_GRAY : CYD_COLOR_BLACK, muted ? COLOR_MUTED : track_colors[track]);
+    /* A ~ marks a track with a tone (filter, EQ or level). */
+    char name[4];
+    snprintf(name, sizeof(name), "%s%s", kit_sound(pattern->kit, track)->label,
+             tone_is_flat(&pattern->tone[track]) ? "" : "~");
+    put_span(text, fg, bg, label, name, muted ? CYD_COLOR_GRAY : CYD_COLOR_BLACK,
+             muted ? COLOR_MUTED : track_colors[track]);
     ESP_ERROR_CHECK(cyd_draw_cells(GRID_ROW + track, text, fg, bg));
     for (int step = 0; step < DRUM_STEPS; ++step) {
         drawn_cells[track][step] = NOT_DRAWN;
@@ -300,15 +308,29 @@ static bool cell_double(int track, int step)
 /* A cell's color, plus this bit when it's drawn split for a double step. */
 #define DRAWN_DOUBLE 0x10000u
 
+static int toned_tracks(void)
+{
+    int toned = 0;
+    for (int track = 0; track < DRUM_TRACKS; ++track) {
+        if (!tone_is_flat(&pattern->tone[track])) {
+            toned |= 1 << track;
+        }
+    }
+    return toned;
+}
+
 static void refresh_grid(void)
 {
-    if (drawn_muted != pattern->muted) {
+    int toned = toned_tracks();
+    if (drawn_muted != pattern->muted || drawn_toned != toned) {
+        int changed = (drawn_muted ^ pattern->muted) | (drawn_toned ^ toned);
         for (int track = 0; track < DRUM_TRACKS; ++track) {
-            if (drawn_muted < 0 || ((drawn_muted ^ pattern->muted) >> track) & 1) {
+            if (drawn_muted < 0 || drawn_toned < 0 || (changed >> track) & 1) {
                 draw_track_label(track);
             }
         }
         drawn_muted = pattern->muted;
+        drawn_toned = toned;
     }
     for (int track = 0; track < DRUM_TRACKS; ++track) {
         int y = (GRID_ROW + track) * FH;
@@ -769,21 +791,32 @@ static bool grid_cell(int x, int y, int *track, int *step)
     return true;
 }
 
-/* A step tapped and maybe still held, with how it was before the tap. */
+/* A step or label tapped and maybe still held, with how it was before. */
 static struct {
     bool active;
+    bool label; /* a track label, not a step */
     int bar, track, step;
     bool was_on, was_double;
     TickType_t since;
 } press;
+
+/* The track whose tone editor a held label asked for, or -1. */
+static int tone_track = -1;
 
 static void tap_grid(int x, int y)
 {
     int track;
     int step;
     if (!grid_cell(x, y, &track, &step)) {
-        if (x < LABEL_WIDTH) {
-            pattern->muted ^= (uint8_t)(1u << (y / FH - GRID_ROW));
+        track = y / FH - GRID_ROW;
+        if (x < LABEL_WIDTH && track >= 0 && track < DRUM_TRACKS) {
+            pattern->muted ^= (uint8_t)(1u << track);
+            press = (typeof(press)){
+                .active = true,
+                .label = true,
+                .track = track,
+                .since = xTaskGetTickCount(),
+            };
         }
         return;
     }
@@ -802,7 +835,8 @@ static void tap_grid(int x, int y)
 }
 
 /* A step held for LONG_PRESS_MS plays twice; a double step held plays once.
-   The tap already toggled it, so this sets it either way. */
+   The tap already toggled it, so this sets it either way. A label held
+   that long opens the track's tone editor and undoes the tap's mute. */
 static void check_long_press(void)
 {
     if (!press.active) {
@@ -814,12 +848,16 @@ static void check_long_press(void)
     for (int i = 0; i < count; ++i) {
         int track;
         int step;
-        if (grid_cell(held[i].x, held[i].y, &track, &step) && track == press.track &&
-            step == press.step) {
+        if (press.label) {
+            if (held[i].x < LABEL_WIDTH && held[i].y / FH - GRID_ROW == press.track) {
+                still = true;
+            }
+        } else if (grid_cell(held[i].x, held[i].y, &track, &step) && track == press.track &&
+                   step == press.step) {
             still = true;
         }
     }
-    if (!still || press.bar != view_bar) {
+    if (!still || (!press.label && press.bar != view_bar)) {
         press.active = false;
         return;
     }
@@ -827,6 +865,11 @@ static void check_long_press(void)
         return;
     }
     press.active = false;
+    if (press.label) {
+        pattern->muted ^= (uint8_t)(1u << press.track);
+        tone_track = press.track;
+        return;
+    }
     uint16_t bit = (uint16_t)(1u << press.step);
     pattern->steps[press.bar][press.track] |= bit;
     if (press.was_on && press.was_double) {
@@ -874,6 +917,72 @@ static void flash_hit_pads(void)
             flash_until[pad] = until;
         }
     }
+}
+
+/* ---- Tone editor ------------------------------------------------------ */
+
+/* A track's tone, in the music apps' shared editor (tone_editor.h), with
+   the pads live below it and the loop playing on. */
+
+static tone_settings_t *track_tone(int track, void *context)
+{
+    (void)context;
+    return &pattern->tone[track];
+}
+
+static const char *track_name(int track, void *context)
+{
+    (void)context;
+    return kit_sound(pattern->kit, track)->label;
+}
+
+static uint16_t track_color(int track, void *context)
+{
+    (void)context;
+    return track_colors[track];
+}
+
+static void tone_draw_pads(int track, void *context)
+{
+    (void)track;
+    (void)context;
+    drawn_flash = -1; /* refresh_pads draws them */
+}
+
+static void tone_tick(int track, void *context)
+{
+    (void)track;
+    (void)context;
+    if (music_out_check_lost()) {
+        speaker_lost_notice = true;
+    }
+    flash_hit_pads();
+    refresh_pads();
+    update_playhead();
+}
+
+static void tone_tap(const cyd_touch_point_t *point, int track, void *context)
+{
+    (void)track;
+    (void)context;
+    play_pad(point->x); /* only if it came before pads_live */
+}
+
+/* The tone editor for tone_track, until BACK. */
+static void run_tone(QueueHandle_t touch_queue)
+{
+    static const tone_editor_t editor = {
+        .count = DRUM_TRACKS,
+        .settings = track_tone,
+        .name = track_name,
+        .color = track_color,
+        .draw_bottom = tone_draw_pads,
+        .tick = tone_tick,
+        .tap = tone_tap,
+    };
+    int track = tone_track;
+    tone_track = -1;
+    tone_editor_run(touch_queue, &editor, track);
 }
 
 /* The performance screen: fast multi-finger taps, pads played by on_tap. */
@@ -940,6 +1049,11 @@ void drums_screen(QueueHandle_t touch_queue)
             }
         }
         check_long_press();
+        if (tone_track >= 0) {
+            run_tone(touch_queue);
+            enter_pads(touch_queue);
+            continue;
+        }
         flash_hit_pads();
         update_playhead();
         refresh();

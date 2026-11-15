@@ -8,6 +8,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "music_out.h"
+#include "psynth.h"
 #include "synth.h"
 
 #define HIT_QUEUE_LENGTH 32
@@ -200,6 +201,7 @@ static bool render(int16_t *pcm, size_t frames, bool speaker_attached, void *con
     take_hits();
     looper_settings_t settings = keys_settings;
     settings.bpm = pattern->bpm;
+    psynth_set_tempo(pattern->bpm);
     settings.count_in = false;
     uint32_t first_frame = music_out_frames_written();
     size_t done = 0;
@@ -239,6 +241,7 @@ esp_err_t dk_audio_start(drum_pattern_t *loop_pattern, QueueHandle_t touch_queue
     }
     engine_init(&engine, pattern, on_step, NULL);
     synth_init();
+    psynth_init(); /* its patches play as the PATCH voice's styles */
     looper_init(on_loop_note);
     music_out_config_t config = MUSIC_OUT_DEFAULT_CONFIG();
     config.title = " DRUM&KEY";

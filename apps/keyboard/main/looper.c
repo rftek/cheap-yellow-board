@@ -3,10 +3,13 @@
 #include <math.h>
 #include <string.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+
 #define CHUNK 32 /* frames between transport updates: 0.7 ms */
 #define MAX_ACTIVE 32
 #define MAX_PENDING 16
-#define MIN_LENGTH (LOOP_TICKS_PER_BEAT / 16) /* a 64th note */
+#define MIN_LENGTH LOOPER_MIN_LENGTH
 #define NO_SKIP 0xFFFF
 #define DEFAULT_BARS 2
 
@@ -58,6 +61,19 @@ static uint32_t chunk_frame; /* stream frame of the chunk being rendered */
 static quantize_t quantize = QUANTIZE_OFF;
 static bool count_in_enabled = true;
 static looper_state_t snapshot;
+/* Guards notes and note_count: the audio task holds it while it changes or
+   plays them, and an editor while it reads or edits them. */
+static SemaphoreHandle_t lock;
+
+static void take_lock(void)
+{
+    xSemaphoreTakeRecursive(lock, portMAX_DELAY);
+}
+
+static void give_lock(void)
+{
+    xSemaphoreGiveRecursive(lock);
+}
 
 static double loop_length(void)
 {
@@ -135,6 +151,9 @@ static void end_all_active(void)
 
 void looper_init(looper_note_cb_t on_note)
 {
+    if (lock == NULL) {
+        lock = xSemaphoreCreateRecursiveMutex();
+    }
     note_callback = on_note;
     note_count = 0;
     active_count = 0;
@@ -144,7 +163,7 @@ void looper_init(looper_note_cb_t on_note)
 
 /* ---- Live keys ------------------------------------------------------------ */
 
-void looper_live_on(int note, int instrument, uint32_t latency_frames)
+static void locked_live_on(int note, int instrument, uint32_t latency_frames)
 {
     synth_note_on(note, instrument, SOURCE_LIVE);
     if (!recording || !playing) {
@@ -183,7 +202,14 @@ void looper_live_on(int note, int instrument, uint32_t latency_frames)
     };
 }
 
-void looper_live_off(int note, int instrument)
+void looper_live_on(int note, int instrument, uint32_t latency_frames)
+{
+    take_lock();
+    locked_live_on(note, instrument, latency_frames);
+    give_lock();
+}
+
+static void locked_live_off(int note, int instrument)
 {
     synth_note_off(note, instrument, SOURCE_LIVE);
     for (int i = 0; i < MAX_PENDING; ++i) {
@@ -198,7 +224,14 @@ void looper_live_off(int note, int instrument)
     }
 }
 
-void looper_sustain(bool down)
+void looper_live_off(int note, int instrument)
+{
+    take_lock();
+    locked_live_off(note, instrument);
+    give_lock();
+}
+
+static void locked_sustain(bool down)
 {
     sustain_down = down;
     synth_sustain(down);
@@ -212,12 +245,26 @@ void looper_sustain(bool down)
     }
 }
 
-void looper_live_all_off(void)
+void looper_sustain(bool down)
+{
+    take_lock();
+    locked_sustain(down);
+    give_lock();
+}
+
+static void locked_live_all_off(void)
 {
     sustain_down = false;
     synth_sustain(false);
     finish_all_pending();
     synth_release_all(SOURCE_LIVE);
+}
+
+void looper_live_all_off(void)
+{
+    take_lock();
+    locked_live_all_off();
+    give_lock();
 }
 
 /* ---- Transport ------------------------------------------------------------ */
@@ -232,14 +279,21 @@ static void start_from(double ticks)
     pass = 0;
 }
 
-void looper_play(void)
+static void locked_play(void)
 {
     if (!playing) {
         start_from(0);
     }
 }
 
-void looper_stop(void)
+void looper_play(void)
+{
+    take_lock();
+    locked_play();
+    give_lock();
+}
+
+static void locked_stop(void)
 {
     finish_all_pending();
     recording = false;
@@ -247,7 +301,14 @@ void looper_stop(void)
     end_all_active();
 }
 
-void looper_record(bool on)
+void looper_stop(void)
+{
+    take_lock();
+    locked_stop();
+    give_lock();
+}
+
+static void locked_record(bool on)
 {
     if (on == recording) {
         return;
@@ -264,7 +325,14 @@ void looper_record(bool on)
     recording = true;
 }
 
-bool looper_undo(void)
+void looper_record(bool on)
+{
+    take_lock();
+    locked_record(on);
+    give_lock();
+}
+
+static bool locked_undo(void)
 {
     if (recording) {
         looper_record(false);
@@ -288,14 +356,29 @@ bool looper_undo(void)
     return true;
 }
 
-void looper_clear(void)
+bool looper_undo(void)
+{
+    take_lock();
+    bool result = locked_undo();
+    give_lock();
+    return result;
+}
+
+static void locked_clear(void)
 {
     memset(pending, 0, sizeof(pending));
     note_count = 0;
     end_all_active();
 }
 
-void looper_cycle_bars(void)
+void looper_clear(void)
+{
+    take_lock();
+    locked_clear();
+    give_lock();
+}
+
+static void locked_cycle_bars(void)
 {
     if (bars >= LOOP_MAX_BARS) {
         bars = 1;
@@ -326,6 +409,13 @@ void looper_cycle_bars(void)
         }
     }
     bars = (uint8_t)(bars * 2);
+}
+
+void looper_cycle_bars(void)
+{
+    take_lock();
+    locked_cycle_bars();
+    give_lock();
 }
 
 /* ---- Rendering ------------------------------------------------------------ */
@@ -402,7 +492,7 @@ static void advance(size_t frames, const looper_settings_t *settings)
     }
 }
 
-void looper_render(int16_t *pcm, size_t frames, uint32_t first_frame,
+static void locked_render(int16_t *pcm, size_t frames, uint32_t first_frame,
                    const looper_settings_t *settings)
 {
     ticks_per_frame = settings->bpm * (double)LOOP_TICKS_PER_BEAT / (60.0 * SYNTH_RATE);
@@ -431,7 +521,106 @@ void looper_render(int16_t *pcm, size_t frames, uint32_t first_frame,
     };
 }
 
+void looper_render(int16_t *pcm, size_t frames, uint32_t first_frame,
+                   const looper_settings_t *settings)
+{
+    take_lock();
+    locked_render(pcm, frames, first_frame, settings);
+    give_lock();
+}
+
 void looper_get_state(looper_state_t *state)
 {
     *state = snapshot;
+}
+
+/* ---- Editing the notes ---------------------------------------------------- */
+
+static bool same_note(const loop_note_t *a, const looper_note_t *b)
+{
+    return a->start == b->start && a->note == b->note && a->instrument == b->instrument;
+}
+
+/* Keeps a note's start and length inside the loop. */
+static void fit(loop_note_t *note)
+{
+    uint32_t length = (uint32_t)loop_length();
+    if (note->start >= length) {
+        note->start = length - MIN_LENGTH;
+    }
+    if (note->length < MIN_LENGTH) {
+        note->length = MIN_LENGTH;
+    }
+    if (note->length > length) {
+        note->length = length;
+    }
+}
+
+int looper_get_notes(looper_note_t *out, int max)
+{
+    take_lock();
+    int count = note_count < max ? note_count : max;
+    for (int i = 0; i < count; ++i) {
+        out[i] = (looper_note_t){
+            .start = notes[i].start,
+            .length = notes[i].length,
+            .note = notes[i].note,
+            .instrument = notes[i].instrument,
+        };
+    }
+    give_lock();
+    return count;
+}
+
+bool looper_add_note(const looper_note_t *note)
+{
+    take_lock();
+    bool added = note_count < LOOP_MAX_NOTES;
+    if (added) {
+        loop_note_t loop_note = {
+            .start = note->start,
+            .length = note->length,
+            .take = ++take,
+            .skip_pass = NO_SKIP,
+            .note = note->note,
+            .instrument = note->instrument,
+        };
+        fit(&loop_note);
+        add_note(&loop_note);
+    }
+    give_lock();
+    return added;
+}
+
+bool looper_remove_note(const looper_note_t *note)
+{
+    take_lock();
+    bool found = false;
+    for (int i = 0; i < note_count && !found; ++i) {
+        if (same_note(&notes[i], note)) {
+            notes[i] = notes[--note_count];
+            found = true;
+        }
+    }
+    give_lock();
+    return found;
+}
+
+bool looper_replace_note(const looper_note_t *from, const looper_note_t *to)
+{
+    take_lock();
+    bool found = false;
+    for (int i = 0; i < note_count && !found; ++i) {
+        if (same_note(&notes[i], from)) {
+            notes[i].start = to->start;
+            notes[i].length = to->length;
+            notes[i].note = to->note;
+            notes[i].instrument = to->instrument;
+            notes[i].skip_pass = NO_SKIP;
+            fit(&notes[i]);
+            found = true;
+        }
+    }
+    give_lock();
+    return found;
 }

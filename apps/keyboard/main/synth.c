@@ -3,6 +3,8 @@
 #include <math.h>
 #include <string.h>
 
+#include "tone.h"
+
 #define PI 3.14159265f
 #define SINE_SIZE 1024
 #define CHUNK 64              /* frames mixed at a time in float */
@@ -257,7 +259,7 @@ static const instrument_spec_t instruments[] = {
 static const char *const voice_names[VOICE_KINDS] = {
     [VOICE_PIANO] = "PIANO",   [VOICE_ORGAN] = "ORGAN", [VOICE_STRINGS] = "STRING",
     [VOICE_SYNTH] = "SYNTH",   [VOICE_PLUCK] = "PLUCK", [VOICE_BELL] = "BELL",
-    [VOICE_CHIP] = "CHIP",
+    [VOICE_CHIP] = "CHIP",     [VOICE_PATCH] = "PATCH",
 };
 
 /* ---- Voice state ------------------------------------------------------------ */
@@ -306,6 +308,19 @@ typedef struct {
 
 static float sine_table[SINE_SIZE + 1];
 static voice_t voices[SYNTH_VOICES];
+/* Each instrument's tone (filter, EQ, level), set from the UI, and the
+   filters running it. All zero is flat. */
+static tone_settings_t tones[INSTRUMENTS + SYNTH_EXTERNAL_MAX];
+static tone_state_t tone_states[INSTRUMENTS + SYNTH_EXTERNAL_MAX];
+
+/* The external engine, whose slot s is instrument INSTRUMENTS + s. */
+static const synth_external_t *external;
+
+static int external_slot(int instrument)
+{
+    int slot = instrument - INSTRUMENTS;
+    return external != NULL && slot >= 0 && slot < external->count ? slot : -1;
+}
 static int16_t pluck_lines[SYNTH_VOICES][PLUCK_MAX];
 static uint32_t note_count;
 static bool sustain_down;
@@ -914,11 +929,17 @@ const char *synth_voice_name(int voice)
 
 int synth_style_count(int voice)
 {
+    if (voice == VOICE_PATCH) {
+        return external != NULL ? external->count : 0;
+    }
     return voice >= 0 && voice < VOICE_KINDS ? style_counts[voice] : 0;
 }
 
 int synth_instrument(int voice, int style)
 {
+    if (voice == VOICE_PATCH && external != NULL && external->count > 0) {
+        return INSTRUMENTS + (style >= 0 && style < external->count ? style : 0);
+    }
     if (voice < 0 || voice >= VOICE_KINDS || style_counts[voice] == 0) {
         return 0;
     }
@@ -930,21 +951,50 @@ int synth_instrument(int voice, int style)
 
 int synth_instrument_count(void)
 {
-    return INSTRUMENTS;
+    return INSTRUMENTS + (external != NULL ? external->count : 0);
+}
+
+int synth_instrument_voice(int instrument)
+{
+    if (external_slot(instrument) >= 0) {
+        return VOICE_PATCH;
+    }
+    if (instrument < 0 || instrument >= INSTRUMENTS) {
+        return 0;
+    }
+    return instruments[instrument].voice;
 }
 
 const char *synth_style_name(int instrument)
 {
+    int slot = external_slot(instrument);
+    if (slot >= 0) {
+        return external->name(slot);
+    }
     return instrument >= 0 && instrument < INSTRUMENTS ? instruments[instrument].name : "?";
 }
 
 const char *synth_style_about(int instrument)
 {
+    int slot = external_slot(instrument);
+    if (slot >= 0) {
+        return external->about(slot);
+    }
     return instrument >= 0 && instrument < INSTRUMENTS ? instruments[instrument].about : "";
+}
+
+void synth_set_external(const synth_external_t *engine)
+{
+    external = engine;
 }
 
 void synth_note_on(int note, int instrument, note_source_t source)
 {
+    int slot = external_slot(instrument);
+    if (slot >= 0 && note >= 0 && note <= 127) {
+        external->note_on(note, slot, source);
+        return;
+    }
     if (instrument < 0 || instrument >= INSTRUMENTS || note < 0 || note > 127) {
         return;
     }
@@ -953,6 +1003,11 @@ void synth_note_on(int note, int instrument, note_source_t source)
 
 void synth_note_off(int note, int instrument, note_source_t source)
 {
+    int slot = external_slot(instrument);
+    if (slot >= 0) {
+        external->note_off(note, slot, source);
+        return;
+    }
     for (int i = 0; i < SYNTH_VOICES; ++i) {
         voice_t *voice = &voices[i];
         if (voice->stage == STAGE_OFF || !voice->held || voice->note != note ||
@@ -970,6 +1025,9 @@ void synth_note_off(int note, int instrument, note_source_t source)
 
 void synth_sustain(bool down)
 {
+    if (external != NULL) {
+        external->sustain(down);
+    }
     sustain_down = down;
     if (down) {
         return;
@@ -983,6 +1041,9 @@ void synth_sustain(bool down)
 
 void synth_release_all(note_source_t source)
 {
+    if (external != NULL) {
+        external->release_all(source);
+    }
     for (int i = 0; i < SYNTH_VOICES; ++i) {
         if (voices[i].stage != STAGE_OFF && voices[i].source == source) {
             release_voice(&voices[i]);
@@ -992,6 +1053,9 @@ void synth_release_all(note_source_t source)
 
 void synth_silence(void)
 {
+    if (external != NULL) {
+        external->silence();
+    }
     for (int i = 0; i < SYNTH_VOICES; ++i) {
         voices[i].stage = STAGE_OFF;
         voices[i].held = false;
@@ -1021,6 +1085,75 @@ static inline float soft_clip(float x)
     return x * (27.0f + x * x) / (27.0f + 9.0f * x * x);
 }
 
+tone_settings_t *synth_tone(int instrument)
+{
+    if (instrument < 0 || instrument >= INSTRUMENTS + SYNTH_EXTERNAL_MAX) {
+        instrument = 0;
+    }
+    return &tones[instrument];
+}
+
+/* The external engine's patches, each through its tone. Its output is at
+   full scale; the mix here is before MASTER_GAIN. */
+static void render_external(float *mix, int n)
+{
+    if (external == NULL) {
+        return;
+    }
+    float part[CHUNK];
+    for (int slot = 0; slot < external->count; ++slot) {
+        int instrument = INSTRUMENTS + slot;
+        bool flat = tone_is_flat(&tones[instrument]);
+        tone_state_t *state = &tone_states[instrument];
+        if (!flat) {
+            tone_update(state, &tones[instrument]);
+        }
+        if (!external->sounding(slot) && (flat || !tone_ringing(state))) {
+            continue;
+        }
+        memset(part, 0, sizeof(float) * (size_t)n);
+        external->render(slot, part, n);
+        if (!flat) {
+            tone_process(state, part, (size_t)n);
+        }
+        for (int i = 0; i < n; ++i) {
+            mix[i] += part[i] * (1.0f / MASTER_GAIN);
+        }
+    }
+}
+
+/* Mixes the voices of each instrument with a tone on their own and runs
+   them through it. A filter can ring on after its notes end, so it runs
+   until it is quiet. */
+static void render_toned(float *mix, int n)
+{
+    float part[CHUNK];
+    for (int instrument = 0; instrument < INSTRUMENTS; ++instrument) {
+        if (tone_is_flat(&tones[instrument])) {
+            continue;
+        }
+        tone_state_t *state = &tone_states[instrument];
+        tone_update(state, &tones[instrument]);
+        bool sounding = false;
+        for (int i = 0; i < SYNTH_VOICES; ++i) {
+            sounding |= voices[i].stage != STAGE_OFF && voices[i].instrument == instrument;
+        }
+        if (!sounding && !tone_ringing(state)) {
+            continue;
+        }
+        memset(part, 0, sizeof(float) * (size_t)n);
+        for (int i = 0; i < SYNTH_VOICES; ++i) {
+            if (voices[i].stage != STAGE_OFF && voices[i].instrument == instrument) {
+                render_voice(&voices[i], part, n);
+            }
+        }
+        tone_process(state, part, (size_t)n);
+        for (int i = 0; i < n; ++i) {
+            mix[i] += part[i];
+        }
+    }
+}
+
 void synth_render(int16_t *out, size_t frames)
 {
     float mix[CHUNK];
@@ -1028,10 +1161,12 @@ void synth_render(int16_t *out, size_t frames)
         int n = frames > CHUNK ? CHUNK : (int)frames;
         memset(mix, 0, sizeof(float) * (size_t)n);
         for (int i = 0; i < SYNTH_VOICES; ++i) {
-            if (voices[i].stage != STAGE_OFF) {
+            if (voices[i].stage != STAGE_OFF && tone_is_flat(&tones[voices[i].instrument])) {
                 render_voice(&voices[i], mix, n);
             }
         }
+        render_toned(mix, n);
+        render_external(mix, n);
         if (click.level > SILENT) {
             for (int i = 0; i < n; ++i) {
                 mix[i] += click.level * sine(click.phase) / MASTER_GAIN;

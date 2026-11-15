@@ -46,6 +46,7 @@ components/cyd_display/      display, fonts, patterns and touch, shared by every
 components/cyd_gamepad/      Xbox / Bluetooth gamepad input on Bluepad32
 components/airplay_sender/   AirPlay 1 (RAOP) audio output to network speakers
 components/music_out/        Wi-Fi, speaker picker and audio task for the music apps
+components/music_tone/       per-instrument filter, EQ and level, and their editor screen
 components/pcm5102a/         TI PCM5102A stereo audio DAC over I2S, low latency
 external/bluepad32/          Bluepad32 git submodule, with BTstack nested in it
 docs/                        build environment and installation guide

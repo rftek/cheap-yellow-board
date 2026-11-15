@@ -4,6 +4,7 @@ cmake_minimum_required(VERSION 3.16)
 set(EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/../../components/cyd_display"
                          "${CMAKE_CURRENT_LIST_DIR}/../../components/airplay_sender"
                          "${CMAKE_CURRENT_LIST_DIR}/../../components/music_out"
+                         "${CMAKE_CURRENT_LIST_DIR}/../../components/music_tone"
                          "${CMAKE_CURRENT_LIST_DIR}/../../components/pcm5102a")
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(drumkey)

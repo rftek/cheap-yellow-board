@@ -33,11 +33,33 @@ The loop keeps playing when the output changes, and the beat is kept. If the spe
 | **- / +** | Tempo, 60 to 200 BPM, one at a time (tens in MENU). Takes effect on the next step. The tempo is shared with [Keyboard](../keyboard) (NVS namespace `music`): DrumLoop starts at the tempo last set in either app. |
 | **bar page** (`1/4`) | Which bar the grid shows. Cyan means it follows the playhead. Tap to go to bar 1, 2, ... and back to follow. |
 | **MENU** | The settings below. |
-| **Track label** | Mutes or unmutes the track in the loop. The pads still play. |
+| **Track label** | Mutes or unmutes the track in the loop. The pads still play. Hold it (about half a second) to open the track's tone editor (see below). A `~` after the label marks a track with a tone. |
 | **Step** | Turns that step on or off in the bar on view. Hold it (about half a second) to make it a double: it plays twice in its sixteenth, as two thirty-seconds (two claps in one step, a hat roll), and is drawn split in two. Hold a double to make it single again. |
 | **Pads** | Play the sound at once. The pad flashes white. Play with several fingers: each new finger is a hit, even while others are down. |
 
 The grid's playhead and its bar page follow what the speaker is playing. That is the AirPlay delay behind what the board renders, so the screen matches what you hear.
+
+### Track tone: filter, EQ and level
+
+Hold a track's label to shape that instrument, in the editor the music apps share ([music_tone](../../components/music_tone)):
+
+```
+ <    BD TONE    >  BACK     track (< > for the others)
+ FILTER OFF  LP   HP   BP    resonant filter type
+ CUT 1.4k [=======|-----]    cutoff, 30 Hz to 18 kHz
+ RES  1.1 [==|----------]    resonance, Q 0.5 to 10
+ LOW   +6 [   |====    ]     low shelf at 100 Hz, -12 to +12 dB
+ MID   -3 [ ==|        ]     peak at 1 kHz
+ HIGH  +0 [   |        ]     high shelf at 6 kHz
+ LVL   +0 [   |        ]     level, -24 to +6 dB
+ FLAT                        resets the track
+ [BD][SD][CP][CH][OH][LT][RS][CB]   pads, to hear it
+```
+
+- Drag a finger along a slider to change it while the loop plays, as a filter sweep. Tap a slider to jump to a value. The EQ and level sliders snap to 0 near the middle.
+- The pads stay live under the editor, and the loop keeps playing, so you hear each change at once.
+- The tone belongs to the track, not the kit, so it stays when you change kit. It is part of the pattern, so EXPORT renders it, and it is not saved across power cycles.
+- The engine runs each track with a tone through its own filters as it mixes. A flat track costs nothing extra, and a track that's silent stops costing once its filter has rung out.
 
 ### The kits
 
@@ -127,7 +149,7 @@ The card is mounted at boot through the I/O expander's chip select, as in Wavesh
 | `main/main.c` | start-up: kit, NVS, audio task, touch, UI task |
 | `main/ui.c` | performance screen and menu |
 | `main/audio.c` | the engine's side of the audio task: transport, pad hits and recording, rendered 8 ms at a time through [music_out](../../components/music_out), which also does Wi-Fi, the speaker picker and the silent clock |
-| `main/engine.c` | step sequencer (sample-accurate steps) and mixer (retrigger fades, hat choke, soft clipping) |
+| `main/engine.c` | step sequencer (sample-accurate steps) and mixer (retrigger fades, hat choke, each track's tone, soft clipping) |
 | `main/kit.c` | the four kits' synthesis, and kits read from the SD card |
 | `main/wav.c` | WAV reader: PCM and float, any channels and rate, to 44.1 kHz mono |
 | `main/sdcard.c` | mounts the microSD card |
