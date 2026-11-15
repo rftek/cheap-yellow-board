@@ -46,7 +46,7 @@ static void ui_task(void *argument)
             roll_screen(touch_queue);
             break;
         default:
-            dk_next_screen = DK_KEYS;
+            dk_next_screen = DK_ROLL;
             drums_screen(touch_queue);
             break;
         }

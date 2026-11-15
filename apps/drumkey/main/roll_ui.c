@@ -1,9 +1,10 @@
 /* Drum&Key's Piano Roll: the keyboard loop as a grid of pitch against
    time, to draw, move, resize and delete notes while the loop plays.
-   Opened with the keys screen's ROLL button (or its loop row); it works
-   on an empty loop too, so notes can be drawn from scratch.
+   Opened with the drums screen's ROLL button (the screen button goes
+   KEYS -> DRUM -> ROLL) or the keys screen's loop row; it works on an
+   empty loop too, so notes can be drawn from scratch.
 
-     row 0       PLAY REC - 120 + SNAP KEYS DRUM   (the shared header)
+     row 0       PLAY REC - 120 + SNAP KEYS   (the shared header)
      strip       where the speaker is in the loop
      the grid    14 pitches by up to 2 bars; a key column on the left
      row 11      OCT- OCT+   <  BARS 1-2/4  >   UNDO
@@ -73,7 +74,6 @@ static const span_t BPM_SPAN = DK_BPM_SPAN;
 static const span_t BPM_UP_SPAN = DK_BPM_UP_SPAN;
 static const span_t SNAP_SPAN = DK_SCREEN_SPAN;
 static const span_t SWITCH_SPAN = DK_SWITCH_SPAN;
-static const span_t DRUMS_SPAN = DK_MENU_SPAN;
 
 static const span_t OCT_DOWN_SPAN = {0, 4};
 static const span_t OCT_UP_SPAN = {4, 4};
@@ -265,7 +265,6 @@ static void draw_header(const looper_state_t *state)
     put_span(&row, BPM_UP_SPAN, "+", CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
     put_span(&row, SNAP_SPAN, snap_names[snap_index], CYD_COLOR_BLACK, CYD_COLOR_CYAN);
     put_span(&row, SWITCH_SPAN, "KEYS", CYD_COLOR_WHITE, DK_KEYS_COLOR);
-    put_span(&row, DRUMS_SPAN, "DRUM", CYD_COLOR_WHITE, DK_DRUMS_COLOR);
     if (memcmp(&row, &drawn_header, sizeof(row)) != 0) {
         ESP_ERROR_CHECK(cyd_draw_cells(0, row.text, row.fg, row.bg));
         dk_header_gaps();
@@ -582,7 +581,7 @@ static void full_redraw(void)
     grid_dirty = true;
 }
 
-/* Runs the Piano Roll until KEYS or DRUM is tapped. */
+/* Runs the Piano Roll until KEYS is tapped. */
 void roll_screen(QueueHandle_t touch_queue)
 {
     if (notes == NULL) {
@@ -616,11 +615,10 @@ void roll_screen(QueueHandle_t touch_queue)
             int row = point.y / FH;
             int column = point.x / FW;
             if (row == 0) {
-                if (in_span(SWITCH_SPAN, column) || in_span(DRUMS_SPAN, column)) {
+                if (in_span(SWITCH_SPAN, column)) {
                     end_audition(true);
                     cyd_touch_set_fast(false);
-                    dk_next_screen = in_span(DRUMS_SPAN, column) ? DK_DRUMS : DK_KEYS;
-                    return;
+                    return; /* on to the keys */
                 }
                 tap_header(column, &state);
             } else if (row == TOOL_ROW) {

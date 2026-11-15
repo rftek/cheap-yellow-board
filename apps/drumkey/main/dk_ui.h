@@ -4,7 +4,9 @@
    button that switches between them, and the gaps drawn between its
    buttons (they sit side by side, with no blank columns to spare).
 
-     PLAY REC - 140 + [BAR|ROLL] KEYS|DRUM MENU   26 columns */
+     PLAY REC - 140 + [BAR|MET] DRUM|ROLL|KEYS MENU   26 columns
+
+   The screen button goes round KEYS -> DRUM -> ROLL -> KEYS. */
 
 #include <stdbool.h>
 
@@ -22,7 +24,7 @@ typedef struct {
 #define DK_BPM_DOWN_SPAN {7, 2}
 #define DK_BPM_SPAN {9, 3}
 #define DK_BPM_UP_SPAN {12, 2}
-#define DK_SCREEN_SPAN {14, 4} /* the drums' bar page, the keys' ROLL button */
+#define DK_SCREEN_SPAN {14, 4} /* the drums' bar page, the keys' metronome */
 #define DK_SWITCH_SPAN {18, 4}
 #define DK_MENU_SPAN {22, 4}
 
@@ -35,9 +37,9 @@ typedef struct {
    row 0. */
 void dk_header_gaps(void);
 
-/* The screens. Each runs until a button takes it to another; it sets
-   dk_next_screen first when that isn't the usual one (drums and keys
-   switch with each other; the Piano Roll returns to the keys). */
+/* The screens. Each runs until its screen button takes it to the next,
+   keys to drums to Piano Roll and round again; one that goes elsewhere
+   (the keys' loop row opens the roll) sets dk_next_screen first. */
 typedef enum {
     DK_DRUMS,
     DK_KEYS,
