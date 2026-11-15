@@ -11,7 +11,7 @@ This app lives in `apps/keyboard`. The [root README](../../README.md) lists ever
 Keyboard boots straight to the keys with Wi-Fi off and no speaker. To hear it, open **MENU**:
 
 1. **WI-FI** turns the radio on and joins the network saved by the [launcher](../../launcher) (`wifi_ssid` and `wifi_pass` in NVS namespace `cyd_config`). No credentials are compiled in.
-2. **OUTPUT** searches for AirPlay speakers for 3 seconds and lists them under **WIRED DAC (PCM5102A)**, which needs no Wi-Fi and plays a key about 25-40 ms after the touch; see DrumLoop's [Wired DAC](../drumloop/README.md#wired-dac) for the wiring and the UART switch. Tap one to connect. **NO SPEAKER** goes silent; **BACK** leaves the output as it was.
+2. **OUTPUT** searches for AirPlay speakers for 3 seconds and lists them under **WIRED DAC (PCM5102A)**, which needs no Wi-Fi and plays a key about 15-30 ms after the touch; see DrumLoop's [Wired DAC](../drumloop/README.md#wired-dac) for the wiring and the UART switch. Tap one to connect. **NO SPEAKER** goes silent; **BACK** leaves the output as it was.
 
 If the speaker drops the session, the keyboard goes silent and the MENU button turns red until you open the menu.
 

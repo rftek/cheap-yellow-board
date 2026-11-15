@@ -100,7 +100,7 @@ Everything else between a tap and the speaker is kept short:
 | Touch: the GT911 scans about every 10 ms and the driver polls it every 5 ms in fast mode ([cyd_touch_set_fast](../../components/cyd_display/include/cyd_display.h)) | about 5-15 ms |
 | The touch task hands a pad straight to the audio task ([cyd_touch_set_tap_callback](../../components/cyd_display/include/cyd_display.h)), without waiting for the screen to redraw | under 1 ms |
 | The hit goes into the next 8 ms packet, sent 1 packet ahead of the clock (`lead_packets = 1`) | 8-16 ms |
-| The AirPlay delay, plus whatever the speaker adds itself (the wired DAC: 16 ms) | 100 ms and up |
+| The AirPlay delay, plus whatever the speaker adds itself (the wired DAC: 9 ms) | 100 ms and up |
 
 Below about 200 ms, a packet lost on Wi-Fi may not be resent in time, which you hear as a click or a gap. Wi-Fi power saving is off while DrumLoop is on Wi-Fi.
 
@@ -110,7 +110,7 @@ AirPlay can't get much closer to real time than that. For playing live, use the 
 
 **WIRED DAC (PCM5102A)** in OUTPUT plays through a PCM5102A DAC module wired to the board's free header pins, as in [pcm5102a_test](../pcm5102a_test): BCK on GPIO44 and LRCK on GPIO43 (the UART2 header) and DIN on GPIO6 (Sensor AD), with the module's SCK tied to GND. Connect its line output to an amplifier or powered speakers. It needs no Wi-Fi.
 
-- A tap reaches the line output about 25-40 ms after the finger lands: the touch scan (5-15 ms), the next 8 ms block, and the DAC's 16 ms queue (4 buffers of 176 frames) plus its filter, 0.45 ms. The status line shows the queue and filter delay when it connects.
+- A tap reaches the line output about 15-30 ms after the finger lands: the touch scan (5-15 ms), the next 8 ms block, and the DAC's 9 ms queue (9 buffers of 44 frames) plus its filter, 0.45 ms. The status line shows the queue and filter delay when it connects.
 - If a block comes too late, the DAC plays a moment of silence, heard as a click. The OUTPUT row in MENU then reads `DAC, N GAPS`; it should stay at `WIRED DAC`.
 - **Set the UART switch (SW1) to UART2** first. On UART1, the USB serial chip drives GPIO44 too and the sound turns to noise, so the picker checks the pin first and says `Set SW1 to UART2 first` instead of starting. Don't move SW1 back to UART1 while the DAC plays. The serial log stops while the DAC plays and comes back when you pick another output.
 - Picking an AirPlay speaker or **NO SPEAKER** stops the DAC and gives the three pins back.

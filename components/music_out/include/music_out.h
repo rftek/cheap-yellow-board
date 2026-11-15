@@ -3,7 +3,7 @@
 /* Sound output for the music apps (DrumLoop, Keyboard, Drum&Key): Wi-Fi, a
    speaker picker, and an audio task that streams the app's sound to an
    AirPlay speaker through airplay_sender or, on the ESP32-S3, to a PCM5102A
-   DAC on the header pins (the picker's "WIRED DAC" row, about 16 ms of
+   DAC on the header pins (the picker's "WIRED DAC" row, about 9 ms of
    delay), plus the settings those apps share.
 
    The app renders 44100 Hz mono 16-bit audio in a callback, 8 ms at a

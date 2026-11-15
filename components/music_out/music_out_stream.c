@@ -22,13 +22,14 @@
 
 #define WRITE_TIMEOUT_MS 500
 
-/* The wired DAC's queue: 4 buffers of half a block (176 frames), 16 ms in
-   all. A write returns once a block's last buffer is queued, so 3 buffers,
-   12 ms, are still ahead of the DAC while the next block renders. On the
-   S3 the render competes with the display for PSRAM (frame buffer, code
-   and samples) and can take several ms; a shorter queue crackled. */
-#define DAC_BUFFERS 4
-#define DAC_FRAMES (MUSIC_OUT_BLOCK_FRAMES / 2)
+/* The wired DAC's queue: 9 buffers of an eighth of a block (44 frames),
+   9 ms in all. A write returns once a block's last buffer is queued, so 8
+   buffers, a whole block (8 ms), are still ahead of the DAC while the next
+   block renders: small buffers buy that margin without a long queue. On
+   the S3 the render competes with the display for PSRAM (frame buffer,
+   code and samples) and can take several ms. */
+#define DAC_BUFFERS 9
+#define DAC_FRAMES (MUSIC_OUT_BLOCK_FRAMES / 8)
 #define DAC_DEFAULT_VOLUME 70
 
 static const char *TAG = "music_out";
