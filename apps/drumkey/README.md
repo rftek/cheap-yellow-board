@@ -37,16 +37,16 @@ The screen button in the header goes round **KEYS → DRUM → ROLL**: tap **ROL
  ==========|---------------------     where the speaker is in the loop
  C4 |  ##      ####        |   ##     14 pitches by 2 bars; key column on the left
     |      ##          ##  |
- OCT- OCT+   <  1-2/4  >   UNDO      octave, bar page, undo
+ OCT- OCT+  <  1-2/4  >  DEL  UNDO   octave, bar page, delete, undo
 ```
 
 The key column on the left names every key (C4, C#4, D4 …) and plays it while you hold it, in the style picked on the keys screen. Slide along it to play a run. While REC is on, it records like the keys.
 
 With one finger on the grid:
-- **Empty spot:** adds a note on the keys' current style, at the snapped step. Drag right before lifting to draw it longer. The next note takes the last length you drew.
-- **Drag a note:** moves it in time and pitch.
+- **Empty spot:** adds a note on the keys' current style, at the snapped step. Drag right before lifting to draw it longer. The next note takes the last length you drew. With notes selected, it clears the selection instead.
+- **Tap a note:** selects it (it turns white), or deselects it.
+- **Drag a note:** moves it in time and pitch. Drag a selected note to move the whole selection together.
 - **Drag a note's right end** (the dark handle): resizes it.
-- **Tap a note** without moving: deletes it.
 - Notes sound briefly as you place or move them, except while REC is on.
 
 | Control | What it does |
@@ -55,6 +55,7 @@ With one finger on the grid:
 | **KEYS** | On to the keys screen. |
 | **OCT- / OCT+** | Moves the 14 pitches shown by an octave, from C1 up to C8. |
 | **< 1-2/4 >** | The bars shown. Loops longer than 2 bars page 2 at a time. |
+| **DEL** | Deletes the selected notes. |
 | **UNDO** | Removes the last take. Each drawn note is a take of its own, so it removes the last note drawn. Moves and deletes aren't undone. |
 | **PLAY / REC / tempo** | As on the other screens. REC records the keys while you watch the notes appear. |
 

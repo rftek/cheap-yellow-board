@@ -7,16 +7,19 @@
      row 0       PLAY REC - 120 + SNAP KEYS   (the shared header)
      strip       where the speaker is in the loop
      the grid    14 pitches by up to 2 bars; a key column on the left
-     row 11      OCT- OCT+   <  BARS 1-2/4  >   UNDO
+     row 11      OCT- OCT+  <  1-2/4  >  DEL  UNDO
 
    The key column is labelled and plays, while held, in the style the keys
    screen has selected, as new notes do.
 
    On the grid, with one finger:
      - on an empty spot: a new note on the keys' style, at the snapped
-       step; drag right before lifting to make it longer
-     - on a note: drag to move it (in time and pitch); drag from its right
-       end to resize it; lift without moving to delete it
+       step (drag right before lifting to make it longer); with notes
+       selected, it clears the selection instead
+     - on a note: tap to select or deselect it; drag to move it, or the
+       whole selection when it is selected (in time and pitch); drag from
+       its right end to resize it
+   DEL deletes the selected notes.
    The notes are the looper's (looper.h), shared with the keys screen:
    what you record shows here, and what you draw plays there. Each drawn
    note is a take of its own, so UNDO removes the last one. */
@@ -80,9 +83,10 @@ static const span_t SWITCH_SPAN = DK_SWITCH_SPAN;
 
 static const span_t OCT_DOWN_SPAN = {0, 4};
 static const span_t OCT_UP_SPAN = {4, 4};
-static const span_t PAGE_DOWN_SPAN = {9, 3};
-static const span_t PAGE_SPAN = {12, 7};
-static const span_t PAGE_UP_SPAN = {19, 3};
+static const span_t PAGE_DOWN_SPAN = {8, 2};
+static const span_t PAGE_SPAN = {10, 5};
+static const span_t PAGE_UP_SPAN = {15, 2};
+static const span_t DEL_SPAN = {17, 4};
 static const span_t UNDO_SPAN = {22, 4};
 
 /* Snap steps in ticks: a quarter, an eighth, a 16th, a 32nd, or off. */
@@ -117,9 +121,43 @@ static row_t drawn_header;
 static row_t drawn_tools;
 static bool grid_dirty;
 
+/* The selected notes, by start, pitch and style (which identify a note
+   to the looper). A selected note that has since gone is just skipped. */
+#define MAX_SELECTED 128
+static looper_note_t selected[MAX_SELECTED];
+static int selected_count;
+
+static bool same_identity(const looper_note_t *a, const looper_note_t *b)
+{
+    return a->start == b->start && a->note == b->note && a->instrument == b->instrument;
+}
+
+static int find_selected(const looper_note_t *note)
+{
+    for (int i = 0; i < selected_count; ++i) {
+        if (same_identity(&selected[i], note)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void toggle_selected(const looper_note_t *note)
+{
+    int index = find_selected(note);
+    if (index >= 0) {
+        selected[index] = selected[--selected_count];
+    } else if (selected_count < MAX_SELECTED) {
+        selected[selected_count++] = *note;
+    }
+}
+
 /* One finger editing a note. */
 static struct {
     drag_t mode;
+    bool group;           /* moving the whole selection */
+    looper_note_t origin; /* the grabbed note before the drag */
+    looper_note_t originals[MAX_SELECTED]; /* the selection before the drag */
     looper_note_t note;   /* the note as it is now */
     int32_t grab;         /* ticks from the note's start to the finger */
     int press_x, press_y;
@@ -302,6 +340,9 @@ static void draw_tools(const looper_state_t *state)
     put_span(&row, PAGE_SPAN, page, CYD_COLOR_YELLOW, CYD_COLOR_BLACK);
     put_span(&row, PAGE_UP_SPAN, ">", pages ? CYD_COLOR_WHITE : CYD_COLOR_GRAY,
              pages ? CYD_COLOR_BUTTON : CYD_COLOR_BUTTON_DISABLED);
+    bool can_delete = selected_count > 0;
+    put_span(&row, DEL_SPAN, "DEL", can_delete ? CYD_COLOR_WHITE : CYD_COLOR_GRAY,
+             can_delete ? CYD_COLOR_RED : CYD_COLOR_BUTTON_DISABLED);
     put_span(&row, UNDO_SPAN, "UNDO", state->notes > 0 ? CYD_COLOR_WHITE : CYD_COLOR_GRAY,
              state->notes > 0 ? CYD_COLOR_BUTTON : CYD_COLOR_BUTTON_DISABLED);
     if (memcmp(&row, &drawn_tools, sizeof(row)) != 0) {
@@ -367,9 +408,10 @@ static void draw_grid(const looper_state_t *state)
             x1 = x0 + 4;
         }
         int y = note_y(note->note);
-        bool held = drag.mode != DRAG_NONE && note->start == drag.note.start &&
-                    note->note == drag.note.note && note->instrument == drag.note.instrument;
-        uint16_t color = held ? CYD_COLOR_WHITE : voice_color(note->instrument);
+        bool held = drag.mode != DRAG_NONE && same_identity(note, &drag.note);
+        uint16_t color = held                        ? CYD_COLOR_YELLOW
+                         : find_selected(note) >= 0 ? CYD_COLOR_WHITE
+                                                    : voice_color(note->instrument);
         ESP_ERROR_CHECK(cyd_fill_rect(x0 + 1, y + 2, x1 - x0 - 2, ROW_HEIGHT - 4, color));
         /* A darker right end, the handle that resizes it. */
         if (x1 - x0 > RESIZE_HANDLE + 4 && start + note->length <= to) {
@@ -469,9 +511,14 @@ static void press_grid(const looper_state_t *state, int x, int y)
     drag.moved = false;
     if (index >= 0) {
         drag.note = notes[index];
+        drag.origin = notes[index];
         drag.mode = on_end ? DRAG_RESIZE : DRAG_MOVE;
         drag.grab = (int32_t)(x_tick(state, x) - notes[index].start);
+        drag.group = drag.mode == DRAG_MOVE && find_selected(&drag.note) >= 0 && selected_count > 1;
+        memcpy(drag.originals, selected, sizeof(selected[0]) * (size_t)selected_count);
         audition(drag.note.note, drag.note.instrument, state);
+    } else if (selected_count > 0) {
+        selected_count = 0; /* a tap off the notes clears the selection */
     } else {
         looper_note_t note = {
             .start = snap_down(x_tick(state, x)),
@@ -490,7 +537,30 @@ static void press_grid(const looper_state_t *state, int x, int y)
     grid_dirty = true;
 }
 
-/* Follows the editing finger; on lift, a note tapped without moving goes. */
+/* Moves the whole selection by the grabbed note's change. */
+static void move_group(const looper_note_t *grabbed_to, const looper_state_t *state)
+{
+    int32_t delta_ticks = (int32_t)grabbed_to->start - (int32_t)drag.origin.start;
+    int delta_pitch = grabbed_to->note - drag.origin.note;
+    uint32_t loop_ticks = (uint32_t)state->bars * LOOP_TICKS_PER_BAR;
+    for (int i = 0; i < selected_count; ++i) {
+        looper_note_t to = drag.originals[i];
+        int64_t start = (int64_t)to.start + delta_ticks;
+        start = start < 0 ? 0 : start;
+        if (start + LOOPER_MIN_LENGTH > loop_ticks) {
+            start = loop_ticks - LOOPER_MIN_LENGTH;
+        }
+        int pitch = to.note + delta_pitch;
+        to.start = (uint32_t)start;
+        to.note = (uint8_t)(pitch < 0 ? 0 : pitch > 127 ? 127 : pitch);
+        if (!same_notes(&to, &selected[i], 1) && looper_replace_note(&selected[i], &to)) {
+            selected[i] = to;
+        }
+    }
+}
+
+/* Follows the editing finger; on lift, a note tapped without moving is
+   selected or deselected. */
 static void follow_drag(const looper_state_t *state)
 {
     cyd_touch_point_t held[5];
@@ -504,7 +574,7 @@ static void follow_drag(const looper_state_t *state)
     }
     if (finger == NULL) {
         if (drag.mode == DRAG_MOVE && !drag.moved) {
-            looper_remove_note(&drag.note);
+            toggle_selected(&drag.note);
         }
         drag.mode = DRAG_NONE;
         end_audition(true);
@@ -530,13 +600,24 @@ static void follow_drag(const looper_state_t *state)
     if (to.start + LOOPER_MIN_LENGTH > loop_ticks) {
         to.start = loop_ticks - LOOPER_MIN_LENGTH;
     }
-    if (!same_notes(&to, &drag.note, 1) && looper_replace_note(&drag.note, &to)) {
-        if (to.note != drag.note.note) {
-            audition(to.note, to.instrument, state);
-        }
-        drag.note = to;
-        grid_dirty = true;
+    if (same_notes(&to, &drag.note, 1)) {
+        return;
     }
+    if (drag.group) {
+        move_group(&to, state);
+    } else if (looper_replace_note(&drag.note, &to)) {
+        int index = find_selected(&drag.note);
+        if (index >= 0) {
+            selected[index] = to; /* it keeps its selection */
+        }
+    } else {
+        return;
+    }
+    if (to.note != drag.note.note) {
+        audition(to.note, to.instrument, state);
+    }
+    drag.note = to;
+    grid_dirty = true;
 }
 
 /* The key column is a keyboard in the keys screen's style: a key plays
@@ -602,6 +683,12 @@ static void tap_tools(int column, const looper_state_t *state)
                                                   : first_bar - VIEW_BARS_MAX;
     } else if (state->bars > VIEW_BARS_MAX && in_span(PAGE_UP_SPAN, column)) {
         first_bar = first_bar + VIEW_BARS_MAX >= state->bars ? 0 : first_bar + VIEW_BARS_MAX;
+    } else if (in_span(DEL_SPAN, column) && selected_count > 0) {
+        for (int i = 0; i < selected_count; ++i) {
+            looper_remove_note(&selected[i]);
+        }
+        selected_count = 0;
+        grid_dirty = true;
     } else if (in_span(UNDO_SPAN, column) && state->notes > 0) {
         keys_undo();
     }
