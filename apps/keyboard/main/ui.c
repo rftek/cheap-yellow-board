@@ -22,6 +22,7 @@
 #include "cyd_display.h"
 #include "music_out.h"
 #include "synth.h"
+#include "tone_editor.h"
 
 /* Screen lines are cut to the display's width on purpose. */
 #pragma GCC diagnostic ignored "-Wformat-truncation"
@@ -65,6 +66,7 @@ _Static_assert(CYD_LCD_WIDTH == 800 && CYD_TEXT_ROWS == 12,
 #define MAP_NOT_DRAWN 0xFF
 
 #define REFRESH_MS 10
+#define LONG_PRESS_MS 450
 #define TEMPO_SAVE_MS 2000
 #define MAX_FINGER_IDS 16
 #define NO_KEY -1
@@ -348,7 +350,11 @@ static void refresh_sound(const looper_state_t *state)
     row_t row;
     clear_row(&row);
     put_span(&row, VOICE_SPAN, synth_voice_name(voice_kind), CYD_COLOR_BLACK, voice_colors[voice_kind]);
-    put_span(&row, STYLE_SPAN, synth_style_name(instrument), CYD_COLOR_WHITE,
+    /* A ~ marks a style with a tone (filter, EQ or level). */
+    char style[16];
+    snprintf(style, sizeof(style), "%s%s", synth_style_name(instrument),
+             tone_is_flat(synth_tone(instrument)) ? "" : "~");
+    put_span(&row, STYLE_SPAN, style, CYD_COLOR_WHITE,
              synth_style_count(voice_kind) > 1 ? CYD_COLOR_BUTTON : CYD_COLOR_BUTTON_DISABLED);
     put_span(&row, UNDO_SPAN, "UNDO", state->notes > 0 ? CYD_COLOR_WHITE : CYD_COLOR_GRAY,
              state->notes > 0 ? CYD_COLOR_BUTTON : CYD_COLOR_BUTTON_DISABLED);
@@ -918,6 +924,17 @@ static void show_style(void)
     toast_until = xTaskGetTickCount() + pdMS_TO_TICKS(TOAST_MS);
 }
 
+/* The style button tapped and maybe still held, with the style before. */
+static struct {
+    bool active;
+    int voice;
+    int style;
+    TickType_t since;
+} style_press;
+
+/* The instrument whose tone editor a held style button asked for, or -1. */
+static int tone_instrument = -1;
+
 static void tap_sound(int column, const looper_state_t *state)
 {
     if (in_span(VOICE_SPAN, column)) {
@@ -925,6 +942,10 @@ static void tap_sound(int column, const looper_state_t *state)
         instrument = synth_instrument(voice_kind, styles[voice_kind]);
         show_style();
     } else if (in_span(STYLE_SPAN, column)) {
+        style_press.active = true;
+        style_press.voice = voice_kind;
+        style_press.style = styles[voice_kind];
+        style_press.since = xTaskGetTickCount();
         int count = synth_style_count(voice_kind);
         styles[voice_kind] = count > 0 ? (styles[voice_kind] + 1) % count : 0;
         instrument = synth_instrument(voice_kind, styles[voice_kind]);
@@ -964,6 +985,160 @@ static void tap_octave(int x)
         int octave = (x - MAP_X) / MAP_KEY_WIDTH / 7;
         set_base(LOWEST_NOTE + 12 * octave);
     }
+}
+
+/* A style button held for LONG_PRESS_MS opens that style's tone editor,
+   and undoes the tap's step to the next style. */
+static void check_style_hold(void)
+{
+    if (!style_press.active) {
+        return;
+    }
+    cyd_touch_point_t held[5];
+    int count = cyd_touch_held(held, 5);
+    bool still = false;
+    for (int i = 0; i < count; ++i) {
+        still |= held[i].y / FH == 1 && in_span(STYLE_SPAN, held[i].x / FW);
+    }
+    if (!still) {
+        style_press.active = false;
+        return;
+    }
+    if (xTaskGetTickCount() - style_press.since < pdMS_TO_TICKS(LONG_PRESS_MS)) {
+        return;
+    }
+    style_press.active = false;
+    voice_kind = style_press.voice;
+    styles[voice_kind] = style_press.style;
+    instrument = synth_instrument(voice_kind, styles[voice_kind]);
+    toast_until = 0;
+    tone_instrument = instrument;
+}
+
+/* ---- Tone editor ---------------------------------------------------------- */
+
+/* A style's tone, in the music apps' shared editor (tone_editor.h). Below
+   it, eight test keys from middle C up an octave play the style, so each
+   change is heard; < > step through every style of every voice. */
+
+#define TEST_KEYS 8
+#define TEST_TOP (TONE_EDITOR_BOTTOM_ROW * FH)
+#define TEST_WIDTH (CYD_LCD_WIDTH / TEST_KEYS)
+static const uint8_t test_notes[TEST_KEYS] = {60, 62, 64, 65, 67, 69, 71, 72};
+static volatile int test_instrument;
+static int16_t test_finger_notes[MAX_FINGER_IDS]; /* the note under each finger, or -1 */
+
+static int test_key_at(int x, int y)
+{
+    if (y < TEST_TOP) {
+        return -1;
+    }
+    int key = x / TEST_WIDTH;
+    return key < TEST_KEYS ? key : TEST_KEYS - 1;
+}
+
+/* The touch task's fingers callback while the editor is up: a finger on a
+   test key plays it until it lifts or slides to another. */
+static void on_test_fingers(const cyd_touch_fingers_t *report, void *context)
+{
+    (void)context;
+    bool seen[MAX_FINGER_IDS] = {false};
+    int playing = test_instrument;
+    for (int i = 0; i < report->count; ++i) {
+        int id = report->ids[i] % MAX_FINGER_IDS;
+        int key = test_key_at(report->points[i].x, report->points[i].y);
+        int note = key >= 0 ? test_notes[key] : -1;
+        seen[id] = true;
+        if (note != test_finger_notes[id]) {
+            if (test_finger_notes[id] >= 0) {
+                audio_note_off(test_finger_notes[id], playing);
+            }
+            if (note >= 0) {
+                audio_note_on(note, playing);
+            }
+            test_finger_notes[id] = (int16_t)note;
+        }
+    }
+    for (int id = 0; id < MAX_FINGER_IDS; ++id) {
+        if (!seen[id] && test_finger_notes[id] >= 0) {
+            audio_note_off(test_finger_notes[id], playing);
+            test_finger_notes[id] = -1;
+        }
+    }
+}
+
+static tone_settings_t *style_tone(int item, void *context)
+{
+    (void)context;
+    return synth_tone(item);
+}
+
+static const char *style_name(int item, void *context)
+{
+    (void)context;
+    return synth_style_name(item);
+}
+
+static uint16_t style_color(int item, void *context)
+{
+    (void)context;
+    return voice_colors[synth_instrument_voice(item)];
+}
+
+static void draw_test_keys(int item, void *context)
+{
+    (void)context;
+    audio_all_notes_off(); /* notes held on the last style */
+    memset(test_finger_notes, 0xFF, sizeof(test_finger_notes));
+    test_instrument = item;
+    ESP_ERROR_CHECK(cyd_fill_rect(0, TEST_TOP, CYD_LCD_WIDTH, CYD_LCD_HEIGHT - TEST_TOP,
+                                  CYD_COLOR_BLACK));
+    for (int key = 0; key < TEST_KEYS; ++key) {
+        int x = key * TEST_WIDTH + 2;
+        ESP_ERROR_CHECK(cyd_fill_rect(x, TEST_TOP + 2, TEST_WIDTH - 4,
+                                      CYD_LCD_HEIGHT - TEST_TOP - 4, COLOR_WHITE_KEY));
+        char name[8];
+        static const char *const letters[] = {"C4", "D4", "E4", "F4", "G4", "A4", "B4", "C5"};
+        snprintf(name, sizeof(name), "%s", letters[key]);
+        int text_x = x + (TEST_WIDTH - 4 - 2 * CYD_SMALL_FONT_WIDTH) / 2;
+        ESP_ERROR_CHECK(cyd_draw_small_text(text_x, CYD_LCD_HEIGHT - CYD_SMALL_FONT_HEIGHT - 10,
+                                            name, CYD_COLOR_BLACK, COLOR_WHITE_KEY));
+    }
+}
+
+static void tone_tick(int item, void *context)
+{
+    (void)context;
+    test_instrument = item;
+    if (music_out_check_lost()) {
+        speaker_lost_notice = true;
+    }
+    looper_state_t state;
+    looper_get_state(&state);
+    take_heard_notes(&state);
+}
+
+/* The tone editor for tone_instrument, until BACK. */
+static void run_tone(QueueHandle_t touch_queue)
+{
+    static const tone_editor_t editor = {
+        .settings = style_tone,
+        .name = style_name,
+        .color = style_color,
+        .draw_bottom = draw_test_keys,
+        .tick = tone_tick,
+    };
+    tone_editor_t pages = editor;
+    pages.count = synth_instrument_count();
+    int item = tone_instrument;
+    tone_instrument = -1;
+    test_instrument = item;
+    memset(test_finger_notes, 0xFF, sizeof(test_finger_notes));
+    cyd_touch_set_fingers_callback(on_test_fingers, NULL);
+    cyd_touch_set_fast(true);
+    tone_editor_run(touch_queue, &pages, item);
+    cyd_touch_set_fingers_callback(on_fingers, NULL);
+    audio_all_notes_off();
 }
 
 /* The keys: fast multi-finger touch, played by on_fingers. */
@@ -1032,6 +1207,13 @@ void ui_run(QueueHandle_t touch_queue)
             } else if (row == 2) {
                 tap_octave(point.x);
             }
+        }
+        check_style_hold();
+        if (tone_instrument >= 0) {
+            leave_keys();
+            run_tone(touch_queue);
+            enter_keys(touch_queue);
+            continue;
         }
         /* An octave or voice change recolors or renumbers every key. */
         if (base_note != drawn_base || instrument != drawn_instrument) {

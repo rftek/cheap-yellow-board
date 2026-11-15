@@ -15,6 +15,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "tone.h"
+
 #define SYNTH_RATE 44100
 #define SYNTH_VOICES 8
 
@@ -50,6 +52,9 @@ int synth_instrument(int voice, int style);
 /* All instruments, for bounds checks. */
 int synth_instrument_count(void);
 
+/* The voice (voice_kind_t) an instrument is a style of. */
+int synth_instrument_voice(int instrument);
+
 /* An instrument's style name, at most 10 characters ("C7 GRAND"), and a
    few words about it ("BRIGHT CONCERT GRAND"). */
 const char *synth_style_name(int instrument);
@@ -77,6 +82,10 @@ void synth_silence(void);
 
 /* A metronome tick; accent for the first beat of a bar. */
 void synth_click(bool accent);
+
+/* An instrument's tone: a filter, EQ and level its notes are run through
+   as they are mixed. The UI changes it in place; the audio task reads it. */
+tone_settings_t *synth_tone(int instrument);
 
 /* Renders frames of mono audio, adding every voice and the click. */
 void synth_render(int16_t *out, size_t frames);

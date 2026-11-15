@@ -7,5 +7,5 @@ idf_component_register(SRCS "main.c" "dk_audio.c" "dk_ui.c" "drums_ui.c" "keys_u
                             "${DRUMLOOP}/sdcard.c" "${DRUMLOOP}/wav.c"
                             "${KEYBOARD}/looper.c" "${KEYBOARD}/synth.c"
                        INCLUDE_DIRS "." "${DRUMLOOP}" "${KEYBOARD}"
-                       PRIV_REQUIRES airplay_sender cyd_display music_out esp_driver_sdspi esp_driver_spi
+                       PRIV_REQUIRES airplay_sender cyd_display music_out music_tone esp_driver_sdspi esp_driver_spi
                                      esp_event esp_netif esp_timer esp_wifi fatfs nvs_flash sdmmc)
