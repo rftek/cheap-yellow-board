@@ -31,7 +31,7 @@ The ESP-IDF component manager fetches `espressif/mdns` on the first build. The a
 The other calls:
 
 - `airplay_sender_is_connected` and the `on_event` callback (`AIRPLAY_EVENT_DISCONNECTED`) report a speaker that closed the session, for example after it was switched off or taken over by a phone.
-- `airplay_sender_latency_ms` returns the delay between a write and the sound, which matters for sound effects that should match the screen. `config.latency_ms` sets it. 2 s is the AirPlay 1 norm. Shairport Sync and many other receivers also play at shorter latencies.
+- `airplay_sender_latency_ms` returns the delay between a write and the sound, which matters for sound effects that should match the screen. `config.latency_ms` sets it. 2 s is the AirPlay 1 norm. Shairport Sync and many other receivers also play at shorter latencies, but some play nothing at all when given less than they need, and don't say so: a Denon Home 250 is silent at 250 ms and plays at 500 ms. When a speaker's RECORD response has an `Audio-Latency` header longer than `config.latency_ms`, the sender uses that instead; otherwise the app's latency is used as given. `airplay_sender_latency_ms` reports the latency in use.
 
 Calls on one handle are not thread-safe against each other. Use one writer task, and take a mutex around stop, volume and disconnect if another task makes those calls (see the demo).
 
@@ -47,7 +47,7 @@ Calls on one handle are not thread-safe against each other. Use one writer task,
   7. `FLUSH` to stop, and `TEARDOWN` to end.
 
   `OPTIONS` is also sent every 30 s as a keepalive.
-- **Audio**: RTP packets of 352 frames (8 ms) of uncompressed ALAC, sent over UDP. ALAC frames can be stored uncompressed, so no encoder is needed, at about 1.4 Mbit/s. A packet is sent when the sender's clock reaches its RTP timestamp, at most 4 packets early. If the app falls behind by more than half the latency, the timeline jumps forward and the speaker plays the gap as silence.
+- **Audio**: RTP packets of 352 frames (8 ms) of uncompressed ALAC, sent over UDP. ALAC frames can be stored uncompressed, so no encoder is needed, at about 1.4 Mbit/s. A packet is sent when the sender's clock reaches its RTP timestamp, at most `config.lead_packets` early (4 by default, 32 ms; an instrument can use 1). If the app falls behind by more than half the latency, the timeline jumps forward and the speaker plays the gap as silence.
 - **Control**: a sync packet every second ties RTP time to the sender's NTP-style clock and tells the speaker to play each frame `latency` after it was sent. The speaker's resend requests are answered from a backlog of recent packets: 128 by default, about 1 s or 182 KB, kept in PSRAM when there is some.
 - **Timing**: the speaker's NTP-style timing requests are answered with the sender's clock, `esp_timer`, so no SNTP is needed.
 

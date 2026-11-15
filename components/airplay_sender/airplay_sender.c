@@ -50,8 +50,6 @@ static const char *TAG = "airplay_sender";
 #define RTSP_HEADER_MAX 2048
 #define SYNC_INTERVAL_US 1000000
 #define KEEPALIVE_INTERVAL_US (30 * 1000000LL)
-/* How far ahead of our clock audio may be sent, for Wi-Fi jitter. */
-#define LEAD_FRAMES (4 * FRAMES)
 /* An arbitrary NTP epoch for our clock: only differences matter. */
 #define NTP_EPOCH_SECONDS 0xEC000000u
 
@@ -591,6 +589,16 @@ static esp_err_t send_volume(struct airplay_sender *s, int volume)
                         NULL);
 }
 
+/* Raises the latency to frames when that is longer. Before playing. */
+static void raise_latency(struct airplay_sender *s, uint32_t frames)
+{
+    if (frames > s->latency_frames && frames <= 10 * AIRPLAY_SAMPLE_RATE) {
+        s->latency_frames = frames;
+        s->config.latency_ms =
+            (uint32_t)(((uint64_t)frames * 1000 + AIRPLAY_SAMPLE_RATE - 1) / AIRPLAY_SAMPLE_RATE);
+    }
+}
+
 static esp_err_t open_session(struct airplay_sender *s, const airplay_device_t *device)
 {
     s->remote.sin_family = AF_INET;
@@ -704,7 +712,23 @@ static esp_err_t open_session(struct airplay_sender *s, const airplay_device_t *
     char record[96];
     snprintf(record, sizeof(record), "Range: npt=0-\r\nRTP-Info: seq=%u;rtptime=%lu\r\n", s->seq,
              (unsigned long)s->next_ts);
-    result = rtsp_request(s, "RECORD", s->url, record, NULL, NULL, 0, NULL);
+    response = malloc(sizeof(rtsp_response_t));
+    if (response == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    result = rtsp_request(s, "RECORD", s->url, record, NULL, NULL, 0, response);
+    if (result == ESP_OK) {
+        /* The speaker may say how far ahead it needs audio; a shorter
+           config.latency_ms is raised to it. */
+        char value[16];
+        if (header_value(response, "Audio-Latency", value, sizeof(value))) {
+            uint32_t frames = strtoul(value, NULL, 10);
+            ESP_LOGI(TAG, "The speaker asks for %lu frames (%lu ms) of latency",
+                     (unsigned long)frames, (unsigned long)((uint64_t)frames * 1000 / AIRPLAY_SAMPLE_RATE));
+            raise_latency(s, frames);
+        }
+    }
+    free(response);
     if (result != ESP_OK) {
         return result;
     }
@@ -765,7 +789,7 @@ esp_err_t airplay_sender_connect(const airplay_device_t *device,
         return result;
     }
     ESP_LOGI(TAG, "Connected to %s; latency %lu ms", device->name,
-             (unsigned long)config->latency_ms);
+             (unsigned long)s->config.latency_ms);
     *sender = s;
     return ESP_OK;
 }
@@ -795,14 +819,16 @@ static esp_err_t send_chunk_paced(struct airplay_sender *s, TickType_t start, Ti
             s->next_ts = now_ts;
             ahead = 0;
         }
-        if (ahead <= LEAD_FRAMES) {
+        /* Audio may be sent config.lead_packets ahead of our clock. */
+        int32_t lead = (int32_t)s->config.lead_packets * FRAMES;
+        if (ahead <= lead) {
             send_chunk(s);
             xSemaphoreGive(s->lock);
             return ESP_OK;
         }
         xSemaphoreGive(s->lock);
 
-        TickType_t wait = pdMS_TO_TICKS((uint32_t)(ahead - LEAD_FRAMES) * 1000 / AIRPLAY_SAMPLE_RATE);
+        TickType_t wait = pdMS_TO_TICKS((uint32_t)(ahead - lead) * 1000 / AIRPLAY_SAMPLE_RATE);
         if (wait == 0) {
             wait = 1;
         }
