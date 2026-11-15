@@ -73,7 +73,20 @@ typedef struct {
     float sample_pos;
     float sample_step;
     float sample_fade; /* 1 while held, then falling to 0 */
+    /* The pitch heard, in semitones: it glides to note when the patch has
+       glide, and jumps there otherwise (or before the first block). */
+    float pitch;
+    bool pitch_set;
 } voice_t;
+
+/* Mono and legato: the keys held for each patch, oldest first, so letting
+   go of the newest goes back to the one still held. One list a source, so
+   the loop and the live keys don't take each other's notes. */
+#define HELD_MAX 10
+typedef struct {
+    uint8_t notes[HELD_MAX];
+    uint8_t count;
+} held_t;
 
 typedef struct {
     int16_t *pcm;
@@ -108,14 +121,13 @@ static uint32_t note_counter;
 static bool sustain_down;
 static volatile uint16_t tempo = 120;
 static uint32_t noise_state = 0x9E3779B9u;
+static held_t held[PSYNTH_SLOTS][2];
+static int last_note[PSYNTH_SLOTS][2] = {{-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}}; /* for poly glide */
 
 static float scope[SCOPE_SIZE];
 static volatile int scope_pos;
 static volatile int scope_slot;
 
-static const char *const preset_names[PSYNTH_SLOTS] = {"SUPERSAW", "REESE", "PLUCK", "WOBBLE"};
-static const char *const preset_about[PSYNTH_SLOTS] = {
-    "7-VOICE SAW STACK", "DETUNED SAW BASS", "BRIGHT DECAY + DELAY", "SYNCED LFO FILTER"};
 
 /* ---- Small helpers -------------------------------------------------------------- */
 
@@ -174,6 +186,17 @@ static inline float blep(float t, float dt)
 static float env_time(int value)
 {
     return 0.001f * powf(8000.0f, (float)value / 100.0f);
+}
+
+static float glide_time(int value)
+{
+    return 0.005f * powf(400.0f, (float)value / 100.0f);
+}
+
+/* An oscillator's pitch against the note, in semitones. */
+static float osc_offset(const psynth_osc_t *osc)
+{
+    return osc->octave * 12.0f + osc->semi + osc->fine / 100.0f;
 }
 
 static float cutoff_hz(float value) /* 0..1 */
@@ -276,66 +299,409 @@ static bool build_wavetables(void)
 
 /* ---- Presets --------------------------------------------------------------------- */
 
-static void load_preset(int slot)
+typedef enum {
+    P_SUB_BASS, P_REESE, P_ACID, P_SAW_BASS, P_SQR_BASS, P_WOBBLE, P_GROWL, P_808,
+    P_SUPERSAW, P_SQR_LEAD, P_VOX_LEAD, P_DIGI_LEAD, P_SOFT_LEAD,
+    P_WARM_PAD, P_VOX_PAD, P_GLASS_PAD, P_SWEEP_PAD,
+    P_PLUCK, P_BELL, P_ORGAN, P_STAB,
+    P_RISER, P_GATED, P_BLIPS, P_LASER,
+    P_INIT,
+    PRESETS,
+} preset_id_t;
+
+typedef struct {
+    const char *name;
+    int8_t category; /* psynth_category_t, or -1 */
+    const char *about;
+} preset_info_t;
+
+static const preset_info_t preset_info[PRESETS] = {
+    [P_SUB_BASS] = {"SUB BASS", CATEGORY_BASS, "SINE SUB, MONO"},
+    [P_REESE] = {"REESE", CATEGORY_BASS, "DETUNED SAW BASS"},
+    [P_ACID] = {"ACID", CATEGORY_BASS, "RESONANT SLIDING SAW"},
+    [P_SAW_BASS] = {"SAW BASS", CATEGORY_BASS, "FAT SAW + SUB, MONO"},
+    [P_SQR_BASS] = {"SQR BASS", CATEGORY_BASS, "SQUARE + SUB, MONO"},
+    [P_WOBBLE] = {"WOBBLE", CATEGORY_BASS, "SYNCED LFO FILTER"},
+    [P_GROWL] = {"GROWL", CATEGORY_BASS, "VOWEL WAVETABLE BASS"},
+    [P_808] = {"808 BOOM", CATEGORY_BASS, "SINE KICK BASS, GLIDE"},
+    [P_SUPERSAW] = {"SUPERSAW", CATEGORY_LEAD, "7-VOICE SAW STACK"},
+    [P_SQR_LEAD] = {"SQR LEAD", CATEGORY_LEAD, "SQUARE LEAD, LEGATO"},
+    [P_VOX_LEAD] = {"VOX LEAD", CATEGORY_LEAD, "TALKING WAVETABLE"},
+    [P_DIGI_LEAD] = {"DIGI LEAD", CATEGORY_LEAD, "DIGITAL SWEEP LEAD"},
+    [P_SOFT_LEAD] = {"SOFT LEAD", CATEGORY_LEAD, "TRIANGLE + VIBRATO"},
+    [P_WARM_PAD] = {"WARM PAD", CATEGORY_PAD, "SLOW SAW STACK"},
+    [P_VOX_PAD] = {"VOX PAD", CATEGORY_PAD, "MORPHING VOWELS"},
+    [P_GLASS_PAD] = {"GLASS PAD", CATEGORY_PAD, "BRIGHT DIGITAL PAD"},
+    [P_SWEEP_PAD] = {"SWEEP PAD", CATEGORY_PAD, "LFO FILTER SWEEP"},
+    [P_PLUCK] = {"PLUCK", CATEGORY_KEYS, "BRIGHT DECAY + DELAY"},
+    [P_BELL] = {"BELL", CATEGORY_KEYS, "SINES, LONG DECAY"},
+    [P_ORGAN] = {"ORGAN", CATEGORY_KEYS, "THREE SINE DRAWBARS"},
+    [P_STAB] = {"STAB", CATEGORY_KEYS, "SHORT FIFTHS CHORD"},
+    [P_RISER] = {"RISER", CATEGORY_FX, "NOISE SWEEP UP"},
+    [P_GATED] = {"GATED", CATEGORY_FX, "1/16 GATED SAWS"},
+    [P_BLIPS] = {"BLIPS", CATEGORY_FX, "RANDOM PITCH STEPS"},
+    [P_LASER] = {"LASER", CATEGORY_FX, "PITCH DIVE ZAP"},
+    [P_INIT] = {"INIT", -1, "ONE PLAIN SAW"},
+};
+
+static const char *const category_names[CATEGORIES] = {"BASS", "LEAD", "PAD", "KEYS", "FX"};
+
+/* The four slots start as SUPERSAW, REESE, PLUCK and WOBBLE. */
+static int slot_preset[PSYNTH_SLOTS] = {P_SUPERSAW, P_REESE, P_PLUCK, P_WOBBLE};
+
+#define OSC(...) ((psynth_osc_t){__VA_ARGS__})
+#define FILTER(...) ((psynth_filter_t){__VA_ARGS__})
+#define ENV(a, d, s, r) ((psynth_env_t){.attack = a, .decay = d, .sustain = s, .release = r})
+#define LFO(...) ((psynth_lfo_t){__VA_ARGS__})
+#define MOD(src, dst, amt) ((psynth_mod_t){.source = src, .dest = dst, .amount = amt})
+
+/* Builds a preset into p. */
+static void build_preset(int id, psynth_patch_t *p)
 {
-    psynth_patch_t *p = &patches[slot];
     memset(p, 0, sizeof(*p));
-    strncpy(p->name, preset_names[slot], PSYNTH_NAME_MAX);
+    strncpy(p->name, preset_info[id].name, PSYNTH_NAME_MAX);
     p->volume = 70;
-    p->osc[0] = (psynth_osc_t){.shape = OSC_SAW, .position = 50, .unison = 1, .level = 80};
-    p->osc[1] = (psynth_osc_t){.shape = OSC_SAW, .position = 50, .unison = 1, .level = 0};
-    p->filter[0] = (psynth_filter_t){.type = FILTER_LOWPASS, .cutoff = 80, .resonance = 10};
-    p->env[0] = (psynth_env_t){.attack = 2, .decay = 50, .sustain = 80, .release = 35};
-    p->env[1] = (psynth_env_t){.attack = 0, .decay = 40, .sustain = 0, .release = 30};
-    p->lfo[0] = (psynth_lfo_t){.shape = LFO_SINE, .rate = 40};
-    p->lfo[1] = (psynth_lfo_t){.shape = LFO_TRIANGLE, .rate = 25};
+    p->osc[0] = OSC(.shape = OSC_SAW, .position = 50, .unison = 1, .level = 80);
+    p->osc[1] = OSC(.shape = OSC_SAW, .position = 50, .unison = 1, .level = 0);
+    p->filter[0] = FILTER(.type = FILTER_LOWPASS, .cutoff = 80, .resonance = 10);
+    p->env[0] = ENV(2, 50, 80, 35);
+    p->env[1] = ENV(0, 40, 0, 30);
+    p->lfo[0] = LFO(.shape = LFO_SINE, .rate = 40);
+    p->lfo[1] = LFO(.shape = LFO_TRIANGLE, .rate = 25);
     p->delay_time = DELAY_3_16;
-    switch (slot) {
-    case 0: /* SUPERSAW */
-        p->osc[0] = (psynth_osc_t){.shape = OSC_SAW, .position = 50, .unison = 7, .detune = 35, .level = 80};
-        p->osc[1] = (psynth_osc_t){.shape = OSC_SAW, .position = 50, .unison = 5, .detune = 25, .semi = 12, .level = 40};
+    switch (id) {
+    /* -- Basses: an octave down, mono, most with a little glide. -- */
+    case P_SUB_BASS:
+        p->osc[0] = OSC(.shape = OSC_SINE, .position = 50, .unison = 1, .octave = -1, .level = 85);
+        p->osc[1] = OSC(.shape = OSC_TRIANGLE, .position = 50, .unison = 1, .octave = -1, .fine = 5, .level = 30);
+        p->filter[0] = FILTER(.type = FILTER_LOWPASS, .cutoff = 40);
+        p->env[0] = ENV(1, 50, 90, 22);
+        p->mono = MODE_MONO;
+        p->glide = 12;
+        break;
+    case P_REESE:
+        p->osc[0] = OSC(.shape = OSC_SAW, .position = 50, .unison = 2, .detune = 18, .octave = -1, .level = 80);
+        p->osc[1] = OSC(.shape = OSC_WT_BASIC, .position = 70, .unison = 2, .detune = 30, .octave = -1, .level = 60);
+        p->sub_level = 60;
+        p->filter[0] = FILTER(.type = FILTER_LOWPASS, .cutoff = 48, .resonance = 20, .drive = 40);
+        p->lfo[0] = LFO(.shape = LFO_SINE, .rate = 18);
+        p->mod[0] = MOD(SOURCE_LFO1, DEST_CUTOFF1, 25);
+        p->mod[1] = MOD(SOURCE_LFO1, DEST_OSC2_POS, 40);
+        p->env[0].sustain = 100;
+        p->mono = MODE_MONO;
+        p->glide = 10;
+        break;
+    case P_ACID:
+        p->osc[0] = OSC(.shape = OSC_SAW, .position = 50, .unison = 1, .octave = -1, .level = 85);
+        p->filter[0] = FILTER(.type = FILTER_LOWPASS, .cutoff = 22, .resonance = 78, .drive = 35);
+        p->keytrack = 30;
+        p->env[0] = ENV(0, 45, 70, 14);
+        p->env[1] = ENV(0, 34, 0, 20);
+        p->mod[0] = MOD(SOURCE_MOD_ENV, DEST_CUTOFF1, 65);
+        p->mono = MODE_LEGATO;
+        p->glide = 35;
+        p->drive = 25;
+        p->delay_feedback = 25;
+        p->delay_mix = 12;
+        break;
+    case P_SAW_BASS:
+        p->osc[0] = OSC(.shape = OSC_SAW, .position = 50, .unison = 1, .octave = -1, .level = 80);
+        p->osc[1] = OSC(.shape = OSC_SAW, .position = 50, .unison = 2, .detune = 12, .octave = -1, .fine = 8, .level = 45);
+        p->sub_level = 45;
+        p->filter[0] = FILTER(.type = FILTER_LOWPASS, .cutoff = 38, .resonance = 18, .drive = 20);
+        p->env[0] = ENV(0, 40, 85, 16);
+        p->env[1] = ENV(0, 33, 0, 20);
+        p->mod[0] = MOD(SOURCE_MOD_ENV, DEST_CUTOFF1, 40);
+        p->mono = MODE_MONO;
+        p->glide = 15;
+        break;
+    case P_SQR_BASS:
+        p->osc[0] = OSC(.shape = OSC_SQUARE, .position = 50, .unison = 1, .octave = -1, .level = 80);
+        p->osc[1] = OSC(.shape = OSC_SQUARE, .position = 30, .unison = 1, .level = 25);
+        p->sub_level = 50;
+        p->sub_shape = 1;
+        p->filter[0] = FILTER(.type = FILTER_LOWPASS, .cutoff = 42, .resonance = 22);
+        p->env[0] = ENV(0, 38, 75, 14);
+        p->env[1] = ENV(0, 30, 0, 18);
+        p->mod[0] = MOD(SOURCE_MOD_ENV, DEST_CUTOFF1, 35);
+        p->mono = MODE_MONO;
+        p->glide = 10;
+        break;
+    case P_WOBBLE:
+        p->osc[0] = OSC(.shape = OSC_SAW, .position = 50, .unison = 3, .detune = 15, .octave = -1, .level = 80);
+        p->osc[1] = OSC(.shape = OSC_SQUARE, .position = 50, .unison = 1, .octave = -1, .level = 60);
+        p->sub_level = 70;
+        p->sub_shape = 1;
+        p->filter[0] = FILTER(.type = FILTER_LOWPASS, .cutoff = 30, .resonance = 55, .drive = 50);
+        p->lfo[0] = LFO(.shape = LFO_SINE, .rate = 50, .sync = SYNC_1_8);
+        p->mod[0] = MOD(SOURCE_LFO1, DEST_CUTOFF1, 75);
+        p->env[0].sustain = 100;
+        p->drive = 35;
+        p->mono = MODE_MONO;
+        p->glide = 8;
+        break;
+    case P_GROWL:
+        p->osc[0] = OSC(.shape = OSC_WT_VOCAL, .position = 30, .unison = 3, .detune = 20, .octave = -1, .level = 75);
+        p->osc[1] = OSC(.shape = OSC_SAW, .position = 50, .unison = 2, .detune = 15, .octave = -1, .level = 45);
+        p->sub_level = 55;
+        p->filter[0] = FILTER(.type = FILTER_LOWPASS, .cutoff = 50, .resonance = 35, .drive = 55);
+        p->lfo[0] = LFO(.shape = LFO_SINE, .rate = 50, .sync = SYNC_1_4);
+        p->mod[0] = MOD(SOURCE_LFO1, DEST_OSC1_POS, 55);
+        p->mod[1] = MOD(SOURCE_LFO1, DEST_CUTOFF1, 30);
+        p->env[0] = ENV(1, 50, 100, 18);
+        p->drive = 45;
+        p->mono = MODE_MONO;
+        p->glide = 12;
+        break;
+    case P_808:
+        p->osc[0] = OSC(.shape = OSC_SINE, .position = 50, .unison = 1, .octave = -1, .level = 90);
+        p->filter[0] = FILTER(.type = FILTER_LOWPASS, .cutoff = 60);
+        p->env[0] = ENV(0, 72, 0, 45);
+        p->env[1] = ENV(0, 30, 0, 20);
+        p->mod[0] = MOD(SOURCE_MOD_ENV, DEST_PITCH, 40);
+        p->drive = 35;
+        p->mono = MODE_MONO;
+        p->glide = 45;
+        break;
+    /* -- Leads -- */
+    case P_SUPERSAW:
+        p->osc[0] = OSC(.shape = OSC_SAW, .position = 50, .unison = 7, .detune = 35, .level = 80);
+        p->osc[1] = OSC(.shape = OSC_SAW, .position = 50, .unison = 5, .detune = 25, .octave = 1, .level = 40);
         p->filter[0].cutoff = 78;
         p->chorus = 30;
         p->reverb_size = 60;
         p->reverb_mix = 25;
         break;
-    case 1: /* REESE */
-        p->osc[0] = (psynth_osc_t){.shape = OSC_SAW, .position = 50, .unison = 2, .detune = 18, .semi = -12, .level = 80};
-        p->osc[1] = (psynth_osc_t){.shape = OSC_WT_BASIC, .position = 70, .unison = 2, .detune = 30, .semi = -12, .level = 60};
-        p->sub_level = 60;
-        p->filter[0] = (psynth_filter_t){.type = FILTER_LOWPASS, .cutoff = 48, .resonance = 20, .drive = 40};
-        p->lfo[0] = (psynth_lfo_t){.shape = LFO_SINE, .rate = 18};
-        p->mod[0] = (psynth_mod_t){.source = SOURCE_LFO1, .dest = DEST_CUTOFF1, .amount = 25};
-        p->mod[1] = (psynth_mod_t){.source = SOURCE_LFO1, .dest = DEST_OSC2_POS, .amount = 40};
-        p->env[0].sustain = 100;
+    case P_SQR_LEAD:
+        p->osc[0] = OSC(.shape = OSC_SQUARE, .position = 40, .unison = 2, .detune = 10, .level = 80);
+        p->osc[1] = OSC(.shape = OSC_SQUARE, .position = 60, .unison = 1, .octave = 1, .level = 30);
+        p->filter[0] = FILTER(.type = FILTER_LOWPASS, .cutoff = 70, .resonance = 20);
+        p->lfo[0] = LFO(.shape = LFO_SINE, .rate = 45);
+        p->mod[0] = MOD(SOURCE_LFO1, DEST_PITCH, 3);
+        p->mono = MODE_LEGATO;
+        p->glide = 15;
+        p->delay_time = DELAY_1_8;
+        p->delay_feedback = 30;
+        p->delay_mix = 20;
         break;
-    case 2: /* PLUCK */
-        p->osc[0] = (psynth_osc_t){.shape = OSC_WT_DIGITAL, .position = 30, .unison = 3, .detune = 12, .level = 80};
-        p->osc[1] = (psynth_osc_t){.shape = OSC_SQUARE, .position = 40, .unison = 1, .semi = 12, .level = 30};
-        p->filter[0] = (psynth_filter_t){.type = FILTER_LOWPASS, .cutoff = 30, .resonance = 25};
+    case P_VOX_LEAD:
+        p->osc[0] = OSC(.shape = OSC_WT_VOCAL, .position = 20, .unison = 2, .detune = 12, .level = 85);
+        p->filter[0] = FILTER(.type = FILTER_LOWPASS, .cutoff = 75, .resonance = 15);
+        p->lfo[1] = LFO(.shape = LFO_TRIANGLE, .rate = 30);
+        p->mod[0] = MOD(SOURCE_LFO2, DEST_OSC1_POS, 50);
+        p->mono = MODE_LEGATO;
+        p->glide = 10;
+        p->reverb_size = 50;
+        p->reverb_mix = 20;
+        break;
+    case P_DIGI_LEAD:
+        p->osc[0] = OSC(.shape = OSC_WT_DIGITAL, .position = 50, .unison = 3, .detune = 15, .level = 80);
+        p->osc[1] = OSC(.shape = OSC_SAW, .position = 50, .unison = 1, .octave = -1, .level = 30);
+        p->env[1] = ENV(0, 55, 20, 30);
+        p->mod[0] = MOD(SOURCE_MOD_ENV, DEST_OSC1_POS, 40);
+        p->chorus = 30;
+        p->delay_feedback = 30;
+        p->delay_mix = 20;
+        break;
+    case P_SOFT_LEAD:
+        p->osc[0] = OSC(.shape = OSC_TRIANGLE, .position = 50, .unison = 1, .level = 85);
+        p->osc[1] = OSC(.shape = OSC_SINE, .position = 50, .unison = 1, .octave = 1, .level = 30);
+        p->filter[0] = FILTER(.type = FILTER_LOWPASS, .cutoff = 70);
+        p->env[0] = ENV(15, 50, 85, 40);
+        p->lfo[0] = LFO(.shape = LFO_SINE, .rate = 45);
+        p->mod[0] = MOD(SOURCE_LFO1, DEST_PITCH, 3);
+        p->mono = MODE_LEGATO;
+        p->glide = 20;
+        p->reverb_size = 60;
+        p->reverb_mix = 30;
+        break;
+    /* -- Pads -- */
+    case P_WARM_PAD:
+        p->osc[0] = OSC(.shape = OSC_SAW, .position = 50, .unison = 5, .detune = 25, .level = 75);
+        p->osc[1] = OSC(.shape = OSC_SAW, .position = 50, .unison = 3, .detune = 20, .octave = 1, .level = 30);
+        p->filter[0] = FILTER(.type = FILTER_LOWPASS, .cutoff = 50, .resonance = 10);
+        p->env[0] = ENV(60, 50, 80, 60);
+        p->lfo[1] = LFO(.shape = LFO_TRIANGLE, .rate = 12);
+        p->mod[0] = MOD(SOURCE_LFO2, DEST_CUTOFF1, 15);
+        p->chorus = 40;
+        p->reverb_size = 80;
+        p->reverb_mix = 40;
+        break;
+    case P_VOX_PAD:
+        p->osc[0] = OSC(.shape = OSC_WT_VOCAL, .position = 40, .unison = 4, .detune = 22, .level = 80);
+        p->filter[0] = FILTER(.type = FILTER_LOWPASS, .cutoff = 65);
+        p->env[0] = ENV(55, 50, 85, 60);
+        p->lfo[0] = LFO(.shape = LFO_SINE, .rate = 10);
+        p->mod[0] = MOD(SOURCE_LFO1, DEST_OSC1_POS, 40);
+        p->chorus = 30;
+        p->reverb_size = 80;
+        p->reverb_mix = 40;
+        break;
+    case P_GLASS_PAD:
+        p->osc[0] = OSC(.shape = OSC_WT_DIGITAL, .position = 70, .unison = 3, .detune = 15, .level = 70);
+        p->osc[1] = OSC(.shape = OSC_SINE, .position = 50, .unison = 1, .octave = 1, .level = 40);
+        p->filter[0] = FILTER(.type = FILTER_HIGHPASS, .cutoff = 20);
+        p->env[0] = ENV(50, 50, 80, 65);
+        p->delay_time = DELAY_1_4;
+        p->delay_feedback = 40;
+        p->delay_mix = 25;
+        p->reverb_size = 85;
+        p->reverb_mix = 40;
+        break;
+    case P_SWEEP_PAD:
+        p->osc[0] = OSC(.shape = OSC_SAW, .position = 50, .unison = 5, .detune = 25, .level = 80);
+        p->filter[0] = FILTER(.type = FILTER_LOWPASS, .cutoff = 30, .resonance = 45);
+        p->env[0] = ENV(50, 50, 85, 60);
+        p->lfo[1] = LFO(.shape = LFO_TRIANGLE, .rate = 10);
+        p->mod[0] = MOD(SOURCE_LFO2, DEST_CUTOFF1, 50);
+        p->reverb_size = 75;
+        p->reverb_mix = 35;
+        break;
+    /* -- Keys and plucks -- */
+    case P_PLUCK:
+        p->osc[0] = OSC(.shape = OSC_WT_DIGITAL, .position = 30, .unison = 3, .detune = 12, .level = 80);
+        p->osc[1] = OSC(.shape = OSC_SQUARE, .position = 40, .unison = 1, .octave = 1, .level = 30);
+        p->filter[0] = FILTER(.type = FILTER_LOWPASS, .cutoff = 30, .resonance = 25);
         p->keytrack = 50;
-        p->env[0] = (psynth_env_t){.attack = 0, .decay = 45, .sustain = 0, .release = 40};
-        p->env[1] = (psynth_env_t){.attack = 0, .decay = 35, .sustain = 0, .release = 30};
-        p->mod[0] = (psynth_mod_t){.source = SOURCE_MOD_ENV, .dest = DEST_CUTOFF1, .amount = 70};
-        p->mod[1] = (psynth_mod_t){.source = SOURCE_MOD_ENV, .dest = DEST_OSC1_POS, .amount = 40};
-        p->delay_time = DELAY_3_16;
+        p->env[0] = ENV(0, 45, 0, 40);
+        p->env[1] = ENV(0, 35, 0, 30);
+        p->mod[0] = MOD(SOURCE_MOD_ENV, DEST_CUTOFF1, 70);
+        p->mod[1] = MOD(SOURCE_MOD_ENV, DEST_OSC1_POS, 40);
         p->delay_feedback = 35;
         p->delay_mix = 30;
         p->reverb_size = 50;
         p->reverb_mix = 20;
         break;
-    default: /* WOBBLE */
-        p->osc[0] = (psynth_osc_t){.shape = OSC_SAW, .position = 50, .unison = 3, .detune = 15, .semi = -12, .level = 80};
-        p->osc[1] = (psynth_osc_t){.shape = OSC_SQUARE, .position = 50, .unison = 1, .semi = -12, .level = 60};
-        p->sub_level = 70;
-        p->sub_shape = 1;
-        p->filter[0] = (psynth_filter_t){.type = FILTER_LOWPASS, .cutoff = 30, .resonance = 55, .drive = 50};
-        p->lfo[0] = (psynth_lfo_t){.shape = LFO_SINE, .rate = 50, .sync = SYNC_1_8};
-        p->mod[0] = (psynth_mod_t){.source = SOURCE_LFO1, .dest = DEST_CUTOFF1, .amount = 75};
-        p->env[0].sustain = 100;
-        p->drive = 35;
+    case P_BELL:
+        p->osc[0] = OSC(.shape = OSC_SINE, .position = 50, .unison = 1, .level = 80);
+        p->osc[1] = OSC(.shape = OSC_SINE, .position = 50, .unison = 1, .octave = 2, .level = 35);
+        p->filter[0].type = FILTER_OFF;
+        p->env[0] = ENV(0, 70, 0, 60);
+        p->env[1] = ENV(0, 45, 0, 30);
+        p->mod[0] = MOD(SOURCE_MOD_ENV, DEST_OSC2_LEVEL, 40);
+        p->reverb_size = 70;
+        p->reverb_mix = 30;
+        break;
+    case P_ORGAN:
+        p->osc[0] = OSC(.shape = OSC_SINE, .position = 50, .unison = 1, .level = 75);
+        p->osc[1] = OSC(.shape = OSC_SINE, .position = 50, .unison = 1, .octave = 1, .level = 55);
+        p->sub_level = 55;
+        p->filter[0].type = FILTER_OFF;
+        p->env[0] = ENV(1, 0, 100, 10);
+        p->chorus = 50;
+        p->reverb_size = 50;
+        p->reverb_mix = 20;
+        break;
+    case P_STAB:
+        p->osc[0] = OSC(.shape = OSC_SAW, .position = 50, .unison = 5, .detune = 30, .level = 75);
+        p->osc[1] = OSC(.shape = OSC_SAW, .position = 50, .unison = 3, .detune = 20, .semi = 7, .level = 55);
+        p->filter[0] = FILTER(.type = FILTER_LOWPASS, .cutoff = 55, .resonance = 15);
+        p->env[0] = ENV(0, 35, 0, 30);
+        p->env[1] = ENV(0, 30, 0, 20);
+        p->mod[0] = MOD(SOURCE_MOD_ENV, DEST_CUTOFF1, 30);
+        p->reverb_size = 60;
+        p->reverb_mix = 25;
+        break;
+    /* -- Effects -- */
+    case P_RISER:
+        p->osc[0].level = 0;
+        p->noise_level = 80;
+        p->noise_color = 70;
+        p->filter[0] = FILTER(.type = FILTER_BANDPASS, .cutoff = 30, .resonance = 50);
+        p->env[0] = ENV(80, 50, 100, 50);
+        p->env[1] = ENV(85, 50, 100, 50);
+        p->mod[0] = MOD(SOURCE_MOD_ENV, DEST_CUTOFF1, 60);
+        p->reverb_size = 80;
+        p->reverb_mix = 40;
+        break;
+    case P_GATED:
+        p->osc[0] = OSC(.shape = OSC_SAW, .position = 50, .unison = 5, .detune = 25, .level = 80);
+        p->env[0] = ENV(1, 50, 100, 30);
+        p->lfo[0] = LFO(.shape = LFO_GATE, .rate = 50, .sync = SYNC_1_16);
+        p->mod[0] = MOD(SOURCE_LFO1, DEST_AMP, -100);
+        p->reverb_size = 50;
+        p->reverb_mix = 20;
+        break;
+    case P_BLIPS:
+        p->osc[0] = OSC(.shape = OSC_SQUARE, .position = 50, .unison = 1, .level = 75);
+        p->lfo[0] = LFO(.shape = LFO_RANDOM, .rate = 50, .sync = SYNC_1_16);
+        p->mod[0] = MOD(SOURCE_LFO1, DEST_PITCH, 100);
+        p->env[0] = ENV(0, 40, 60, 30);
+        p->delay_feedback = 40;
+        p->delay_mix = 30;
+        break;
+    case P_LASER:
+        p->osc[0] = OSC(.shape = OSC_SINE, .position = 50, .unison = 1, .level = 85);
+        p->osc[1] = OSC(.shape = OSC_SQUARE, .position = 50, .unison = 1, .octave = 1, .level = 20);
+        p->env[0] = ENV(0, 45, 0, 30);
+        p->env[1] = ENV(0, 40, 0, 25);
+        p->mod[0] = MOD(SOURCE_MOD_ENV, DEST_PITCH, 100);
+        p->delay_feedback = 35;
+        p->delay_mix = 25;
+        break;
+    default: /* INIT */
         break;
     }
+}
+
+static void load_preset(int slot)
+{
+    psynth_patch_t p;
+    build_preset(slot_preset[slot], &p);
+    patches[slot] = p; /* one copy, so the audio task never sees a half-built patch */
+}
+
+int psynth_preset_count(void)
+{
+    return PRESETS;
+}
+
+const char *psynth_preset_name(int preset)
+{
+    return preset >= 0 && preset < PRESETS ? preset_info[preset].name : "";
+}
+
+const char *psynth_category_name(int category)
+{
+    return category >= 0 && category < CATEGORIES ? category_names[category] : "";
+}
+
+int psynth_preset_category(int preset)
+{
+    return preset >= 0 && preset < PRESETS ? preset_info[preset].category : -1;
+}
+
+int psynth_preset_init(void)
+{
+    return P_INIT;
+}
+
+int psynth_slot_preset(int slot)
+{
+    return slot >= 0 && slot < PSYNTH_SLOTS ? slot_preset[slot] : P_INIT;
+}
+
+void psynth_load(int slot, int preset, bool osc_only)
+{
+    if (slot < 0 || slot >= PSYNTH_SLOTS || preset < 0 || preset >= PRESETS) {
+        return;
+    }
+    if (!osc_only) {
+        slot_preset[slot] = preset;
+        load_preset(slot);
+        return;
+    }
+    psynth_patch_t source;
+    build_preset(preset, &source);
+    psynth_patch_t p = patches[slot];
+    memcpy(p.osc, source.osc, sizeof(p.osc));
+    p.sub_level = source.sub_level;
+    p.sub_shape = source.sub_shape;
+    p.noise_level = source.noise_level;
+    p.noise_color = source.noise_color;
+    p.mono = source.mono;
+    p.glide = source.glide;
+    patches[slot] = p;
 }
 
 /* ---- Voices ---------------------------------------------------------------------- */
@@ -458,6 +824,41 @@ static voice_t *pick_voice(int note, int slot, note_source_t source)
     return best;
 }
 
+static void held_remove(held_t *h, int note)
+{
+    int j = 0;
+    for (int i = 0; i < h->count; ++i) {
+        if (h->notes[i] != note) {
+            h->notes[j++] = h->notes[i];
+        }
+    }
+    h->count = (uint8_t)j;
+}
+
+static void held_push(held_t *h, int note)
+{
+    held_remove(h, note);
+    if (h->count == HELD_MAX) {
+        memmove(h->notes, h->notes + 1, HELD_MAX - 1);
+        h->count--;
+    }
+    h->notes[h->count++] = (uint8_t)note;
+}
+
+/* The newest voice of a patch for a source, sounding or ringing out. */
+static voice_t *mono_voice(int slot, note_source_t source)
+{
+    voice_t *best = NULL;
+    for (int i = 0; i < VOICES; ++i) {
+        voice_t *v = &voices[i];
+        if (v->active && !v->sample && v->slot == slot && v->source == source &&
+            (best == NULL || v->age > best->age)) {
+            best = v;
+        }
+    }
+    return best;
+}
+
 static void start_note(int note, int slot, note_source_t source);
 
 static void ext_note_on(int note, int slot, note_source_t source)
@@ -483,6 +884,33 @@ static void start_note(int note, int slot, note_source_t source)
     bool is_sample = slot >= PSYNTH_SLOTS;
     if (is_sample && samples[slot - PSYNTH_SLOTS].pcm == NULL) {
         return; /* an empty sample slot */
+    }
+    const psynth_patch_t *p = is_sample ? NULL : &patches[slot];
+    int src = source == SOURCE_LIVE ? 0 : 1;
+    if (!is_sample) {
+        held_push(&held[slot][src], note);
+    }
+    if (p != NULL && p->mono != MODE_POLY) {
+        voice_t *mono = mono_voice(slot, source);
+        if (mono != NULL) {
+            /* One note: this one takes it over. Legato with a key still held
+               only moves the pitch; otherwise the envelopes start again
+               from where they are, so there's no click. */
+            bool legato = p->mono == MODE_LEGATO && mono->held;
+            mono->note = (uint8_t)note;
+            mono->held = true;
+            mono->sustained = false;
+            mono->age = ++note_counter;
+            if (p->glide == 0) {
+                mono->pitch_set = false;
+            }
+            if (!legato) {
+                env_start(mono, 0);
+                env_start(mono, 1);
+            }
+            last_note[slot][src] = note;
+            return;
+        }
     }
     voice_t *v = pick_voice(note, slot, source);
     bool retrigger = v->active && v->note == note && v->slot == slot;
@@ -517,18 +945,37 @@ static void start_note(int note, int slot, note_source_t source)
         v->sample_pos = 0.0f;
         v->sample_step = powf(2.0f, (float)(note - PSYNTH_SAMPLE_NOTE) / 12.0f);
         v->sample_fade = 1.0f;
+    } else if (!retrigger) {
+        /* With glide, a new note slides in from the last one played. */
+        int from = last_note[slot][src];
+        v->pitch_set = p->glide > 0 && from >= 0;
+        v->pitch = (float)from;
+        last_note[slot][src] = note;
     }
     env_start(v, 0);
     env_start(v, 1);
 }
 
-static void ext_note_off(int note, int slot, note_source_t source)
+static void note_off_slot(int note, int slot, note_source_t source)
 {
-    bool layered = slot < PSYNTH_SLOTS && rack.layer;
+    int src = source == SOURCE_LIVE ? 0 : 1;
+    held_t *h = slot < PSYNTH_SLOTS ? &held[slot][src] : NULL;
+    if (h != NULL) {
+        held_remove(h, note);
+    }
+    bool mono = slot < PSYNTH_SLOTS && patches[slot].mono != MODE_POLY;
     for (int i = 0; i < VOICES; ++i) {
         voice_t *v = &voices[i];
-        bool same_slot = v->slot == slot || (layered && v->slot < PSYNTH_SLOTS);
-        if (!v->active || !v->held || v->note != note || !same_slot || v->source != source) {
+        if (!v->active || !v->held || v->note != note || v->slot != slot || v->source != source) {
+            continue;
+        }
+        if (mono && h->count > 0) {
+            /* Back to the newest key still held, without starting again. */
+            v->note = h->notes[h->count - 1];
+            if (patches[slot].glide == 0) {
+                v->pitch_set = false;
+            }
+            last_note[slot][src] = v->note;
             continue;
         }
         v->held = false;
@@ -538,6 +985,17 @@ static void ext_note_off(int note, int slot, note_source_t source)
             env_release(v);
         }
     }
+}
+
+static void ext_note_off(int note, int slot, note_source_t source)
+{
+    if (slot < PSYNTH_SLOTS && rack.layer) {
+        for (int s = 0; s < PSYNTH_SLOTS; ++s) {
+            note_off_slot(note, s, source);
+        }
+        return;
+    }
+    note_off_slot(note, slot, source);
 }
 
 static void ext_sustain(bool down)
@@ -556,6 +1014,9 @@ static void ext_sustain(bool down)
 
 static void ext_release_all(note_source_t source)
 {
+    for (int s = 0; s < PSYNTH_SLOTS; ++s) {
+        held[s][source == SOURCE_LIVE ? 0 : 1].count = 0;
+    }
     for (int i = 0; i < VOICES; ++i) {
         if (voices[i].active && voices[i].source == source) {
             voices[i].held = false;
@@ -570,6 +1031,7 @@ static void ext_silence(void)
     for (int i = 0; i < VOICES; ++i) {
         voices[i].active = false;
     }
+    memset(held, 0, sizeof(held));
     for (int s = 0; s < PSYNTH_SLOTS; ++s) {
         if (fx[s] != NULL) {
             fx[s]->tail = 0;
@@ -853,10 +1315,16 @@ static void render_voice(voice_t *v, const psynth_patch_t *p, float *out, int n)
     float mod_env = env_step(v, 1, &p->env[1], n);
     mods_t m;
     apply_mods(p, v, lfo1, lfo2, mod_env, &m);
+    if (!v->pitch_set || p->glide == 0) {
+        v->pitch = (float)v->note;
+        v->pitch_set = true;
+    } else {
+        v->pitch += ((float)v->note - v->pitch) * (1.0f - expf(-(float)n / (RATE * glide_time(p->glide))));
+    }
 
     /* Controls glide to their targets over a few ms, so a dragged slider
        or a stepping modulation moves the sound smoothly. */
-    float track_now = (p->keytrack / 100.0f) * ((float)v->note - 60.0f) / 12.0f / 9.23f;
+    float track_now = (p->keytrack / 100.0f) * (v->pitch - 60.0f) / 12.0f / 9.23f;
     float targets[8] = {
         p->filter[0].cutoff / 100.0f + m.cutoff[0] + track_now,
         p->filter[1].cutoff / 100.0f + m.cutoff[1],
@@ -880,12 +1348,12 @@ static void render_voice(voice_t *v, const psynth_patch_t *p, float *out, int n)
         if (level <= 0.001f) {
             continue;
         }
-        float freq = 440.0f * powf(2.0f, ((float)v->note - 69.0f + osc->semi + m.pitch) / 12.0f);
+        float freq = 440.0f * powf(2.0f, (v->pitch - 69.0f + osc_offset(osc) + m.pitch) / 12.0f);
         render_osc(v, o, osc, freq, v->smooth[3 + o], v->smooth[7], level, buf, n);
     }
     if (p->sub_level > 0) {
         float level = p->sub_level / 100.0f;
-        float dt = 440.0f * powf(2.0f, ((float)v->note - 81.0f + p->osc[0].semi + m.pitch) / 12.0f) / RATE;
+        float dt = 440.0f * powf(2.0f, (v->pitch - 81.0f + osc_offset(&p->osc[0]) + m.pitch) / 12.0f) / RATE;
         float phase = v->sub_phase;
         for (int i = 0; i < n; ++i) {
             buf[i] += level * (p->sub_shape ? (phase < 0.5f ? 0.8f : -0.8f) : fast_sine(phase));
@@ -1101,7 +1569,7 @@ static const char *ext_name(int slot)
 static const char *ext_about(int slot)
 {
     if (slot < PSYNTH_SLOTS) {
-        return preset_about[slot];
+        return preset_info[slot_preset[slot]].about;
     }
     return samples[slot - PSYNTH_SLOTS].pcm != NULL ? "A RENDERED PATCH" : "EMPTY: SAVE ONE IN SYNTH";
 }
