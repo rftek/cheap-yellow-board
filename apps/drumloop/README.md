@@ -1,6 +1,6 @@
 # DrumLoop
 
-A live drum machine for the Waveshare ESP32-S3-Touch-LCD-7 (800x480, capacitive touch), made for building drum and bass and trap beats on the fly. Eight drum sounds sit on touch pads that play live, from one of four kits: 808, 909, trap and drum and bass. A step sequencer loops 1 to 16 bars at an adjustable tempo, and you can build its beat by tapping steps or by recording what you play on the pads. The sound plays on an AirPlay speaker through the [music_out](../../components/music_out) and [airplay_sender](../../components/airplay_sender) components, or nowhere while you build a beat.
+A live drum machine for the Waveshare ESP32-S3-Touch-LCD-7 (800x480, capacitive touch), made for building drum and bass and trap beats on the fly. Eight drum sounds sit on touch pads that play live, from one of four kits: 808, 909, trap and drum and bass. A step sequencer loops 1 to 16 bars at an adjustable tempo, and you can build its beat by tapping steps or by recording what you play on the pads. The sound plays on an AirPlay speaker through the [music_out](../../components/music_out) and [airplay_sender](../../components/airplay_sender) components, on a PCM5102A DAC wired to the board's header pins, or nowhere while you build a beat.
 
 Bluetooth output isn't possible on this board: the ESP32-S3 has no Classic Bluetooth, so no A2DP, and its BLE 5.0 radio lacks the isochronous channels LE Audio needs. BLE MIDI, sending the hits to a phone or computer that makes the sound, would work and could be added.
 
@@ -11,7 +11,7 @@ This app lives in `apps/drumloop`. The [root README](../../README.md) lists ever
 DrumLoop boots straight to the performance screen with Wi-Fi off and no speaker. The pads, the grid and the loop all work without sound: the loop and playhead run in real time on the board's clock. To hear it, open **MENU**:
 
 1. **WI-FI** turns the radio on and joins the network saved by the [launcher](../../launcher) (`wifi_ssid` and `wifi_pass` in NVS namespace `cyd_config`). No credentials are compiled in. Tap it again to turn Wi-Fi off. The row is gray when the launcher has no network saved.
-2. **OUTPUT** opens the speaker picker. It joins Wi-Fi first if it is off, searches for AirPlay speakers for 3 seconds, and lists them. Tap one to connect. Gray speakers marked `NO` can't be used; tap one to see why. Tap the title to search again. **NO SPEAKER** disconnects and goes silent; **BACK** leaves the output as it was.
+2. **OUTPUT** opens the speaker picker. It joins Wi-Fi first if it is off, searches for AirPlay speakers for 3 seconds, and lists them under **WIRED DAC (PCM5102A)**, which needs no Wi-Fi (see [Wired DAC](#wired-dac)). Tap one to connect. Gray speakers marked `NO` can't be used; tap one to see why. Tap the title to search again. **NO SPEAKER** disconnects and goes silent; **BACK** leaves the output as it was.
 
 The loop keeps playing when the output changes, and the beat is kept. If the speaker drops the session, DrumLoop goes silent and the MENU button turns red until you open the menu, which says so.
 
@@ -59,7 +59,7 @@ Every kit has the same eight roles, so a beat plays on any kit. Pick the kit wit
 ### MENU
 
 - **WI-FI** and **OUTPUT**: see [Starting up](#starting-up).
-- **VOL - / VOL +**: speaker volume in steps of 10%. It shows SILENT with no speaker.
+- **VOL - / VOL +**: speaker volume in steps of 10%. On the wired DAC it scales the samples, starting at 70%. It shows SILENT with no speaker.
 - **BPM -10 / BPM +10**.
 - **LOOP LENGTH**: 1, 2, 4, 8 or 16 bars. Each step up doubles the loop by copying the bars it has, so you can vary the copies. After 16 it goes back to 1 bar. The other bars are kept until the loop grows again.
 - **TRAP 140** (half time) and **DNB 174** (two-step) set the tempo. The loop's steps, length and kit stay. An empty loop gets the style's starter beat, on its own kit, in every bar.
@@ -78,11 +78,20 @@ Everything else between a tap and the speaker is kept short:
 | Touch: the GT911 scans about every 10 ms and the driver polls it every 5 ms in fast mode ([cyd_touch_set_fast](../../components/cyd_display/include/cyd_display.h)) | about 5-15 ms |
 | The touch task hands a pad straight to the audio task ([cyd_touch_set_tap_callback](../../components/cyd_display/include/cyd_display.h)), without waiting for the screen to redraw | under 1 ms |
 | The hit goes into the next 8 ms packet, sent 1 packet ahead of the clock (`lead_packets = 1`) | 8-16 ms |
-| The AirPlay delay, plus whatever the speaker adds itself | 100 ms and up |
+| The AirPlay delay, plus whatever the speaker adds itself (the wired DAC: 16 ms) | 100 ms and up |
 
 Below about 200 ms, a packet lost on Wi-Fi may not be resent in time, which you hear as a click or a gap. Wi-Fi power saving is off while DrumLoop is on Wi-Fi.
 
-AirPlay can't get much closer to real time than that. A wired I2S amplifier or DAC on spare pins would bring a tap to about 10-15 ms and could be added as another OUTPUT.
+AirPlay can't get much closer to real time than that. For playing live, use the wired DAC.
+
+### Wired DAC
+
+**WIRED DAC (PCM5102A)** in OUTPUT plays through a PCM5102A DAC module wired to the board's free header pins, as in [pcm5102a_test](../pcm5102a_test): BCK on GPIO44 and LRCK on GPIO43 (the UART2 header) and DIN on GPIO6 (Sensor AD), with the module's SCK tied to GND. Connect its line output to an amplifier or powered speakers. It needs no Wi-Fi.
+
+- A tap reaches the line output about 25-40 ms after the finger lands: the touch scan (5-15 ms), the next 8 ms block, and the DAC's 16 ms queue (4 buffers of 176 frames) plus its filter, 0.45 ms. The status line shows the queue and filter delay when it connects.
+- If a block comes too late, the DAC plays a moment of silence, heard as a click. The OUTPUT row in MENU then reads `DAC, N GAPS`; it should stay at `WIRED DAC`.
+- **Set the UART switch (SW1) to UART2** first. On UART1, the USB serial chip drives GPIO44 too and the sound turns to noise, so the picker checks the pin first and says `Set SW1 to UART2 first` instead of starting. Don't move SW1 back to UART1 while the DAC plays. The serial log stops while the DAC plays and comes back when you pick another output.
+- Picking an AirPlay speaker or **NO SPEAKER** stops the DAC and gives the three pins back.
 
 ## Custom kits on an SD card
 
