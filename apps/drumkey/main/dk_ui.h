@@ -55,8 +55,10 @@ void keys_screen(QueueHandle_t touch_queue); /* its loop row opens the roll */
 void roll_screen(QueueHandle_t touch_queue);
 void synth_screen(QueueHandle_t touch_queue);
 
-/* The style the keys play, for notes drawn in the Piano Roll. */
+/* The style the keys play, for notes drawn in the Piano Roll, and a way
+   to pick it from there (the roll's INST). */
 int keys_current_instrument(void);
+void keys_select_instrument(int instrument);
 
 /* The keys' settings menu (loop length, quantize, clear, speaker and the
    rest), until BACK; the Piano Roll's MENU opens it. */

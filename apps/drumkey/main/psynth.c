@@ -7,6 +7,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
+#include <stdio.h>
 #include "synth.h"
 
 #define RATE 44100.0f
@@ -63,7 +64,22 @@ typedef struct {
     float lfo_phase[2];
     float lfo_hold[2]; /* sample-and-hold value */
     filter_state_t filter[2];
+    /* Smoothed controls, so a slider moves the sound without steps:
+       cutoff 1 and 2, resonance 1, positions, levels, detune. */
+    float smooth[8];
+    bool smoothed;
+    /* A sample slot's note instead of a patch's. */
+    bool sample;
+    float sample_pos;
+    float sample_step;
+    float sample_fade; /* 1 while held, then falling to 0 */
 } voice_t;
+
+typedef struct {
+    int16_t *pcm;
+    uint32_t frames;
+    char name[PSYNTH_NAME_MAX + 1];
+} sample_t;
 
 typedef struct {
     float *chorus;
@@ -81,6 +97,9 @@ typedef struct {
 } slot_fx_t;
 
 static psynth_patch_t patches[PSYNTH_SLOTS];
+static psynth_rack_t rack = {.layer = 0, .on = {1, 1, 0, 0}, .level = {80, 80, 80, 80}};
+static float slot_gain[PSYNTH_SLOTS]; /* smoothed volume x rack level */
+static sample_t samples[PSYNTH_SAMPLES];
 static voice_t voices[VOICES];
 static slot_fx_t *fx[PSYNTH_SLOTS];
 static float *wavetables; /* [table][frame][mip][WT_ROW] */
@@ -439,8 +458,32 @@ static voice_t *pick_voice(int note, int slot, note_source_t source)
     return best;
 }
 
+static void start_note(int note, int slot, note_source_t source);
+
 static void ext_note_on(int note, int slot, note_source_t source)
 {
+    if (slot < PSYNTH_SLOTS && rack.layer) {
+        /* LAYER: every patch on in the rack plays the note. */
+        bool any = false;
+        for (int s = 0; s < PSYNTH_SLOTS; ++s) {
+            if (rack.on[s]) {
+                start_note(note, s, source);
+                any = true;
+            }
+        }
+        if (any) {
+            return;
+        }
+    }
+    start_note(note, slot, source);
+}
+
+static void start_note(int note, int slot, note_source_t source)
+{
+    bool is_sample = slot >= PSYNTH_SLOTS;
+    if (is_sample && samples[slot - PSYNTH_SLOTS].pcm == NULL) {
+        return; /* an empty sample slot */
+    }
     voice_t *v = pick_voice(note, slot, source);
     bool retrigger = v->active && v->note == note && v->slot == slot;
     float *combs[2] = {v->filter[0].comb, v->filter[1].comb};
@@ -468,15 +511,24 @@ static void ext_note_on(int note, int slot, note_source_t source)
     v->age = ++note_counter;
     v->random = noise();
     v->lfo_phase[0] = v->lfo_phase[1] = 0.0f;
+    v->smoothed = retrigger && v->smoothed;
+    v->sample = is_sample;
+    if (is_sample) {
+        v->sample_pos = 0.0f;
+        v->sample_step = powf(2.0f, (float)(note - PSYNTH_SAMPLE_NOTE) / 12.0f);
+        v->sample_fade = 1.0f;
+    }
     env_start(v, 0);
     env_start(v, 1);
 }
 
 static void ext_note_off(int note, int slot, note_source_t source)
 {
+    bool layered = slot < PSYNTH_SLOTS && rack.layer;
     for (int i = 0; i < VOICES; ++i) {
         voice_t *v = &voices[i];
-        if (!v->active || !v->held || v->note != note || v->slot != slot || v->source != source) {
+        bool same_slot = v->slot == slot || (layered && v->slot < PSYNTH_SLOTS);
+        if (!v->active || !v->held || v->note != note || !same_slot || v->source != source) {
             continue;
         }
         v->held = false;
@@ -802,16 +854,34 @@ static void render_voice(voice_t *v, const psynth_patch_t *p, float *out, int n)
     mods_t m;
     apply_mods(p, v, lfo1, lfo2, mod_env, &m);
 
+    /* Controls glide to their targets over a few ms, so a dragged slider
+       or a stepping modulation moves the sound smoothly. */
+    float track_now = (p->keytrack / 100.0f) * ((float)v->note - 60.0f) / 12.0f / 9.23f;
+    float targets[8] = {
+        p->filter[0].cutoff / 100.0f + m.cutoff[0] + track_now,
+        p->filter[1].cutoff / 100.0f + m.cutoff[1],
+        p->filter[0].resonance / 100.0f + m.reso1,
+        p->osc[0].position / 100.0f + m.pos[0],
+        p->osc[1].position / 100.0f + m.pos[1],
+        p->osc[0].level / 100.0f,
+        p->osc[1].level / 100.0f + m.osc2_level,
+        m.detune,
+    };
+    for (int k = 0; k < 8; ++k) {
+        v->smooth[k] = v->smoothed ? v->smooth[k] + (targets[k] - v->smooth[k]) * 0.25f : targets[k];
+    }
+    v->smoothed = true;
+
     float buf[BLOCK_MAX];
     memset(buf, 0, sizeof(float) * (size_t)n);
     for (int o = 0; o < 2; ++o) {
         const psynth_osc_t *osc = &p->osc[o];
-        float level = osc->level / 100.0f + (o == 1 ? m.osc2_level : 0.0f);
+        float level = v->smooth[5 + o];
         if (level <= 0.001f) {
             continue;
         }
         float freq = 440.0f * powf(2.0f, ((float)v->note - 69.0f + osc->semi + m.pitch) / 12.0f);
-        render_osc(v, o, osc, freq, osc->position / 100.0f + m.pos[o], m.detune, level, buf, n);
+        render_osc(v, o, osc, freq, v->smooth[3 + o], v->smooth[7], level, buf, n);
     }
     if (p->sub_level > 0) {
         float level = p->sub_level / 100.0f;
@@ -834,10 +904,9 @@ static void render_voice(voice_t *v, const psynth_patch_t *p, float *out, int n)
         v->noise_lp = lp;
     }
 
-    float track = (p->keytrack / 100.0f) * ((float)v->note - 60.0f) / 12.0f / 9.23f; /* octaves to 0..1 */
-    float cut1 = p->filter[0].cutoff / 100.0f + m.cutoff[0] + track;
-    float cut2 = p->filter[1].cutoff / 100.0f + m.cutoff[1];
-    float res1 = p->filter[0].resonance / 100.0f + m.reso1;
+    float cut1 = v->smooth[0];
+    float cut2 = v->smooth[1];
+    float res1 = v->smooth[2];
     float res2 = p->filter[1].resonance / 100.0f;
     if (p->routing == 1 && p->filter[1].type != FILTER_OFF && p->filter[0].type != FILTER_OFF) {
         float copy[BLOCK_MAX];
@@ -941,17 +1010,53 @@ static bool ext_sounding(int slot)
             return true;
         }
     }
-    return fx[slot] != NULL && fx[slot]->tail > 0;
+    return slot < PSYNTH_SLOTS && fx[slot] != NULL && fx[slot]->tail > 0;
+}
+
+/* Adds a sample voice: the slot's sound, pitched, fading out after the
+   key is released. */
+static void render_sample_voice(voice_t *v, float *out, int n)
+{
+    const sample_t *s = &samples[v->slot - PSYNTH_SLOTS];
+    if (s->pcm == NULL) {
+        v->active = false;
+        return;
+    }
+    float fade_step = v->held || v->sustained ? 0.0f : (float)n / (0.08f * RATE) / n;
+    for (int i = 0; i < n; ++i) {
+        uint32_t j = (uint32_t)v->sample_pos;
+        if (j + 1 >= s->frames || v->sample_fade <= 0.0f) {
+            v->active = false;
+            return;
+        }
+        float frac = v->sample_pos - (float)j;
+        float a = s->pcm[j] * (1.0f / 32768.0f);
+        float b = s->pcm[j + 1] * (1.0f / 32768.0f);
+        out[i] += (a + (b - a) * frac) * v->sample_fade * 0.9f;
+        v->sample_pos += v->sample_step;
+        v->sample_fade -= fade_step;
+    }
 }
 
 static void ext_render(int slot, float *mix, int n)
 {
-    const psynth_patch_t *p = &patches[slot];
     float buf[BLOCK_MAX];
     if (n > BLOCK_MAX) {
         n = BLOCK_MAX;
     }
     memset(buf, 0, sizeof(float) * (size_t)n);
+    if (slot >= PSYNTH_SLOTS) {
+        for (int i = 0; i < VOICES; ++i) {
+            if (voices[i].active && voices[i].slot == slot) {
+                render_sample_voice(&voices[i], buf, n);
+            }
+        }
+        for (int i = 0; i < n; ++i) {
+            mix[i] += buf[i];
+        }
+        return;
+    }
+    const psynth_patch_t *p = &patches[slot];
     bool any = false;
     for (int i = 0; i < VOICES; ++i) {
         if (voices[i].active && voices[i].slot == slot) {
@@ -969,9 +1074,13 @@ static void ext_render(int slot, float *mix, int n)
         }
         run_fx(f, p, buf, n);
     }
-    float volume = p->volume / 100.0f;
+    float target = p->volume / 100.0f * rack.level[slot] / 80.0f;
+    float volume = slot_gain[slot];
+    float volume_step = (target - volume) * 0.25f / (float)n;
+    slot_gain[slot] = volume + (target - volume) * 0.25f;
     int pos = scope_pos;
     for (int i = 0; i < n; ++i) {
+        volume += volume_step;
         float y = buf[i] * volume;
         mix[i] += y;
         if (slot == scope_slot) {
@@ -986,16 +1095,19 @@ static void ext_render(int slot, float *mix, int n)
 
 static const char *ext_name(int slot)
 {
-    return patches[slot].name;
+    return slot < PSYNTH_SLOTS ? patches[slot].name : psynth_sample_name(slot - PSYNTH_SLOTS);
 }
 
 static const char *ext_about(int slot)
 {
-    return preset_about[slot];
+    if (slot < PSYNTH_SLOTS) {
+        return preset_about[slot];
+    }
+    return samples[slot - PSYNTH_SLOTS].pcm != NULL ? "A RENDERED PATCH" : "EMPTY: SAVE ONE IN SYNTH";
 }
 
 static const synth_external_t engine = {
-    .count = PSYNTH_SLOTS,
+    .count = PSYNTH_SLOTS + PSYNTH_SAMPLES,
     .name = ext_name,
     .about = ext_about,
     .note_on = ext_note_on,
@@ -1051,6 +1163,132 @@ void psynth_reset(int slot)
 void psynth_set_tempo(uint16_t bpm)
 {
     tempo = bpm < 20 ? 20 : bpm;
+}
+
+psynth_rack_t *psynth_rack(void)
+{
+    return &rack;
+}
+
+float psynth_sample_seconds(int sample)
+{
+    if (sample < 0 || sample >= PSYNTH_SAMPLES || samples[sample].pcm == NULL) {
+        return 0.0f;
+    }
+    return (float)samples[sample].frames / RATE;
+}
+
+const char *psynth_sample_name(int sample)
+{
+    static char empty[PSYNTH_SAMPLES][PSYNTH_NAME_MAX + 1];
+    if (sample < 0 || sample >= PSYNTH_SAMPLES) {
+        return "?";
+    }
+    if (samples[sample].pcm != NULL) {
+        return samples[sample].name;
+    }
+    snprintf(empty[sample], sizeof(empty[sample]), "SAMPLE %d", sample + 1);
+    return empty[sample];
+}
+
+bool psynth_render_sample(int slot, int sample)
+{
+    if (slot < 0 || slot >= PSYNTH_SLOTS || sample < 0 || sample >= PSYNTH_SAMPLES) {
+        return false;
+    }
+    const uint32_t max_frames = (uint32_t)(5.0f * RATE);
+    const uint32_t hold_frames = (uint32_t)(1.0f * RATE);
+    float *rendered = heap_caps_malloc(sizeof(float) * max_frames, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    voice_t *v = heap_caps_calloc(1, sizeof(voice_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    slot_fx_t *f = heap_caps_calloc(1, sizeof(slot_fx_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    float *comb0 = heap_caps_calloc(COMB_MAX, sizeof(float), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    float *comb1 = heap_caps_calloc(COMB_MAX, sizeof(float), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    bool ok = rendered != NULL && v != NULL && f != NULL && comb0 != NULL && comb1 != NULL;
+    if (ok) {
+        f->chorus = heap_caps_calloc(CHORUS_SIZE, sizeof(float), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        f->delay = heap_caps_calloc(DELAY_SIZE, sizeof(float), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    uint32_t frames = 0;
+    if (ok) {
+        /* A private copy of the patch and a voice and effects of its own, so
+           the live voices and effects aren't touched. */
+        psynth_patch_t p = patches[slot];
+        v->active = true;
+        v->held = true;
+        v->note = PSYNTH_SAMPLE_NOTE;
+        v->slot = (uint8_t)slot;
+        v->random = noise();
+        v->filter[0].comb = comb0;
+        v->filter[1].comb = comb1;
+        for (int o = 0; o < 2; ++o) {
+            for (int u = 0; u < PSYNTH_UNISON_MAX; ++u) {
+                v->phase[o][u] = (noise() + 1.0f) * 0.5f;
+            }
+        }
+        env_start(v, 0);
+        env_start(v, 1);
+        uint32_t quiet = 0;
+        float volume = p.volume / 100.0f;
+        while (frames < max_frames) {
+            float buf[BLOCK_MAX];
+            int n = BLOCK_MAX;
+            memset(buf, 0, sizeof(buf));
+            if (frames >= hold_frames && v->held) {
+                v->held = false;
+                env_release(v);
+            }
+            if (v->active) {
+                render_voice(v, &p, buf, n);
+            }
+            run_fx(f, &p, buf, n);
+            float block_peak = 0.0f;
+            for (int i = 0; i < n && frames < max_frames; ++i) {
+                rendered[frames++] = buf[i] * volume;
+                block_peak = fmaxf(block_peak, fabsf(buf[i]));
+            }
+            /* Done once the note is over and the effects have gone quiet. */
+            quiet = (!v->active && block_peak < 0.0005f) ? quiet + (uint32_t)n : 0;
+            if (quiet > (uint32_t)(0.1f * RATE)) {
+                break;
+            }
+        }
+        float peak = 1e-6f;
+        for (uint32_t i = 0; i < frames; ++i) {
+            peak = fmaxf(peak, fabsf(rendered[i]));
+        }
+        int16_t *pcm = heap_caps_malloc(sizeof(int16_t) * frames, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        ok = pcm != NULL;
+        if (ok) {
+            float scale = 0.9f * 32767.0f / peak;
+            for (uint32_t i = 0; i < frames; ++i) {
+                pcm[i] = (int16_t)lrintf(rendered[i] * scale);
+            }
+            /* The old sound may be playing: stop its voices first. */
+            for (int i = 0; i < VOICES; ++i) {
+                if (voices[i].slot == PSYNTH_SLOTS + sample) {
+                    voices[i].active = false;
+                }
+            }
+            int16_t *old = samples[sample].pcm;
+            samples[sample].frames = frames;
+            samples[sample].pcm = pcm;
+            snprintf(samples[sample].name, sizeof(samples[sample].name), "S%c %.7s",
+                     (char)('1' + sample), p.name);
+            free(old);
+        }
+    }
+    if (f != NULL) {
+        free(f->chorus);
+        free(f->delay);
+    }
+    free(f);
+    free(comb0);
+    free(comb1);
+    free(v);
+    free(rendered);
+    ESP_LOGI(TAG, "Sample %d from %s: %s, %.1f s", sample + 1, patches[slot].name, ok ? "ok" : "no memory",
+             (double)frames / RATE);
+    return ok;
 }
 
 void psynth_set_scope_slot(int slot)
