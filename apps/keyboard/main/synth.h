@@ -28,6 +28,7 @@ typedef enum {
     VOICE_PLUCK,
     VOICE_BELL,
     VOICE_CHIP,
+    VOICE_PATCH, /* an external engine's patches (synth_set_external), if any */
     VOICE_KINDS,
 } voice_kind_t;
 
@@ -86,6 +87,32 @@ void synth_click(bool accent);
 /* An instrument's tone: a filter, EQ and level its notes are run through
    as they are mixed. The UI changes it in place; the audio task reads it. */
 tone_settings_t *synth_tone(int instrument);
+
+/* ---- An external engine --------------------------------------------------- */
+
+/* Another synthesizer whose patches play as the styles of VOICE_PATCH, so
+   the keys, the loop and an editor treat them like the built-in styles.
+   Its callbacks run in the audio task, from these functions. A slot is
+   one of its count patches. Keyboard registers none; Drum&Key registers
+   its patch synth. */
+#define SYNTH_EXTERNAL_MAX 8
+
+typedef struct {
+    int count; /* patches, up to SYNTH_EXTERNAL_MAX */
+    const char *(*name)(int slot);  /* at most 10 characters */
+    const char *(*about)(int slot); /* a few words */
+    void (*note_on)(int note, int slot, note_source_t source);
+    void (*note_off)(int note, int slot, note_source_t source);
+    void (*sustain)(bool down);
+    void (*release_all)(note_source_t source);
+    void (*silence)(void);
+    bool (*sounding)(int slot);
+    /* Adds the slot's sound into mix, at full scale (1.0 clips). */
+    void (*render)(int slot, float *mix, int frames);
+} synth_external_t;
+
+/* Sets the external engine, before any note. */
+void synth_set_external(const synth_external_t *external);
 
 /* Renders frames of mono audio, adding every voice and the click. */
 void synth_render(int16_t *out, size_t frames);

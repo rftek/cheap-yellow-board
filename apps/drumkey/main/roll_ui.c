@@ -4,7 +4,7 @@
    KEYS -> DRUM -> ROLL) or the keys screen's loop row; it works on an
    empty loop too, so notes can be drawn from scratch.
 
-     row 0       PLAY REC - 120 + SNAP KEYS MENU   (the shared header;
+     row 0       PLAY REC - 120 + SNAP SYN MENU   (the shared header;
                  MENU is the keys' settings menu)
      strip       where the speaker is in the loop
      the grid    14 pitches by up to 2 bars; a key column on the left
@@ -210,6 +210,7 @@ static uint16_t voice_color(int instrument)
         [VOICE_PLUCK] = 0xF685,   /* yellow */
         [VOICE_BELL] = 0x2E9C,    /* cyan */
         [VOICE_CHIP] = 0x6C7F,    /* blue */
+        [VOICE_PATCH] = 0xFAD2,   /* pink */
     };
     int voice = synth_instrument_voice(instrument);
     return voice >= 0 && voice < VOICE_KINDS ? colors[voice] : CYD_COLOR_WHITE;
@@ -326,7 +327,7 @@ static void draw_header(const looper_state_t *state)
     put_span(&row, BPM_SPAN, number, CYD_COLOR_YELLOW, CYD_COLOR_BLACK);
     put_span(&row, BPM_UP_SPAN, "+", CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
     put_span(&row, SNAP_SPAN, snap_names[snap_index], CYD_COLOR_BLACK, CYD_COLOR_CYAN);
-    put_span(&row, SWITCH_SPAN, "KEYS", CYD_COLOR_WHITE, DK_KEYS_COLOR);
+    put_span(&row, SWITCH_SPAN, "SYN", CYD_COLOR_WHITE, DK_SYNTH_COLOR);
     put_span(&row, MENU_SPAN, "MENU", CYD_COLOR_WHITE,
              speaker_lost ? CYD_COLOR_RED : CYD_COLOR_BUTTON);
     if (memcmp(&row, &drawn_header, sizeof(row)) != 0) {
@@ -748,7 +749,7 @@ static void full_redraw(void)
     grid_dirty = true;
 }
 
-/* Runs the Piano Roll until KEYS is tapped. */
+/* Runs the Piano Roll until its screen button (SYN) is tapped. */
 void roll_screen(QueueHandle_t touch_queue)
 {
     if (notes == NULL) {
@@ -808,7 +809,7 @@ void roll_screen(QueueHandle_t touch_queue)
                         key_note = -1;
                     }
                     cyd_touch_set_fast(false);
-                    return; /* on to the keys */
+                    return; /* on to the SYNTH screen */
                 }
                 tap_header(column, &state);
             } else if (row == TOOL_ROW) {
