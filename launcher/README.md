@@ -8,7 +8,7 @@ This folder, `launcher/`, holds the launcher, its custom second-stage bootloader
 
 On power-on, including the EN button, the custom bootloader (`bootloader_components/main`) always starts the launcher. Any other reset, such as the launcher's own restart or an image crashing, goes straight back to the chosen image.
 
-1. The menu immediately lists the stored images, marking the default with `*`, and counts down from 20 seconds. Each entry shows the app's version (such as `1.2`) in gray at the right end of the row when the name leaves room for it: always on the ESP32-S3 board, and for names of up to 8 characters on the CYD. A slot's version comes from its image's app description, so it is right however the image got there; images built before versions existed show none. It shows seven entries at a time: the row below them says which (such as `1-7/9`), and its ▲ and ▼ buttons page through the rest.
+1. The menu immediately lists the stored images, marking the default with `*`, and counts down from 20 seconds. Each entry's title is the app's name and version, such as `drumkey 1.4`, with the version in gray. A slot's version comes from its image's app description (`esp_app_desc_t.version`, which ESP-IDF fills from the app's `version.txt`), so it is right however the image got there; a download's comes from the catalog's `app_version`. Images built before versions existed, which carry a git hash there instead, show no version. The version always shows. On the ESP32-S3 board every name fits beside it; on the CYD, where an entry has 12 columns, names of up to 8 characters fit whole and a longer one is cut to fit, ending in `~` (`touchsc~ 1.0`, `catmous~ 1.0` for `catmouse_pad`). It shows seven entries at a time: the row below them says which (such as `1-7/9`), and its ▲ and ▼ buttons page through the rest.
 2. When the countdown ends, the last-used image boots. The very first time, it is the first stored image.
 3. Tapping anywhere except an image or the network activity, the scroll buttons, brightness slider and the bottom row's other pages included, adds another 20 seconds. Tap an image to boot it right away.
    - The brightness slider runs down the right edge: `+` at the top, a bar with one segment per level, `-` below it, then the level in percent. `+` and `-` step the backlight by 20%, between 20% and 100%, and tapping a bar segment jumps to its level. The level is saved in NVS (`cyd_config/brightness`). Every image starts at that level, because the shared display driver reads it.
@@ -83,6 +83,10 @@ Touch pins: MOSI GPIO32, MISO GPIO39, SCLK GPIO25, CS GPIO33, IRQ GPIO36. Touch 
 ## Changelog
 
 The launcher's version is in [`version.txt`](version.txt) and in its app description. Every change to the launcher or its bootloader bumps it and adds an entry here, newest first; the [root README](../README.md#versions) explains when to bump MAJOR or MINOR.
+
+### 1.1 (2026-11-15)
+
+- Every menu entry's title shows the app's version after its name, such as `drumkey 1.4`, for stored and downloadable apps alike. On the CYD a name too long to fit beside its version is cut and ends in `~`, instead of the version being left out.
 
 ### 1.0 (2026-11-08)
 

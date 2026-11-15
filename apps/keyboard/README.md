@@ -136,3 +136,11 @@ The first build downloads `espressif/mdns` through the ESP-IDF component manager
 
 - **As a launcher image**: when a change to this folder is merged into `main`, CI publishes `firmware-esp32s3.bin` on the release tagged `keyboard`, and the launcher lists it.
 - **Over USB into a launcher slot**: see the [launcher README](../../launcher/README.md). The board is on COM13. Set the UART DIP switch first.
+
+## Changelog
+
+The version is in [`version.txt`](version.txt) and in the image's app description, where the launcher reads it. Every change to this app bumps it and adds an entry here, newest first; the [root README](../../README.md#versions) explains when to bump MAJOR or MINOR.
+
+### 1.0 (2026-11-15)
+
+- First numbered version. A two-octave touch keyboard across C1 to C8 with 23 styles, eight-note polyphony, a sustain pedal, a loop recorder with overdub and undo, per-style filter, EQ and level, and output to an AirPlay speaker.

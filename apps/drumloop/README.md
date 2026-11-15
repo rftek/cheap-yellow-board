@@ -167,3 +167,11 @@ The first build downloads `espressif/mdns` through the ESP-IDF component manager
 - **Over USB into a launcher slot**: see the [launcher README](../../launcher/README.md). The board is on COM13. Set the UART DIP switch first.
 
 Monitor with `& $pio device monitor --port COM13 --baud 115200`.
+
+## Changelog
+
+The version is in [`version.txt`](version.txt) and in the image's app description, where the launcher reads it. Every change to this app bumps it and adds an entry here, newest first; the [root README](../../README.md#versions) explains when to bump MAJOR or MINOR.
+
+### 1.0 (2026-11-15)
+
+- First numbered version. A live drum machine: eight touch pads from four kits (808, 909, trap, drum and bass), a 1-16 bar step sequencer that records the pads, per-track filter, EQ and level, and output to an AirPlay speaker.

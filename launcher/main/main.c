@@ -465,9 +465,8 @@ static bool any_slot_version(void)
     return false;
 }
 
-/* "A 1.2 B 2.0": each slot's app version, '-' for none. Shown on the info
-   row because the CYD's menu rows are too narrow for long names and a
-   version together. */
+/* "A 1.2 B 2.0": each slot's app version, '-' for none, for the info row.
+   The menu shows them too, but cuts long names on the CYD. */
 static void slot_versions_text(char *text, size_t size)
 {
     const char *version[SLOT_COUNT];
@@ -687,11 +686,44 @@ static void draw_scroll_row(void)
     draw_menu_cells(SCROLL_ROW, text, foreground, background);
 }
 
+/* Shortest name an entry keeps beside its version. */
+#define ENTRY_NAME_MIN 4
+
+/* Lays out an entry's title, "name 1.2", in width cells of text (which is
+   not terminated): the app name, then its version in its own color. The
+   version shows unless it would leave the name fewer than ENTRY_NAME_MIN
+   columns, which no MAJOR.MINOR version of up to 7 characters does on
+   either board. A name too long for what is left is cut, ending
+   in '~' to say so: "touchsc~ 1.0" in the CYD's 12 columns, where names of
+   up to 8 characters fit whole beside a three-character version. The
+   S3's 21 columns fit every name. Returns where the version starts, or
+   width when there is none to show. */
+static int entry_title(char *text, int width, const char *name, const char *version)
+{
+    int version_length = (int)strlen(version);
+    int name_room = width;
+    if (version_length > 0 && width - 1 - version_length >= ENTRY_NAME_MIN) {
+        name_room = width - 1 - version_length;
+    } else {
+        version_length = 0;
+    }
+    int name_length = (int)strnlen(name, name_room + 1);
+    if (name_length > name_room) {
+        name_length = name_room;
+        memcpy(text, name, name_length - 1);
+        text[name_length - 1] = '~';
+    } else {
+        memcpy(text, name, name_length);
+    }
+    if (version_length == 0) {
+        return width;
+    }
+    memcpy(text + name_length + 1, version, version_length);
+    return name_length + 1;
+}
+
 /* Draws entries[index], which must be on the current page: two marker
-   columns, the app name, and its version at the right end of the row in
-   gray when the name leaves room for it. The CYD's 14 menu columns fit a
-   version only beside names of up to 8 characters; the info row's slot
-   versions page and the download screen show the rest. */
+   columns, then the app's title, its name and version (entry_title). */
 static void draw_entry(int index, bool highlighted)
 {
     char markers[2];
@@ -721,16 +753,9 @@ static void draw_entry(int index, bool highlighted)
     text[MENU_COLUMNS] = '\0';
     text[0] = markers[0];
     text[1] = markers[1];
-    int width = MENU_COLUMNS - 2;
-    int name_length = (int)strnlen(name, width);
-    int version_length = (int)strlen(version);
-    bool show_version = version_length > 0 && name_length + 1 + version_length <= width;
-    memcpy(text + 2, name, name_length);
-    if (show_version) {
-        memcpy(text + MENU_COLUMNS - version_length, version, version_length);
-    }
+    int version_column = 2 + entry_title(text + 2, MENU_COLUMNS - 2, name, version);
     for (int i = 0; i < MENU_COLUMNS; ++i) {
-        bool in_version = show_version && i >= MENU_COLUMNS - version_length;
+        bool in_version = i >= version_column;
         foreground[i] = highlighted ? CYD_COLOR_BLACK : in_version ? CYD_COLOR_GRAY : color;
         background[i] = highlighted ? CYD_COLOR_WHITE : CYD_COLOR_BUTTON;
     }
