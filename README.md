@@ -17,6 +17,7 @@ Applications for the ESP32 Cheap Yellow Display (CYD, ESP32-2432S028R), written 
 | [apps/drumloop](apps/drumloop) | Live drum pads with 808, 909, trap and DnB kits and a 1-16 bar step sequencer, played on an AirPlay speaker | esp32s3 |
 | [apps/keyboard](apps/keyboard) | Two-octave touch keyboard with 23 synthesized piano, organ and other styles, sustain and a loop recorder, played on an AirPlay speaker | esp32s3 |
 | [apps/drumkey](apps/drumkey) | Drum&Key: DrumLoop's pads and step sequencer and Keyboard's keys in one app, with a screen switch, one tempo and one AirPlay stream | esp32s3 |
+| [apps/odin_s3](apps/odin_s3) | ODIN S3: the Odin 2 synthesizer's sound engine with 83 of its factory presets, a two-octave keyboard, bend and mod strips and an XY pad (GPL-3.0, a port of Odin 2) | esp32s3 |
 | [apps/f1_race](apps/f1_race) | F1 racing game | esp32, esp32s3 |
 | [apps/gear_roll](apps/gear_roll) | LVGL gear demo | esp32, esp32s3 |
 | [apps/screen_check](apps/screen_check) | Screen color test | esp32, esp32s3 |
@@ -91,6 +92,8 @@ Published images are public, so they must contain no credentials, and they must 
 | `docs/<change>` | Documentation |
 
 A new app is a new folder under `apps/` in a pull request; [docs/INSTALL.md](docs/INSTALL.md) describes the steps. Never commit `wifi_credentials.h`: it lives outside the repository, in `%USERPROFILE%\.cyd_private`.
+
+[apps/odin_s3](apps/odin_s3) is a port of the [Odin 2](https://github.com/TheWaveWarden/odin2) synthesizer and is under Odin's license, the GPL-3.0 (its own LICENSE file). Its image, with the shared components it links, is offered under that license. No other app includes its code.
 
 The `bruce` branch is a separate import of the [Bruce](https://github.com/BruceDevices/firmware) firmware with its full history (AGPL-3.0). It builds with its own instructions and is not an app here.
 
