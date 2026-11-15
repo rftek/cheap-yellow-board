@@ -115,7 +115,7 @@ Recording allows for the delay. A note is recorded where you heard the loop when
 | `main/main.c` | start-up: NVS, shared tempo, touch, audio, UI task |
 | `main/ui.c` | screen and menu. Key labels use `cyd_draw_small_text`, the text font at half size. The touch task plays the keys through `cyd_touch_set_fingers_callback`, which reports every finger with its id, so notes start and stop as fingers land, slide and lift |
 | `main/audio.c` | the command queue from the touch and UI tasks, and the render callback that `music_out` calls every 8 ms |
-| `main/looper.c` | transport, loop notes in ticks (960 a beat), takes, quantize, count-in and metronome |
+| `main/looper.c` | transport, loop notes in ticks (960 a beat), takes, quantize, count-in and metronome; a lock and calls to read and edit the notes, for Drum&Key's Piano Roll |
 | `main/synth.c` | the eight voices; the instruments as voices and styles over seven engines (modal, FM, organ, strings, synth, pluck, chip); each style's tone; the click and the soft-clipping mixer |
 
 ## Limits

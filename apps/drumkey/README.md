@@ -9,8 +9,9 @@ This app lives in `apps/drumkey`. The [root README](../../README.md) lists every
 Both screens have the same header:
 
 ```
- PLAY REC - 120 + [1/4] KEYS MENU     drums screen
+ PLAY REC - 120 + [1/4] ROLL MENU     drums screen
  PLAY REC - 120 + [MET] DRUM MENU     keys screen
+ PLAY REC - 120 + [1/16] KEYS MENU    Piano Roll
 ```
 
 | Control | What it does |
@@ -20,12 +21,47 @@ Both screens have the same header:
 | **- / +** | The shared tempo, 60 to 200 BPM. Both loops follow it. |
 | **1/4** (drums) | The bar page, as in DrumLoop. Past 9 bars it shows `B12` and so on. |
 | **MET** (keys) | The keyboard's metronome. |
-| **KEYS / DRUM** | Switches to the other screen at once. Sounds keep playing; keys held when you leave are lifted. |
+| **DRUM / ROLL / KEYS** | The screen button: goes round keys → drums → Piano Roll → keys, at once. Sounds keep playing; keys held when you leave are lifted. |
 | **MENU** | That screen's settings, as in its own app: kits, styles, export and the drum loop length on the drums side; voices, quantize and the keyboard loop length on the keys side. Wi-Fi, the speaker, volume and the AirPlay delay are shared, so they can be set from either. |
 
 Everything else works as in [DrumLoop](../drumloop/README.md) and [Keyboard](../keyboard/README.md): eight pads and a 16-step grid (hold a step to double it, hold a track label for its filter, EQ and level), hold Style for a keyboard style's filter, EQ and level, 25 keys that move across seven octaves (OCT - / OCT + and a tappable octave map), a sustain pedal, seven voices in 23 styles, kits from an SD card, and EXPORT (which renders the drums only).
 
 The drum loop runs 1 to 16 bars and the keyboard loop 1 to 8. Both start together at bar 1, so with power-of-two lengths they stay in step.
+
+## Piano Roll
+
+The screen button in the header goes round **KEYS → DRUM → ROLL**: tap **ROLL** on the drums screen to open the Piano Roll (or tap the keys screen's loop row). It works on an empty loop too, so you can draw a part from scratch. It is the keyboard loop drawn as a grid of pitch against time, in the spirit of LMMS's piano roll. Recorded takes show up there, and drawn notes play on the keys' loop in time with the drums.
+
+```
+ PLAY REC - 120 + 1/16 KEYS MENU     header: SNAP, on to the KEYS screen, the keys' MENU
+ ==========|---------------------     where the speaker is in the loop
+ C4 |  ##      ####        |   ##     14 pitches by 2 bars; key column on the left
+    |      ##          ##  |
+ OCT- OCT+  <  1-2/4  >  DEL  UNDO   octave, bar page, delete, undo
+```
+
+The key column on the left names every key (C4, C#4, D4 …) and plays it while you hold it, in the style picked on the keys screen. Slide along it to play a run. While REC is on, it records like the keys.
+
+With one finger on the grid:
+- **Empty spot:** adds a note on the keys' current style, at the snapped step. Drag right before lifting to draw it longer. The next note takes the last length you drew. With notes selected, it clears the selection instead.
+- **Tap a note:** selects it (it turns white), or deselects it.
+- **Double tap** anywhere on the grid: turns the whole selection off. If the first tap drew a note, that note goes too.
+- **Drag a note:** moves it in time and pitch. Drag a selected note to move the whole selection together.
+- **Drag a note's right end** (the dark handle): resizes it.
+- Notes sound briefly as you place or move them, except while REC is on.
+
+| Control | What it does |
+|---|---|
+| **SNAP** (`1/16`) | The grid notes snap to: 1/4, 1/8, 1/16, 1/32 or OFF. |
+| **KEYS** | On to the keys screen. |
+| **MENU** | The keys screen's settings menu: loop length, quantize, clear loop, Wi-Fi, speaker, volume and AirPlay delay. BACK returns to the roll. |
+| **OCT- / OCT+** | Moves the 14 pitches shown by an octave, from C1 up to C8. |
+| **< 1-2/4 >** | The bars shown. Loops longer than 2 bars page 2 at a time. |
+| **DEL** | Deletes the selected notes. |
+| **UNDO** | Removes the last take. Each drawn note is a take of its own, so it removes the last note drawn. Moves and deletes aren't undone. |
+| **PLAY / REC / tempo** | As on the other screens. REC records the keys while you watch the notes appear. |
+
+Notes of every style are shown in their voice's color. The loop's length and quantize are in MENU, here or on the keys screen.
 
 ## Latency and load
 
@@ -42,7 +78,8 @@ The drum loop runs 1 to 16 bars and the keyboard loop 1 to 8. Both start togethe
 | `main/dk_audio.c` | The audio task's render: shared transport and tempo, the drum engine and the looper, mixed |
 | `main/drums_ui.c` | The drums screen, made from DrumLoop's `ui.c` by `tools/make_screens.py` |
 | `main/keys_ui.c` | The keys screen, made from Keyboard's `ui.c` by `tools/make_screens.py` |
-| `main/dk_ui.c` | The header layout and the gaps between its buttons |
+| `main/roll_ui.c` | The Piano Roll, which edits the keyboard loop through looper.h |
+| `main/dk_ui.c` | The header layout, the gaps between its buttons, and which screen is next |
 
 The engines are compiled from the other apps' folders, so a fix there reaches Drum&Key too:
 - `apps/drumloop/main`: `engine.c`, `kit.c`, `export.c`, `sdcard.c` and `wav.c`
@@ -50,7 +87,7 @@ The engines are compiled from the other apps' folders, so a fix there reaches Dr
 
 `uses-apps.txt` names those two apps, so CI rebuilds Drum&Key when either changes.
 
-The two screens are made from the apps' `ui.c` by `tools/make_screens.py`. It applies Drum&Key's changes: the shared header with the KEYS / DRUM button, the shared transport and tempo, and a screen that returns when the switch is tapped. After a change to `apps/drumloop/main/ui.c` or `apps/keyboard/main/ui.c`, run it from the repository root and commit the result:
+The two screens are made from the apps' `ui.c` by `tools/make_screens.py`. It applies Drum&Key's changes: the shared header with the screen button, the shared transport and tempo, and a screen that returns when the switch is tapped. After a change to `apps/drumloop/main/ui.c` or `apps/keyboard/main/ui.c`, run it from the repository root and commit the result:
 
 ```bash
 python apps/drumkey/tools/make_screens.py
@@ -75,6 +112,10 @@ pio run -e esp32s3
 The image goes in a launcher slot, like the other apps.
 
 ## Changelog
+
+### 1.2 (2026-11-15)
+
+- Piano Roll: the screen button goes KEYS → DRUM → ROLL; the roll edits the keyboard loop as a grid, even an empty one. Draw, move, resize and delete notes with a snap, while the loop plays.
 
 ### 1.1 (2026-11-14)
 

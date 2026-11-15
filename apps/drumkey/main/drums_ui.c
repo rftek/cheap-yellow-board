@@ -244,7 +244,7 @@ static void refresh_header(void)
                                          : CYD_COLOR_BUTTON;
     put_span(text, fg, bg, BAR_SPAN, bar,
              follow && pattern->bars > 1 ? CYD_COLOR_BLACK : CYD_COLOR_WHITE, bar_bg);
-    put_span(text, fg, bg, SWITCH_SPAN, "KEYS", CYD_COLOR_WHITE, DK_KEYS_COLOR);
+    put_span(text, fg, bg, SWITCH_SPAN, "ROLL", CYD_COLOR_WHITE, DK_ROLL_COLOR);
     put_span(text, fg, bg, MENU_SPAN, "MENU", CYD_COLOR_WHITE,
              speaker_lost_notice ? CYD_COLOR_RED : CYD_COLOR_BUTTON);
 

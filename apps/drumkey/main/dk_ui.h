@@ -4,7 +4,9 @@
    button that switches between them, and the gaps drawn between its
    buttons (they sit side by side, with no blank columns to spare).
 
-     PLAY REC - 140 + [BAR|MET] KEYS|DRUM MENU   26 columns */
+     PLAY REC - 140 + [BAR|MET] DRUM|ROLL|KEYS MENU   26 columns
+
+   The screen button goes round KEYS -> DRUM -> ROLL -> KEYS. */
 
 #include <stdbool.h>
 
@@ -29,11 +31,30 @@ typedef struct {
 /* The switch button's color: the other screen's. */
 #define DK_DRUMS_COLOR 0xFA20 /* orange */
 #define DK_KEYS_COLOR 0x4A7F  /* blue */
+#define DK_ROLL_COLOR 0x8AFF  /* violet */
 
 /* Draws thin black gaps between the header's buttons; call after drawing
    row 0. */
 void dk_header_gaps(void);
 
-/* The screens. Each runs until its switch button is tapped. */
+/* The screens. Each runs until its screen button takes it to the next,
+   keys to drums to Piano Roll and round again; one that goes elsewhere
+   (the keys' loop row opens the roll) sets dk_next_screen first. */
+typedef enum {
+    DK_DRUMS,
+    DK_KEYS,
+    DK_ROLL,
+} dk_screen_t;
+
+extern dk_screen_t dk_next_screen;
+
 void drums_screen(QueueHandle_t touch_queue);
-void keys_screen(QueueHandle_t touch_queue);
+void keys_screen(QueueHandle_t touch_queue); /* its loop row opens the roll */
+void roll_screen(QueueHandle_t touch_queue);
+
+/* The style the keys play, for notes drawn in the Piano Roll. */
+int keys_current_instrument(void);
+
+/* The keys' settings menu (loop length, quantize, clear, speaker and the
+   rest), until BACK; the Piano Roll's MENU opens it. */
+void keys_menu(QueueHandle_t touch_queue);

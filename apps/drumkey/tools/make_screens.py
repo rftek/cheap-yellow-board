@@ -97,7 +97,7 @@ d.rep('''    char bar[8];
     }''')
 d.rep('''    put_span(text, fg, bg, MENU_SPAN, "MENU", CYD_COLOR_WHITE,
              speaker_lost_notice ? CYD_COLOR_RED : CYD_COLOR_BUTTON);
-''', '''    put_span(text, fg, bg, SWITCH_SPAN, "KEYS", CYD_COLOR_WHITE, DK_KEYS_COLOR);
+''', '''    put_span(text, fg, bg, SWITCH_SPAN, "ROLL", CYD_COLOR_WHITE, DK_ROLL_COLOR);
     put_span(text, fg, bg, MENU_SPAN, "MENU", CYD_COLOR_WHITE,
              speaker_lost_notice ? CYD_COLOR_RED : CYD_COLOR_BUTTON);
 ''')
@@ -262,7 +262,28 @@ k.rep('''            if (row == 0 && in_span(MENU_SPAN, column)) {
                 cyd_touch_set_fingers_callback(NULL, NULL);
                 cyd_touch_set_tap_callback(NULL, NULL);
                 return;
+            }
+            if (row == LOOP_ROW) {
+                /* The loop row opens the Piano Roll too. */
+                leave_keys();
+                cyd_touch_set_fingers_callback(NULL, NULL);
+                cyd_touch_set_tap_callback(NULL, NULL);
+                dk_next_screen = DK_ROLL;
+                return;
             }''')
+k.s += '''
+/* The style the keys play, for notes drawn in the Piano Roll. */
+int keys_current_instrument(void)
+{
+    return instrument;
+}
+
+/* The keys' settings menu, which the Piano Roll's MENU opens too. */
+void keys_menu(QueueHandle_t touch_queue)
+{
+    run_menu(touch_queue);
+}
+'''
 save('drumkey/main/keys_ui.c', k.s)
 if stale:
     print("Out of date; run python apps/drumkey/tools/make_screens.py: " + ", ".join(stale))

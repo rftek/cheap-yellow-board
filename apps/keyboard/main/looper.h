@@ -1,6 +1,8 @@
 #pragma once
 
-/* The loop recorder and transport, run by the audio task only.
+/* The loop recorder and transport, run by the audio task. A lock guards
+   the loop's notes, so a screen can also read and edit them (a piano
+   roll) while the loop plays.
 
    A loop is 1 to 8 bars of 4/4. Notes are kept in ticks (960 to a beat),
    not frames, so the tempo can change and the loop follows. Each pass of
@@ -89,3 +91,28 @@ typedef struct {
 } looper_state_t;
 
 void looper_get_state(looper_state_t *state);
+
+/* ---- Editing the notes, from another task ------------------------------ */
+
+/* A loop note as an editor sees it. */
+typedef struct {
+    uint32_t start;  /* ticks from the start of the loop */
+    uint32_t length; /* ticks */
+    uint8_t note;    /* MIDI number */
+    uint8_t instrument;
+} looper_note_t;
+
+#define LOOPER_MIN_LENGTH (LOOP_TICKS_PER_BEAT / 16) /* a 64th note */
+
+/* Copies up to max of the loop's notes into out; returns how many. */
+int looper_get_notes(looper_note_t *out, int max);
+
+/* Adds a note as a take of its own, so UNDO removes it. Its start and
+   length are kept inside the loop. False when the loop is full. */
+bool looper_add_note(const looper_note_t *note);
+
+/* Removes the first note matching start, note and instrument. */
+bool looper_remove_note(const looper_note_t *note);
+
+/* Replaces the first note matching from with to (a move or a resize). */
+bool looper_replace_note(const looper_note_t *from, const looper_note_t *to);
