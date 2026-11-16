@@ -20,6 +20,7 @@ Applications for the ESP32 Cheap Yellow Display (CYD, ESP32-2432S028R), written 
 | [apps/odin_s3](apps/odin_s3) | ODIN S3: the Odin 2 synthesizer's sound engine with 83 of its factory presets, a two-octave keyboard, bend and mod strips and an XY pad (GPL-3.0, a port of Odin 2) | esp32s3 |
 | [apps/f1_race](apps/f1_race) | F1 racing game | esp32, esp32s3 |
 | [apps/gear_roll](apps/gear_roll) | LVGL gear demo | esp32, esp32s3 |
+| [apps/pcm5102a_test](apps/pcm5102a_test) | PCM5102A audio DAC test: drum pads and test tones over I2S with a few milliseconds of delay (pcm5102a demo) | esp32s3 |
 | [apps/screen_check](apps/screen_check) | Screen color test | esp32, esp32s3 |
 | [apps/stopwatch](apps/stopwatch) | LVGL stopwatch | esp32, esp32s3 |
 | [apps/touchscreen_cal](apps/touchscreen_cal) | Touchscreen calibration | esp32, esp32s3 |
@@ -47,6 +48,7 @@ components/cyd_gamepad/      Xbox / Bluetooth gamepad input on Bluepad32
 components/airplay_sender/   AirPlay 1 (RAOP) audio output to network speakers
 components/music_out/        Wi-Fi, speaker picker and audio task for the music apps
 components/music_tone/       per-instrument filter, EQ and level, and their editor screen
+components/pcm5102a/         TI PCM5102A stereo audio DAC over I2S, low latency
 external/bluepad32/          Bluepad32 git submodule, with BTstack nested in it
 docs/                        build environment and installation guide
 tools/ci_plan.py             picks the apps a change needs built
