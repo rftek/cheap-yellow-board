@@ -4,7 +4,7 @@
    https://github.com/TheWaveWarden/odin2, GPL-3.0) with Odin's factory
    presets, played on a two-octave touch keyboard with pitch-bend and mod
    strips and Odin's XY pad. Sound goes out through components/music_out:
-   an AirPlay speaker, or the wired DAC where music_out has one.
+   the wired PCM5102A DAC (components/pcm5102a) or an AirPlay speaker.
 
    engine.c is Odin's voices and signal flow, filters.c its filters and
    fx.c its distortion and effects; presets.c and wavetables.bin are made

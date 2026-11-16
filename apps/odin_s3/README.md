@@ -1,6 +1,6 @@
 # ODIN S3
 
-A port of the [Odin 2](https://github.com/TheWaveWarden/odin2) synthesizer's sound engine to the Waveshare ESP32-S3-Touch-LCD-7 (800x480, capacitive touch), with 83 of Odin's factory presets. Odin 2 is a free desktop synthesizer plugin by TheWaveWarden. This app runs Odin's oscillators, filters, envelopes, LFOs, mod matrix, distortion and effects on the board, and plays them from a two-octave touch keyboard with pitch-bend and mod strips and Odin's XY pad. Sound goes out through the shared [music_out](../../components/music_out) component to an AirPlay speaker, or to the wired PCM5102A DAC once music_out has it.
+A port of the [Odin 2](https://github.com/TheWaveWarden/odin2) synthesizer's sound engine to the Waveshare ESP32-S3-Touch-LCD-7 (800x480, capacitive touch), with 83 of Odin's factory presets. Odin 2 is a free desktop synthesizer plugin by TheWaveWarden. This app runs Odin's oscillators, filters, envelopes, LFOs, mod matrix, distortion and effects on the board, and plays them from a two-octave touch keyboard with pitch-bend and mod strips and Odin's XY pad. Sound goes out through the shared [music_out](../../components/music_out) component: to a PCM5102A DAC wired to the header pins ([pcm5102a](../../components/pcm5102a), about 9 ms of delay, so it plays like an instrument), or to an AirPlay speaker.
 
 The DSP is Odin's own code, ported from C++ and JUCE to C. Odin's interface isn't ported: its artwork is replaced by a touch screen of its own.
 
@@ -16,8 +16,8 @@ The wavetables are Odin's, most of them made from the Adventure Kid waveforms (A
 
 ODIN S3 boots to the keys with the last patch you picked (the first bass the first time), Wi-Fi off and no speaker. To hear it, open **MENU**:
 
-1. **WI-FI** turns the radio on and joins the network saved by the [launcher](../../launcher). No credentials are compiled in.
-2. **OUTPUT** lists the AirPlay speakers (and the wired DAC, where music_out has it). Tap one.
+- **Wired DAC:** tap **OUTPUT**, then **WIRED DAC** at the top of the list. It needs no Wi-Fi. The DAC is on GPIO44 (BCK), GPIO43 (LRCK) and GPIO6 (DIN); set the board's UART switch **SW1 to UART2**, or the USB serial chip fights the bit clock (the picker refuses while GPIO44 reads high). To flash the board over USB, set SW1 back to UART1. The [pcm5102a](../../components/pcm5102a) README has the wiring and the module's jumpers.
+- **AirPlay:** **WI-FI** turns the radio on and joins the network saved by the [launcher](../../launcher) (no credentials are compiled in). Then **OUTPUT** lists the AirPlay speakers; tap one.
 
 ## The screen
 
@@ -39,7 +39,7 @@ ODIN S3 boots to the keys with the last patch you picked (the first bass the fir
 | **MOD** | The mod wheel. It stays where you leave it. Many presets use it in their mod matrix. |
 | **X / Y** | Odin's XY pad, a mod matrix source. It stays where you leave it. |
 | **Keys** | Play with up to five fingers. How low on the key you press sets the velocity: near the top is soft, near the bottom is loud. Slide along the keys for a glissando. |
-| **MENU** | Wi-Fi, OUTPUT, volume, the tempo (for synced LFOs and effects; shared with the other music apps), the AirPlay delay. |
+| **MENU** | Wi-Fi, OUTPUT (wired DAC or AirPlay), volume, the tempo (for synced LFOs and effects; shared with the other music apps), the AirPlay delay. |
 
 ## What runs, and what's left out
 
@@ -70,7 +70,7 @@ Presets that use an oscillator or filter the port doesn't have yet, or the arpeg
 
 ## Load
 
-The audio task renders 352 samples (8 ms) at a time. Row 2 shows the average render time of the last second as a share of that 8 ms; it turns red when the worst block passes 90%. The serial log has `Render: average N us, worst N us of 7981 us per block, N voices` every 10 s while the worst block is over a quarter. Heavy patches (three oscillators, two diode filters, distortion and unison) cost the most per voice.
+The audio task renders 352 samples (8 ms) at a time. On the wired DAC about 9 ms is queued, so a block that takes longer than 8 ms is a gap you hear (the OUTPUT row shows `DAC, N GAPS`). Row 2 shows the average render time of the last second as a share of that 8 ms; it turns red when the worst block passes 90%. The serial log has `Render: average N us, worst N us of 7981 us per block, N voices` every 10 s while the worst block is over a quarter. Heavy patches (three oscillators, two diode filters, distortion and unison) cost the most per voice.
 
 ## Files
 
@@ -107,4 +107,4 @@ The image goes in a launcher slot, like the other apps.
 
 ### 1.0 (2026-11-15)
 
-- First version: Odin 2's analog, wavetable and noise oscillators, ladder, SEM, Korg 35 and diode filters, four envelopes, four LFOs, the 9-row mod matrix, distortion, delay, phaser, flanger and chorus, 8 voices with unison, glide and legato, and 83 factory presets. A two-octave keyboard with velocity by touch height, BEND and MOD strips, the XY pad, a preset browser and music_out's outputs.
+- First version: Odin 2's analog, wavetable and noise oscillators, ladder, SEM, Korg 35 and diode filters, four envelopes, four LFOs, the 9-row mod matrix, distortion, delay, phaser, flanger and chorus, 8 voices with unison, glide and legato, and 83 factory presets. A two-octave keyboard with velocity by touch height, BEND and MOD strips, the XY pad, a preset browser and music_out's outputs: the wired PCM5102A DAC or AirPlay.
