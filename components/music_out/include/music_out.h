@@ -1,8 +1,10 @@
 #pragma once
 
-/* Sound output for the music apps (DrumLoop, Keyboard): Wi-Fi, a speaker
-   picker, and an audio task that streams the app's sound to an AirPlay
-   speaker through airplay_sender, plus the settings those apps share.
+/* Sound output for the music apps (DrumLoop, Keyboard, Drum&Key): Wi-Fi, a
+   speaker picker, and an audio task that streams the app's sound to an
+   AirPlay speaker through airplay_sender or, on the ESP32-S3, to a PCM5102A
+   DAC on the header pins (the picker's "WIRED DAC" row, about 9 ms of
+   delay), plus the settings those apps share.
 
    The app renders 44100 Hz mono 16-bit audio in a callback, 8 ms at a
    time. While a speaker is attached the task always writes, silence
@@ -111,13 +113,14 @@ void music_out_wifi_stop(void);
 /* ---- Speaker ------------------------------------------------------------ */
 
 /* Full-screen picker: joins Wi-Fi if needed, searches for AirPlay speakers
-   and connects to the one tapped (with the saved AirPlay delay), or turns
-   the speaker off. Takes one-finger taps: turn the touch driver's fast
+   and connects to the one tapped (with the saved AirPlay delay), starts the
+   wired DAC (listed first on the ESP32-S3, with or without Wi-Fi), or turns
+   the output off. Takes one-finger taps: turn the touch driver's fast
    mode off first. The caller redraws afterwards; status gets a line about
    the outcome. */
 void music_out_pick_speaker(char *status, size_t status_size);
 
-/* The speaker's name, or NULL when silent. */
+/* The speaker's name, "Wired DAC", or NULL when silent. */
 const char *music_out_speaker_name(void);
 
 /* Call often: when the speaker has dropped the session, disconnects it,
