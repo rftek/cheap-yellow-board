@@ -1,6 +1,6 @@
 # Drum&Key
 
-[DrumLoop](../drumloop) and [Keyboard](../keyboard) in one app for the Waveshare ESP32-S3-Touch-LCD-7. The drum pads and step sequencer are on one screen and the keyboard (two octaves at a time, across C1 to C8) and its loop recorder on the other, with a button in the header to switch between them. Both play at the same time on one AirPlay speaker, and their loops share one transport and one tempo, so a keyboard part lines up with the beat.
+[DrumLoop](../drumloop) and [Keyboard](../keyboard) in one app for the Waveshare ESP32-S3-Touch-LCD-7. The drum pads and step sequencer are on one screen and the keyboard (two octaves at a time, across C1 to C8) and its loop recorder on the other, with a button in the header to switch between them. Both play at the same time on one AirPlay speaker or the wired PCM5102A DAC, and their loops share one transport and one tempo, so a keyboard part lines up with the beat.
 
 This app lives in `apps/drumkey`. The [root README](../../README.md) lists every app in this repository. It targets the S3 board only (`supported-targets.txt`).
 
@@ -127,6 +127,7 @@ How it runs:
 - The audio task runs on core 1 at a priority above the UI, with Wi-Fi on core 0. It renders the synth and the drums into each 8 ms block and mixes them through the same soft clipper the drum engine uses.
 - Every 10 s the audio task logs its render time: `Render: average N us, worst N us of 7981 us per block`. Over about 4000 us on average leaves too little time for the rest. Then use a lighter style or fewer notes.
 - The AirPlay delay is the speaker's buffer, as in the other music apps. Pick it in MENU.
+- **WIRED DAC (PCM5102A)** in OUTPUT plays through a DAC on the header pins with 9 ms of buffering, as in DrumLoop ([Wired DAC](../drumloop/README.md#wired-dac)). While a block renders, 8 ms are queued, so a block that takes longer than that plays as a gap (a click), and the OUTPUT row reads `DAC, N GAPS`.
 
 ## Code
 
@@ -179,6 +180,10 @@ The image goes in a launcher slot, like the other apps.
 - Presets: 25 in five categories (BASS, LEAD, PAD, KEYS, FX), with eight basses. Load a whole patch or only its oscillators, with UNDO.
 - New VOICE page: POLY, MONO or LEGATO, and GLIDE, for basses and leads.
 - Each oscillator has its own pitch: OCTAVE, SEMI and FINE (cents). Unison and its detune moved to a new UNISON page.
+
+### 1.5 (2026-11-15)
+
+- OUTPUT lists **WIRED DAC (PCM5102A)**: a PCM5102A on GPIO44/43/6 with 9 ms of buffering, no Wi-Fi needed, and the volume scaled on the board.
 
 ### 1.4 (2026-11-15)
 

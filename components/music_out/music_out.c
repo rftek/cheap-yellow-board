@@ -6,9 +6,11 @@
 
 #include "airplay_sender.h"
 #include "cyd_display.h"
+#include "driver/gpio.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_rom_sys.h"
 #include "esp_wifi.h"
 #include "freertos/event_groups.h"
 #include "music_out.h"
@@ -34,6 +36,10 @@
 #define ARROW_UP_COLUMN (ARROW_DOWN_COLUMN - ARROW_COLUMNS - 1)
 #define BUTTON_COLUMNS (CYD_TEXT_COLUMNS / 2)
 
+/* The DAC's BCK pin, which the USB serial chip drives while the UART
+   switch is on UART1. */
+#define SWITCH_SENSE_GPIO GPIO_NUM_44
+
 static const char *TAG = "music_out";
 
 static const char *app_title = " MUSIC";
@@ -52,6 +58,7 @@ static esp_netif_ip_info_t ip_info;
 static airplay_device_t devices[MAX_DEVICES];
 static size_t device_count;
 static int list_offset;
+static char wifi_note[CYD_TEXT_COLUMNS + 1]; /* why there is no AirPlay list */
 
 static airplay_sender_handle_t speaker;
 static char speaker_name[sizeof(devices[0].name)];
@@ -234,7 +241,37 @@ static void on_speaker_event(airplay_sender_handle_t sender, airplay_event_t eve
 
 const char *music_out_speaker_name(void)
 {
-    return speaker != NULL ? speaker_name : NULL;
+    if (speaker != NULL) {
+        return speaker_name;
+    }
+    return music_out_stream_dac_on() ? MUSIC_OUT_DAC_NAME : NULL;
+}
+
+/* The picker's rows: the wired DAC first where there is one, then the
+   AirPlay speakers found. */
+static int entry_count(void)
+{
+    return MUSIC_OUT_HAS_DAC + (int)device_count;
+}
+
+/* True when GPIO44 reads low with a pull-down: the UART switch is on UART2
+   (the header). On UART1 the USB serial chip's TXD holds it high, and
+   driving BCK there would fight it. Only while the DAC is stopped. */
+static __attribute__((unused)) bool switch_on_header(void)
+{
+    gpio_config_t config = {
+        .pin_bit_mask = 1ULL << SWITCH_SENSE_GPIO,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_ENABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&config);
+    esp_rom_delay_us(200);
+    int level = gpio_get_level(SWITCH_SENSE_GPIO);
+    config.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    gpio_config(&config);
+    return level == 0;
 }
 
 bool music_out_check_lost(void)
@@ -255,7 +292,7 @@ static void show_list(void)
 {
     char line[CYD_TEXT_COLUMNS + 1];
     bool can_up = list_offset > 0;
-    bool can_down = list_offset + LIST_ROWS < (int)device_count;
+    bool can_down = list_offset + LIST_ROWS < entry_count();
 
     /* Header: title (tap to search again) and the page arrows. */
     uint16_t foreground[CYD_TEXT_COLUMNS];
@@ -281,13 +318,21 @@ static void show_list(void)
     clear_rows(LIST_FIRST_ROW, BUTTON_ROW - 1);
     if (device_count == 0) {
         ESP_ERROR_CHECK(cyd_text_row(CYD_TEXT_ROWS / 2 - 1, CYD_COLOR_YELLOW, CYD_COLOR_BLACK,
-                                     " No AirPlay speakers"));
+                                     music_out_wifi_joined() ? " No AirPlay speakers"
+                                                             : " No Wi-Fi: no AirPlay"));
         ESP_ERROR_CHECK(cyd_text_row(CYD_TEXT_ROWS / 2, CYD_COLOR_GRAY, CYD_COLOR_BLACK,
                                      " Tap the title to retry"));
     }
-    for (int i = 0; i < LIST_ROWS && list_offset + i < (int)device_count; ++i) {
-        const airplay_device_t *device = &devices[list_offset + i];
+    for (int i = 0; i < LIST_ROWS && list_offset + i < entry_count(); ++i) {
         int name_columns = CYD_TEXT_COLUMNS - 4;
+        int entry = list_offset + i;
+        if (entry < MUSIC_OUT_HAS_DAC) {
+            snprintf(line, sizeof(line), " %-*.*s%3s", name_columns - 1, name_columns - 1,
+                     "WIRED DAC (PCM5102A)", music_out_stream_dac_on() ? "ON" : "");
+            ESP_ERROR_CHECK(cyd_text_row(LIST_FIRST_ROW + i, CYD_COLOR_WHITE, CYD_COLOR_BUTTON, line));
+            continue;
+        }
+        const airplay_device_t *device = &devices[entry - MUSIC_OUT_HAS_DAC];
         snprintf(line, sizeof(line), " %-*.*s%3s", name_columns - 1, name_columns - 1,
                  device->name, device->supported ? "" : "NO");
         ESP_ERROR_CHECK(cyd_text_row(LIST_FIRST_ROW + i,
@@ -306,8 +351,12 @@ static void show_list(void)
     buttons[CYD_TEXT_COLUMNS] = '\0';
     ESP_ERROR_CHECK(cyd_draw_cells(BUTTON_ROW, buttons, foreground, background));
 
-    snprintf(line, sizeof(line), " " IPSTR " %.10s", IP2STR(&ip_info.ip), wifi_ssid);
-    show_status(line);
+    if (music_out_wifi_joined()) {
+        snprintf(line, sizeof(line), " " IPSTR " %.10s", IP2STR(&ip_info.ip), wifi_ssid);
+        show_status(line);
+    } else {
+        show_status(wifi_note);
+    }
 }
 
 /* Why a speaker can't be used, in a few words. */
@@ -328,8 +377,17 @@ static const char *unsupported_reason(const airplay_device_t *device)
     return " Needs TCP audio";
 }
 
+/* Joins Wi-Fi if needed and searches for AirPlay speakers. With no Wi-Fi
+   the list is empty and wifi_note says why. */
 static void search(void)
 {
+    list_offset = 0;
+    device_count = 0;
+    char status[CYD_TEXT_COLUMNS + 1];
+    if (!music_out_wifi_joined() && !music_out_wifi_start(status, sizeof(status))) {
+        snprintf(wifi_note, sizeof(wifi_note), "%s", status);
+        return;
+    }
     show_message(" Searching", " AirPlay speakers", NULL);
     if (airplay_discover(DISCOVER_TIMEOUT_MS, devices, MAX_DEVICES, &device_count) != ESP_OK) {
         device_count = 0;
@@ -344,6 +402,7 @@ static bool connect_to(const airplay_device_t *device, char *status, size_t stat
     snprintf(line, sizeof(line), " %s", device->name);
     show_message(" Connecting", line, NULL);
     disconnect_speaker();
+    music_out_stream_set_dac(false);
 
     airplay_sender_config_t config = AIRPLAY_SENDER_DEFAULT_CONFIG();
     config.channels = 1;
@@ -369,9 +428,26 @@ static bool connect_to(const airplay_device_t *device, char *status, size_t stat
     return true;
 }
 
+/* Plays through the wired DAC; true on success. */
+static bool connect_dac(char *status, size_t status_size)
+{
+    if (!music_out_stream_dac_on()) {
+        disconnect_speaker();
+        esp_err_t result = music_out_stream_set_dac(true);
+        if (result != ESP_OK) {
+            snprintf(status, status_size, " DAC failed: %s", esp_err_to_name(result));
+            return false;
+        }
+    }
+    snprintf(status, status_size, " Wired DAC, %lu ms delay",
+             (unsigned long)((music_out_latency_frames() * 1000 + MUSIC_OUT_RATE / 2) / MUSIC_OUT_RATE));
+    return true;
+}
+
 void music_out_pick_speaker(char *status, size_t status_size)
 {
-    if (!music_out_wifi_joined() && !music_out_wifi_start(status, status_size)) {
+    if (!MUSIC_OUT_HAS_DAC && !music_out_wifi_joined() &&
+        !music_out_wifi_start(status, status_size)) {
         return;
     }
     search();
@@ -389,7 +465,7 @@ void music_out_pick_speaker(char *status, size_t status_size)
                     show_list();
                 }
             } else if (column >= ARROW_DOWN_COLUMN) {
-                if (list_offset + LIST_ROWS < (int)device_count) {
+                if (list_offset + LIST_ROWS < entry_count()) {
                     list_offset += LIST_ROWS;
                     show_list();
                 }
@@ -401,20 +477,31 @@ void music_out_pick_speaker(char *status, size_t status_size)
         } else if (row == BUTTON_ROW) {
             if (column < BUTTON_COLUMNS - 1) {
                 disconnect_speaker();
+                music_out_stream_set_dac(false);
                 snprintf(status, status_size, " No speaker: silent");
                 return;
             }
             if (column >= BUTTON_COLUMNS) {
-                snprintf(status, status_size, " %s",
-                         speaker != NULL ? speaker_name : "No speaker: silent");
+                const char *name = music_out_speaker_name();
+                snprintf(status, status_size, " %s", name != NULL ? name : "No speaker: silent");
                 return;
             }
         } else if (row >= LIST_FIRST_ROW && row < LIST_FIRST_ROW + LIST_ROWS) {
             int index = list_offset + row - LIST_FIRST_ROW;
-            if (index >= (int)device_count) {
+            if (index >= entry_count()) {
                 continue;
             }
-            const airplay_device_t *device = &devices[index];
+            if (index < MUSIC_OUT_HAS_DAC) {
+                /* Never with the switch on UART1: the USB serial chip would
+                   fight BCK, and the sound turns to noise. */
+                if (!music_out_stream_dac_on() && !switch_on_header()) {
+                    show_status(" Set SW1 to UART2 first");
+                    continue;
+                }
+                connect_dac(status, status_size);
+                return;
+            }
+            const airplay_device_t *device = &devices[index - MUSIC_OUT_HAS_DAC];
             if (!device->supported) {
                 show_status(unsupported_reason(device));
                 continue;
@@ -466,6 +553,14 @@ void music_out_draw_output_row(int row)
     char line[CYD_TEXT_COLUMNS + 1];
     if (speaker != NULL) {
         snprintf(line, sizeof(line), " OUTPUT    %s", speaker_name);
+    } else if (music_out_stream_dac_on()) {
+        /* Gaps are clicks: blocks that came too late for the DAC. */
+        uint32_t gaps = music_out_stream_dac_gaps();
+        if (gaps == 0) {
+            snprintf(line, sizeof(line), " OUTPUT    WIRED DAC");
+        } else {
+            snprintf(line, sizeof(line), " OUTPUT    DAC, %lu GAPS", (unsigned long)gaps);
+        }
     } else {
         snprintf(line, sizeof(line), " OUTPUT    NONE (SILENT)");
     }

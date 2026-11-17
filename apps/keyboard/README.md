@@ -1,6 +1,6 @@
 # Keyboard
 
-A two-octave touch keyboard for the Waveshare ESP32-S3-Touch-LCD-7 (800x480, capacitive touch). It plays across seven octaves, C1 to C8 as on an 88-key piano, two at a time: 25 keys from C to C, each labelled with its note, seven synthesized voices in 23 styles (concert grand, upright, electric pianos, church and jazz organs and more), eight notes at once, a sustain pedal and a loop recorder with overdub and undo. The sound plays on an AirPlay speaker through the shared [music_out](../../components/music_out) component, the same output [DrumLoop](../drumloop) uses. You can also play with no speaker while you work out a part.
+A two-octave touch keyboard for the Waveshare ESP32-S3-Touch-LCD-7 (800x480, capacitive touch). It plays across seven octaves, C1 to C8 as on an 88-key piano, two at a time: 25 keys from C to C, each labelled with its note, seven synthesized voices in 23 styles (concert grand, upright, electric pianos, church and jazz organs and more), eight notes at once, a sustain pedal and a loop recorder with overdub and undo. The sound plays on an AirPlay speaker or a PCM5102A DAC wired to the header pins, through the shared [music_out](../../components/music_out) component, the same output [DrumLoop](../drumloop) uses. You can also play with no speaker while you work out a part.
 
 It shares its tempo and its AirPlay delay with DrumLoop. If you set 140 BPM in one app, the other starts at 140, so a keyboard loop and a drum loop made one after the other fit together.
 
@@ -11,7 +11,7 @@ This app lives in `apps/keyboard`. The [root README](../../README.md) lists ever
 Keyboard boots straight to the keys with Wi-Fi off and no speaker. To hear it, open **MENU**:
 
 1. **WI-FI** turns the radio on and joins the network saved by the [launcher](../../launcher) (`wifi_ssid` and `wifi_pass` in NVS namespace `cyd_config`). No credentials are compiled in.
-2. **OUTPUT** searches for AirPlay speakers for 3 seconds and lists them. Tap one to connect. **NO SPEAKER** goes silent; **BACK** leaves the output as it was.
+2. **OUTPUT** searches for AirPlay speakers for 3 seconds and lists them under **WIRED DAC (PCM5102A)**, which needs no Wi-Fi and plays a key about 15-30 ms after the touch; see DrumLoop's [Wired DAC](../drumloop/README.md#wired-dac) for the wiring and the UART switch. Tap one to connect. **NO SPEAKER** goes silent; **BACK** leaves the output as it was.
 
 If the speaker drops the session, the keyboard goes silent and the MENU button turns red until you open the menu.
 
@@ -122,7 +122,7 @@ Recording allows for the delay. A note is recorded where you heard the loop when
 
 - The loop is not saved across power cycles.
 - A loop holds up to 1024 notes.
-- The S3 has no Classic Bluetooth, so there is no A2DP output. A wired I2S DAC would bring a key to about 10 ms and could be added to `music_out` as another output.
+- The S3 has no Classic Bluetooth, so there is no A2DP output. The wired DAC is the low-latency output.
 
 ## Build and flash
 
