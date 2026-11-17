@@ -84,6 +84,7 @@ esp_err_t audio_start(drum_pattern_t *loop_pattern, QueueHandle_t touch_queue)
     config.title = " DRUMLOOP";
     config.render = render;
     config.on_change = on_output_change;
+    config.task_core = 1; /* away from Wi-Fi and the display's interrupts on core 0 */
     return music_out_start(&config, touch_queue);
 }
 
