@@ -2,9 +2,9 @@
 
      row 0       transport: PLAY/STOP, REC, BPM - 140 +, bar page, MENU
      rows 1-8    the step grid: a track per row, its label (tap to mute,
-                 hold for the track's tone: filter, EQ and level) and 16
-                 steps of the bar on view (tap to toggle; hold to play the
-                 step twice, or once again)
+                 hold for the track's tone: filter, EQ, level, pitch and
+                 decay) and 16 steps of the bar on view (tap to toggle;
+                 hold for a roll: 2, 3, 4 hits, then one again)
      rows 9-11   eight pads that play the sounds live
 
    The grid's playhead follows what the speaker is playing, which is the
@@ -170,6 +170,7 @@ static bool load_beat(uint16_t bpm, int kit, const uint16_t steps[DRUM_TRACKS])
     for (int bar = 0; bar < pattern->bars; ++bar) {
         memcpy(pattern->steps[bar], steps, sizeof(pattern->steps[bar]));
         memset(pattern->doubles[bar], 0, sizeof(pattern->doubles[bar]));
+        memset(pattern->triples[bar], 0, sizeof(pattern->triples[bar]));
     }
     return true;
 }
@@ -298,13 +299,14 @@ static uint16_t cell_color(int track, int step)
     return step % 4 == 0 ? COLOR_BEAT : COLOR_OFF;
 }
 
-static bool cell_double(int track, int step)
+/* How many hits the step plays: 1, or 2-4 for a roll. */
+static int cell_rolls(int track, int step)
 {
-    return (pattern->doubles[view_bar][track] >> step) & 1;
+    return drum_rolls(pattern, view_bar, track, step);
 }
 
-/* A cell's color, plus this bit when it's drawn split for a double step. */
-#define DRAWN_DOUBLE 0x10000u
+/* A cell's color, plus its roll count in these bits when it's drawn split. */
+#define DRAWN_ROLLS_SHIFT 16
 
 static int toned_tracks(void)
 {
@@ -334,20 +336,22 @@ static void refresh_grid(void)
         int y = (GRID_ROW + track) * FH;
         for (int step = 0; step < DRUM_STEPS; ++step) {
             uint16_t color = cell_color(track, step);
-            bool split = cell_double(track, step);
-            uint32_t drawn = color | (split ? DRAWN_DOUBLE : 0);
+            int rolls = ((pattern->steps[view_bar][track] >> step) & 1) ? cell_rolls(track, step) : 1;
+            uint32_t drawn = color | ((uint32_t)rolls << DRAWN_ROLLS_SHIFT);
             if (drawn_cells[track][step] == drawn) {
                 continue;
             }
             int x = LABEL_WIDTH + step * STEP_WIDTH + 2;
             int width = STEP_WIDTH - 4;
-            if (split) {
-                /* Two halves with a gap: two hits in the step. */
-                int half = (width - 4) / 2;
-                ESP_ERROR_CHECK(cyd_fill_rect(x, y + 2, half, FH - 5, color));
-                ESP_ERROR_CHECK(cyd_fill_rect(x + half, y + 2, width - 2 * half, FH - 5,
-                                              CYD_COLOR_BLACK));
-                ESP_ERROR_CHECK(cyd_fill_rect(x + width - half, y + 2, half, FH - 5, color));
+            if (rolls > 1) {
+                /* One part a hit, with gaps: a roll of 2, 3 or 4. */
+                int gap = 3;
+                int part = (width - gap * (rolls - 1)) / rolls;
+                ESP_ERROR_CHECK(cyd_fill_rect(x, y + 2, width, FH - 5, CYD_COLOR_BLACK));
+                for (int r = 0; r < rolls; ++r) {
+                    int left = r == rolls - 1 ? x + width - part : x + r * (part + gap);
+                    ESP_ERROR_CHECK(cyd_fill_rect(left, y + 2, part, FH - 5, color));
+                }
             } else {
                 ESP_ERROR_CHECK(cyd_fill_rect(x, y + 2, width, FH - 5, color));
             }
@@ -562,6 +566,7 @@ static void cycle_length(void)
     for (int bar = bars; bar < bars * 2; ++bar) {
         memcpy(pattern->steps[bar], pattern->steps[bar - bars], sizeof(pattern->steps[bar]));
         memcpy(pattern->doubles[bar], pattern->doubles[bar - bars], sizeof(pattern->doubles[bar]));
+        memcpy(pattern->triples[bar], pattern->triples[bar - bars], sizeof(pattern->triples[bar]));
     }
     pattern->bars = (uint8_t)(bars * 2);
 }
@@ -720,6 +725,7 @@ static void run_menu(QueueHandle_t touch_queue)
             } else if (clear_armed) {
                 memset(pattern->steps, 0, sizeof(pattern->steps));
                 memset(pattern->doubles, 0, sizeof(pattern->doubles));
+                memset(pattern->triples, 0, sizeof(pattern->triples));
                 clear_armed = false;
                 draw_clear_row(false);
                 menu_status(" Pattern cleared");
@@ -794,7 +800,8 @@ static struct {
     bool active;
     bool label; /* a track label, not a step */
     int bar, track, step;
-    bool was_on, was_double;
+    bool was_on;
+    int was_rolls;
     TickType_t since;
 } press;
 
@@ -825,15 +832,16 @@ static void tap_grid(int x, int y)
         .track = track,
         .step = step,
         .was_on = pattern->steps[view_bar][track] & bit,
-        .was_double = pattern->doubles[view_bar][track] & bit,
+        .was_rolls = cell_rolls(track, step),
         .since = xTaskGetTickCount(),
     };
     pattern->steps[view_bar][track] ^= bit;
     pattern->doubles[view_bar][track] &= (uint16_t)~bit;
+    pattern->triples[view_bar][track] &= (uint16_t)~bit;
 }
 
-/* A step held for LONG_PRESS_MS plays twice; a double step held plays once.
-   The tap already toggled it, so this sets it either way. A label held
+/* A step held for LONG_PRESS_MS steps its roll on (2, 3, 4 hits, then
+   one). The tap already toggled it, so this sets it either way. A label held
    that long opens the track's tone editor and undoes the tap's mute. */
 static void check_long_press(void)
 {
@@ -869,11 +877,17 @@ static void check_long_press(void)
         return;
     }
     uint16_t bit = (uint16_t)(1u << press.step);
+    /* Each hold steps the roll on: 2, 3 (a triplet), 4, then back to one
+       hit. An off step held starts at 2. */
+    int rolls = press.was_on ? press.was_rolls % 4 + 1 : 2;
     pattern->steps[press.bar][press.track] |= bit;
-    if (press.was_on && press.was_double) {
-        pattern->doubles[press.bar][press.track] &= (uint16_t)~bit;
-    } else {
+    pattern->doubles[press.bar][press.track] &= (uint16_t)~bit;
+    pattern->triples[press.bar][press.track] &= (uint16_t)~bit;
+    if (rolls == 2 || rolls == 4) {
         pattern->doubles[press.bar][press.track] |= bit;
+    }
+    if (rolls >= 3) {
+        pattern->triples[press.bar][press.track] |= bit;
     }
 }
 
@@ -977,7 +991,7 @@ static void run_tone(QueueHandle_t touch_queue)
         .draw_bottom = tone_draw_pads,
         .tick = tone_tick,
         .tap = tone_tap,
-        .pitch = true,
+        .drum = true,
     };
     int track = tone_track;
     tone_track = -1;

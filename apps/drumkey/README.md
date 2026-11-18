@@ -184,6 +184,8 @@ The image goes in a launcher slot, like the other apps.
 ### 1.7 (2026-11-17)
 
 - Drum tones have PITCH: hold a drum track's label, and the tone editor has a PITCH slider (-12 to +12 semitones) on its last row, with FLAT beside the title. Hits are resampled, so a tuned-down kick or tom booms like an 808.
+- DECAY beside PITCH: how much of each hit plays (5-100%), fading out over the last half, for tight kicks and short hats.
+- Rolls: holding a drum step steps it through 2, 3 (a triplet) and 4 hits, then back to one, for trap hat rolls.
 
 ### 1.6 (2026-11-15)
 

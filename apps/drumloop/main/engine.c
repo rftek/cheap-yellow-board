@@ -32,13 +32,13 @@ void engine_start(drum_engine_t *engine)
     engine->playing = true;
     engine->next_step = 0;
     engine->next_step_frame = (double)engine->frame;
-    engine->half_tracks = 0;
+    memset(engine->roll_left, 0, sizeof(engine->roll_left));
 }
 
 void engine_stop(drum_engine_t *engine)
 {
     engine->playing = false;
-    engine->half_tracks = 0;
+    memset(engine->roll_left, 0, sizeof(engine->roll_left));
 }
 
 void engine_silence(drum_engine_t *engine)
@@ -80,6 +80,15 @@ void engine_hit(drum_engine_t *engine, int track)
        slower and lower. Set at the hit, so a sweep changes the next one. */
     int pitch = engine->pattern->tone[track].pitch;
     voice->rate = pitch == 0 ? 1.0f : powf(2.0f, (float)pitch / 12.0f);
+    /* DECAY plays part of the hit, fading over the last half of that, so
+       an open hat or a long boom becomes a short one. */
+    uint32_t frames = voice->sound != NULL ? voice->sound->frames : 0;
+    int decay = engine->pattern->tone[track].decay;
+    if (decay > 95) {
+        decay = 95;
+    }
+    voice->end = decay == 0 ? frames : (uint32_t)((uint64_t)frames * (uint32_t)(100 - decay) / 100u);
+    voice->fade_from = decay == 0 ? frames : voice->end / 2;
 }
 
 static uint16_t loop_steps(const drum_engine_t *engine)
@@ -102,17 +111,19 @@ static void start_step(drum_engine_t *engine)
     int bar = engine->next_step / DRUM_STEPS;
     int step = engine->next_step % DRUM_STEPS;
     double per_step = engine_frames_per_step(pattern->bpm);
-    engine->half_tracks = 0;
     for (int track = 0; track < DRUM_TRACKS; ++track) {
+        engine->roll_left[track] = 0;
         bool muted = (pattern->muted >> track) & 1;
         if (!muted && ((pattern->steps[bar][track] >> step) & 1)) {
             engine_hit(engine, track);
-            if ((pattern->doubles[bar][track] >> step) & 1) {
-                engine->half_tracks |= (uint8_t)(1u << track);
+            int rolls = drum_rolls(pattern, bar, track, step);
+            if (rolls > 1) {
+                engine->roll_left[track] = (uint8_t)(rolls - 1);
+                engine->roll_gap[track] = per_step / rolls;
+                engine->roll_frame[track] = engine->next_step_frame + per_step / rolls;
             }
         }
     }
-    engine->half_frame = engine->next_step_frame + per_step / 2.0;
     if (engine->on_step != NULL) {
         engine->on_step((uint64_t)llround(engine->next_step_frame), engine->next_step,
                         engine->context);
@@ -175,17 +186,24 @@ static void add_voice(drum_voice_t *voice, float *acc, size_t frames)
     if (sound != NULL) {
         float gain = sound->gain / 32768.0f;
         size_t i = 0;
-        if (voice->rate == 1.0f || voice->rate == 0.0f) {
-            for (; i < frames && voice->pos < sound->frames; ++i) {
+        uint32_t end = voice->end == 0 || voice->end > sound->frames ? sound->frames : voice->end;
+        float rate = voice->rate == 0.0f ? 1.0f : voice->rate;
+        if (rate == 1.0f && end == sound->frames) {
+            for (; i < frames && voice->pos < end; ++i) {
                 acc[i] += sound->pcm[voice->pos++] * gain;
             }
         } else {
-            for (; i < frames && voice->pos < sound->frames; ++i) {
-                acc[i] += sound_at(sound, voice->pos, voice->frac) * gain;
-                advance(&voice->pos, &voice->frac, voice->rate);
+            float fade_span = (float)(end - (voice->fade_from < end ? voice->fade_from : end));
+            for (; i < frames && voice->pos < end; ++i) {
+                float g = gain;
+                if (voice->pos >= voice->fade_from && fade_span > 0.0f) {
+                    g *= (float)(end - voice->pos) / fade_span;
+                }
+                acc[i] += sound_at(sound, voice->pos, voice->frac) * g;
+                advance(&voice->pos, &voice->frac, rate);
             }
         }
-        if (voice->pos >= sound->frames) {
+        if (voice->pos >= end) {
             voice->sound = NULL;
         }
     }
@@ -244,16 +262,21 @@ void engine_render(drum_engine_t *engine, int16_t *out, size_t frames)
             segment = MIX_CHUNK;
         }
         if (engine->playing) {
-            /* A second hit is always due before the next step. */
+            /* A roll's hits are always due before the next step. */
             while (true) {
-                if (engine->half_tracks != 0 && engine->half_frame <= (double)engine->frame) {
-                    for (int track = 0; track < DRUM_TRACKS; ++track) {
-                        if ((engine->half_tracks >> track) & 1) {
-                            engine_hit(engine, track);
-                        }
+                bool hit = false;
+                for (int track = 0; track < DRUM_TRACKS; ++track) {
+                    if (engine->roll_left[track] > 0 && engine->roll_frame[track] <= (double)engine->frame) {
+                        engine_hit(engine, track);
+                        engine->roll_left[track]--;
+                        engine->roll_frame[track] += engine->roll_gap[track];
+                        hit = true;
                     }
-                    engine->half_tracks = 0;
-                } else if (engine->next_step_frame <= (double)engine->frame) {
+                }
+                if (hit) {
+                    continue;
+                }
+                if (engine->next_step_frame <= (double)engine->frame) {
                     start_step(engine);
                 } else {
                     break;
@@ -261,8 +284,10 @@ void engine_render(drum_engine_t *engine, int16_t *out, size_t frames)
             }
             /* Mix only up to the next hit, so it starts on its frame. */
             double next = engine->next_step_frame;
-            if (engine->half_tracks != 0 && engine->half_frame < next) {
-                next = engine->half_frame;
+            for (int track = 0; track < DRUM_TRACKS; ++track) {
+                if (engine->roll_left[track] > 0 && engine->roll_frame[track] < next) {
+                    next = engine->roll_frame[track];
+                }
             }
             double until = ceil(next - (double)engine->frame);
             if (until < (double)segment) {

@@ -17,10 +17,22 @@
 #define ROW_HEADER 0
 #define ROW_FILTER 1
 #define ROW_FLAT 8
-#define SLIDERS 7 /* the last, PITCH, only when the editor asks for it */
 #define SLIDER_LABEL_COLUMNS 8
 #define SLIDER_X (SLIDER_LABEL_COLUMNS * FW + 8)
 #define SLIDER_WIDTH (CYD_LCD_WIDTH - SLIDER_X - 12)
+
+/* A drum editor's row 8: PITCH on the left half, DECAY on the right. */
+#define HALF_LABEL_COLUMNS 6
+#define RIGHT_COLUMN 13
+#define LEFT_X (HALF_LABEL_COLUMNS * FW + 4)
+#define RIGHT_X ((RIGHT_COLUMN + HALF_LABEL_COLUMNS) * FW + 4)
+#define HALF_WIDTH (7 * FW - 16)
+
+#define MAIN_SLIDERS 6 /* cutoff to level, rows 2-7 */
+#define PITCH_SLIDER 6
+#define DECAY_SLIDER 7
+#define SLIDERS 8
+#define DECAY_SHORTEST 5 /* % of the hit */
 
 #define COLOR_TRACK 0x2104 /* a slider's empty part */
 #define COLOR_ZERO 0x7BEF  /* a bipolar slider's middle mark */
@@ -39,25 +51,29 @@ static const span_t FILTER_LABEL_SPAN = {0, 6};
 static const span_t FILTER_SPANS[TONE_FILTERS] = {{6, 5}, {11, 5}, {16, 5}, {21, 5}};
 static const char *const FILTER_NAMES[TONE_FILTERS] = {"OFF", "LP", "HP", "BP"};
 static const span_t FLAT_SPAN = {0, 8};
-/* With PITCH on row 8, FLAT moves into the header beside a shorter title. */
-static const span_t PITCH_TITLE_SPAN = {3, 11};
+/* In a drum editor row 8 holds PITCH and DECAY, so FLAT moves into the
+   header beside a shorter title. */
+static const span_t DRUM_TITLE_SPAN = {3, 11};
 static const span_t HEADER_FLAT_SPAN = {14, 5};
 
 typedef struct {
     int row;
     int min;
     int max;
-    bool bipolar; /* drawn from the middle, as a boost or a cut */
+    bool bipolar;     /* drawn from the middle, as a boost or a cut */
+    int x, width;     /* the bar */
+    int label_column; /* where its label starts */
 } slider_t;
 
 static const slider_t sliders[SLIDERS] = {
-    {2, 0, TONE_CUTOFF_MAX, false},
-    {3, 0, TONE_RESONANCE_MAX, false},
-    {4, TONE_EQ_MIN, TONE_EQ_MAX, true},
-    {5, TONE_EQ_MIN, TONE_EQ_MAX, true},
-    {6, TONE_EQ_MIN, TONE_EQ_MAX, true},
-    {7, TONE_LEVEL_MIN, TONE_LEVEL_MAX, true},
-    {ROW_FLAT, TONE_PITCH_MIN, TONE_PITCH_MAX, true},
+    {2, 0, TONE_CUTOFF_MAX, false, SLIDER_X, SLIDER_WIDTH, 0},
+    {3, 0, TONE_RESONANCE_MAX, false, SLIDER_X, SLIDER_WIDTH, 0},
+    {4, TONE_EQ_MIN, TONE_EQ_MAX, true, SLIDER_X, SLIDER_WIDTH, 0},
+    {5, TONE_EQ_MIN, TONE_EQ_MAX, true, SLIDER_X, SLIDER_WIDTH, 0},
+    {6, TONE_EQ_MIN, TONE_EQ_MAX, true, SLIDER_X, SLIDER_WIDTH, 0},
+    {7, TONE_LEVEL_MIN, TONE_LEVEL_MAX, true, SLIDER_X, SLIDER_WIDTH, 0},
+    {ROW_FLAT, TONE_PITCH_MIN, TONE_PITCH_MAX, true, LEFT_X, HALF_WIDTH, 0},
+    {ROW_FLAT, DECAY_SHORTEST, 100, false, RIGHT_X, HALF_WIDTH, RIGHT_COLUMN},
 };
 
 static bool in_span(span_t span, int column)
@@ -112,8 +128,10 @@ static int slider_value(const tone_settings_t *tone, int index)
         return tone->high;
     case 5:
         return tone->level;
-    default:
+    case PITCH_SLIDER:
         return tone->pitch;
+    default:
+        return 100 - tone->decay; /* the % of the hit that plays */
     }
 }
 
@@ -140,8 +158,11 @@ static void set_slider_value(tone_settings_t *tone, int index, int value)
     case 5:
         tone->level = (int8_t)value;
         break;
-    default:
+    case PITCH_SLIDER:
         tone->pitch = (int8_t)value;
+        break;
+    default:
+        tone->decay = (uint8_t)(100 - value);
         break;
     }
 }
@@ -160,8 +181,12 @@ static void slider_label(const tone_settings_t *tone, int index, char *label, si
         }
     } else if (index == 1) {
         snprintf(label, size, "RES %4.1f", (double)tone_q(value));
+    } else if (index == PITCH_SLIDER) {
+        snprintf(label, size, "PIT%+3d", value);
+    } else if (index == DECAY_SLIDER) {
+        snprintf(label, size, "DEC%3d", value);
     } else {
-        static const char *const names[] = {"LOW", "MID", "HIGH", "LVL", "PTCH"};
+        static const char *const names[] = {"LOW", "MID", "HIGH", "LVL"};
         snprintf(label, size, "%-4s%+4d", names[index - 2], value);
     }
 }
@@ -172,30 +197,33 @@ static int slider_at(int index, int x)
 {
     const slider_t *slider = &sliders[index];
     int span = slider->max - slider->min;
-    int value = slider->min + ((x - SLIDER_X) * span + SLIDER_WIDTH / 2) / SLIDER_WIDTH;
+    int value = slider->min + ((x - slider->x) * span + slider->width / 2) / slider->width;
     if (slider->bipolar && value != 0 && abs(value) <= span / 24) {
         value = 0;
     }
     return value;
 }
 
-static void draw_slider(const tone_settings_t *tone, int index, uint16_t color, bool enabled)
+/* Puts a slider's label into its row's text. */
+static void put_label(row_t *row, const tone_settings_t *tone, int index)
 {
     const slider_t *slider = &sliders[index];
-    row_t row;
-    clear_row(&row, enabled ? CYD_COLOR_WHITE : CYD_COLOR_GRAY);
+    int columns = index >= PITCH_SLIDER ? HALF_LABEL_COLUMNS : SLIDER_LABEL_COLUMNS;
     char label[SLIDER_LABEL_COLUMNS + 8];
     slider_label(tone, index, label, sizeof(label));
-    memcpy(row.text, label, strnlen(label, SLIDER_LABEL_COLUMNS));
-    ESP_ERROR_CHECK(cyd_draw_cells(slider->row, row.text, row.fg, row.bg));
+    memcpy(row->text + slider->label_column, label, strnlen(label, (size_t)columns));
+}
 
+static void draw_bar(const tone_settings_t *tone, int index, uint16_t color, bool enabled)
+{
+    const slider_t *slider = &sliders[index];
     int y = slider->row * FH + FH / 4;
     int height = FH / 2;
     int span = slider->max - slider->min;
     int value = slider_value(tone, index);
-    int position = SLIDER_X + (value - slider->min) * SLIDER_WIDTH / span;
-    int zero = slider->bipolar ? SLIDER_X + (0 - slider->min) * SLIDER_WIDTH / span : SLIDER_X;
-    ESP_ERROR_CHECK(cyd_fill_rect(SLIDER_X, y, SLIDER_WIDTH, height, COLOR_TRACK));
+    int position = slider->x + (value - slider->min) * slider->width / span;
+    int zero = slider->bipolar ? slider->x + (0 - slider->min) * slider->width / span : slider->x;
+    ESP_ERROR_CHECK(cyd_fill_rect(slider->x, y, slider->width, height, COLOR_TRACK));
     int from = position < zero ? position : zero;
     int to = position < zero ? zero : position;
     if (to > from) {
@@ -204,12 +232,34 @@ static void draw_slider(const tone_settings_t *tone, int index, uint16_t color, 
     if (slider->bipolar) {
         ESP_ERROR_CHECK(cyd_fill_rect(zero - 1, y - 4, 2, height + 8, COLOR_ZERO));
     }
-    int thumb = position - 3 < SLIDER_X ? SLIDER_X : position - 3;
-    if (thumb + 6 > SLIDER_X + SLIDER_WIDTH) {
-        thumb = SLIDER_X + SLIDER_WIDTH - 6;
+    int thumb = position - 3 < slider->x ? slider->x : position - 3;
+    if (thumb + 6 > slider->x + slider->width) {
+        thumb = slider->x + slider->width - 6;
     }
     ESP_ERROR_CHECK(cyd_fill_rect(thumb, y - 6, 6, height + 12,
                                   enabled ? CYD_COLOR_WHITE : CYD_COLOR_GRAY));
+}
+
+static void draw_slider(const tone_settings_t *tone, int index, uint16_t color, bool enabled)
+{
+    row_t row;
+    clear_row(&row, enabled ? CYD_COLOR_WHITE : CYD_COLOR_GRAY);
+    put_label(&row, tone, index);
+    ESP_ERROR_CHECK(cyd_draw_cells(sliders[index].row, row.text, row.fg, row.bg));
+    draw_bar(tone, index, color, enabled);
+}
+
+/* A drum editor's row 8: PITCH and DECAY side by side, drawn together
+   since each draws the whole row. */
+static void draw_drum_row(const tone_settings_t *tone, uint16_t color)
+{
+    row_t row;
+    clear_row(&row, CYD_COLOR_WHITE);
+    put_label(&row, tone, PITCH_SLIDER);
+    put_label(&row, tone, DECAY_SLIDER);
+    ESP_ERROR_CHECK(cyd_draw_cells(ROW_FLAT, row.text, row.fg, row.bg));
+    draw_bar(tone, PITCH_SLIDER, color, true);
+    draw_bar(tone, DECAY_SLIDER, color, true);
 }
 
 static void draw_buttons(const tone_editor_t *editor, int item)
@@ -222,8 +272,8 @@ static void draw_buttons(const tone_editor_t *editor, int item)
     char title[32];
     snprintf(title, sizeof(title), "%s TONE", editor->name(item, editor->context));
     put_span(&row, PREV_SPAN, "<", CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
-    if (editor->pitch) {
-        put_span(&row, PITCH_TITLE_SPAN, title, CYD_COLOR_BLACK, color);
+    if (editor->drum) {
+        put_span(&row, DRUM_TITLE_SPAN, title, CYD_COLOR_BLACK, color);
         put_span(&row, HEADER_FLAT_SPAN, "FLAT", CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
     } else {
         put_span(&row, TITLE_SPAN, title, CYD_COLOR_BLACK, color);
@@ -231,7 +281,7 @@ static void draw_buttons(const tone_editor_t *editor, int item)
     put_span(&row, NEXT_SPAN, ">", CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
     put_span(&row, BACK_SPAN, "BACK", CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
     ESP_ERROR_CHECK(cyd_draw_cells(ROW_HEADER, row.text, row.fg, row.bg));
-    if (editor->pitch) {
+    if (editor->drum) {
         ESP_ERROR_CHECK(cyd_fill_rect(HEADER_FLAT_SPAN.column * FW - 1, 0, 2, FH, CYD_COLOR_BLACK));
         ESP_ERROR_CHECK(cyd_fill_rect(NEXT_SPAN.column * FW - 1, 0, 2, FH, CYD_COLOR_BLACK));
     }
@@ -250,8 +300,8 @@ static void draw_buttons(const tone_editor_t *editor, int item)
                                       CYD_COLOR_BLACK));
     }
 
-    if (editor->pitch) {
-        return; /* row 8 is the PITCH slider */
+    if (editor->drum) {
+        return; /* row 8 is PITCH and DECAY */
     }
     clear_row(&row, CYD_COLOR_GRAY);
     put_span(&row, FLAT_SPAN, "FLAT", CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
@@ -259,6 +309,24 @@ static void draw_buttons(const tone_editor_t *editor, int item)
     size_t room = COLUMNS - 9;
     memcpy(row.text + 9, hint, strlen(hint) < room ? strlen(hint) : room);
     ESP_ERROR_CHECK(cyd_draw_cells(ROW_FLAT, row.text, row.fg, row.bg));
+}
+
+/* The slider a finger at x on row is on, or -1. */
+static int slider_under(const tone_editor_t *editor, int row, int x)
+{
+    if (row == ROW_FLAT) {
+        if (!editor->drum) {
+            return -1;
+        }
+        int index = x < RIGHT_COLUMN * FW ? PITCH_SLIDER : DECAY_SLIDER;
+        return x >= sliders[index].x - FW ? index : -1;
+    }
+    for (int index = 0; index < MAIN_SLIDERS; ++index) {
+        if (row == sliders[index].row && x >= SLIDER_X - FW) {
+            return index;
+        }
+    }
+    return -1;
 }
 
 int tone_editor_run(QueueHandle_t touch_queue, const tone_editor_t *editor, int item)
@@ -284,11 +352,9 @@ int tone_editor_run(QueueHandle_t touch_queue, const tone_editor_t *editor, int 
                 if (in_span(BACK_SPAN, column)) {
                     return item;
                 }
-                if (editor->pitch && in_span(HEADER_FLAT_SPAN, column)) {
+                if (editor->drum && in_span(HEADER_FLAT_SPAN, column)) {
                     memset(tone, 0, sizeof(*tone));
-                    continue;
-                }
-                if (in_span(PREV_SPAN, column)) {
+                } else if (in_span(PREV_SPAN, column)) {
                     item = (item + editor->count - 1) % editor->count;
                 } else if (in_span(NEXT_SPAN, column)) {
                     item = (item + 1) % editor->count;
@@ -306,7 +372,7 @@ int tone_editor_run(QueueHandle_t touch_queue, const tone_editor_t *editor, int 
                     }
                     tone->filter = (uint8_t)filter;
                 }
-            } else if (row == ROW_FLAT && !editor->pitch && in_span(FLAT_SPAN, column)) {
+            } else if (row == ROW_FLAT && !editor->drum && in_span(FLAT_SPAN, column)) {
                 memset(tone, 0, sizeof(*tone));
             }
         }
@@ -314,14 +380,9 @@ int tone_editor_run(QueueHandle_t touch_queue, const tone_editor_t *editor, int 
         cyd_touch_point_t held[5];
         int count = cyd_touch_held(held, 5);
         for (int i = 0; i < count; ++i) {
-            int row = held[i].y / FH;
-            for (int index = 0; index < SLIDERS; ++index) {
-                if (index == SLIDERS - 1 && !editor->pitch) {
-                    continue;
-                }
-                if (row == sliders[index].row && held[i].x >= SLIDER_X - FW) {
-                    set_slider_value(tone, index, slider_at(index, held[i].x));
-                }
+            int index = slider_under(editor, held[i].y / FH, held[i].x);
+            if (index >= 0) {
+                set_slider_value(tone, index, slider_at(index, held[i].x));
             }
         }
         bool filter_on = tone->filter != TONE_FILTER_OFF;
@@ -330,15 +391,16 @@ int tone_editor_run(QueueHandle_t touch_queue, const tone_editor_t *editor, int 
             draw_buttons(editor, item);
         }
         uint16_t color = editor->color(item, editor->context);
-        for (int index = 0; index < SLIDERS; ++index) {
-            if (index == SLIDERS - 1 && !editor->pitch) {
-                continue;
-            }
+        for (int index = 0; index < MAIN_SLIDERS; ++index) {
             bool enabled = index >= 2 || filter_on;
             if (new_item || filter_on != drawn_filter_on ||
                 slider_value(tone, index) != slider_value(&drawn_tone, index)) {
                 draw_slider(tone, index, color, enabled);
             }
+        }
+        if (editor->drum &&
+            (new_item || tone->pitch != drawn_tone.pitch || tone->decay != drawn_tone.decay)) {
+            draw_drum_row(tone, color);
         }
         if (new_item && editor->draw_bottom != NULL) {
             editor->draw_bottom(item, editor->context);

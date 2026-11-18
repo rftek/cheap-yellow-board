@@ -24,7 +24,7 @@ bool tone_sound_flat(const tone_settings_t *tone)
 
 bool tone_is_flat(const tone_settings_t *tone)
 {
-    return tone_sound_flat(tone) && tone->pitch == 0;
+    return tone_sound_flat(tone) && tone->pitch == 0 && tone->decay == 0;
 }
 
 float tone_cutoff_hz(int cutoff)

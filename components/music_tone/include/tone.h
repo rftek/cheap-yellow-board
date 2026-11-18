@@ -43,11 +43,12 @@ typedef struct {
     int8_t high;       /* dB, a high shelf at 6 kHz */
     int8_t level;      /* dB */
     int8_t pitch;      /* semitones: DrumLoop retunes a track's hits; 0 elsewhere */
+    uint8_t decay;     /* 0 the whole hit; up to 95: DrumLoop cuts the hit short */
 } tone_settings_t;
 
-/* Nothing set: no filter, EQ, level or pitch. */
+/* Nothing set: no filter, EQ, level, pitch or decay. */
 bool tone_is_flat(const tone_settings_t *tone);
-/* No filter, EQ or level to run the sound through (pitch aside). */
+/* No filter, EQ or level to run the sound through (pitch and decay aside). */
 bool tone_sound_flat(const tone_settings_t *tone);
 float tone_cutoff_hz(int cutoff);
 float tone_q(int resonance);

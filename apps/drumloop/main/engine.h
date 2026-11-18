@@ -20,9 +20,12 @@
 typedef struct {
     /* Bit s of steps[bar][track] is step s of that bar. */
     uint16_t steps[DRUM_MAX_BARS][DRUM_TRACKS];
-    /* The same bit in doubles plays that step twice: on the step and half a
-       step later, as two thirty-second notes. Kept clear for steps off. */
+    /* A roll: the same bit in doubles and triples plays that step as
+       several even hits across it (drum_rolls): doubles alone 2 (two
+       thirty-seconds), triples alone 3 (a triplet), both 4 (sixty-fourths).
+       Kept clear for steps off. */
     uint16_t doubles[DRUM_MAX_BARS][DRUM_TRACKS];
+    uint16_t triples[DRUM_MAX_BARS][DRUM_TRACKS];
     uint8_t bars; /* loop length: 1, 2, 4, 8 or 16 */
     uint16_t bpm;
     uint8_t muted; /* bit per track */
@@ -41,6 +44,8 @@ typedef struct {
     uint32_t pos;              /* next frame of the sound */
     float frac;                /* and how far past it, when pitched */
     float rate;                /* frames of the sound a frame: 1, or the track's pitch */
+    uint32_t end;              /* where the hit stops: its length, or less with DECAY */
+    uint32_t fade_from;        /* and where it starts fading to that */
     const drum_sound_t *fade_sound; /* the previous hit, fading out after a retrigger */
     uint32_t fade_pos;
     float fade_frac;
@@ -54,13 +59,24 @@ typedef struct {
     bool playing;
     uint16_t next_step;     /* index in the loop of the next step to start */
     double next_step_frame; /* the frame it starts at */
-    uint8_t half_tracks;    /* tracks to hit again half a step in, bit each */
-    double half_frame;      /* the frame of that second hit */
+    /* Each track's roll in progress: hits still due, the next one's frame
+       and the gap between them. */
+    uint8_t roll_left[DRUM_TRACKS];
+    double roll_frame[DRUM_TRACKS];
+    double roll_gap[DRUM_TRACKS];
     drum_voice_t voices[DRUM_TRACKS];
     tone_state_t tones[DRUM_TRACKS]; /* the filters running each track's tone */
     drum_step_cb_t on_step;
     void *context;
 } drum_engine_t;
+
+/* How many hits a step plays: 1, or 2, 3 or 4 for a roll. */
+static inline int drum_rolls(const drum_pattern_t *pattern, int bar, int track, int step)
+{
+    int d = (pattern->doubles[bar][track] >> step) & 1;
+    int t = (pattern->triples[bar][track] >> step) & 1;
+    return 1 + d + 2 * t;
+}
 
 void engine_init(drum_engine_t *engine, const drum_pattern_t *pattern,
                  drum_step_cb_t on_step, void *context);
