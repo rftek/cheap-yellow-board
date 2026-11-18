@@ -1072,17 +1072,22 @@ void synth_click(bool accent)
     click.coef = expf(-1.0f / (0.012f * SYNTH_RATE));
 }
 
-/* Soft clipping: a tanh-like curve, so a big chord rounds off instead of
-   wrapping. */
+/* Soft clipping with a knee, so a big chord rounds off instead of
+   wrapping, but a few voices aren't squeezed (a tanh-like curve bends from
+   the start, which distorted 4-5 note chords). */
 static inline float soft_clip(float x)
 {
-    if (x > 3.0f) {
-        return 1.0f;
+    /* Exactly linear up to KNEE of full scale, so chords stay clean, then
+       rounding off toward full scale with no corner (its slope is 1 at the
+       knee), so a peak is caught softly instead of wrapping. */
+    const float KNEE = 0.7f;
+    float a = x < 0.0f ? -x : x;
+    if (a <= KNEE) {
+        return x;
     }
-    if (x < -3.0f) {
-        return -1.0f;
-    }
-    return x * (27.0f + x * x) / (27.0f + 9.0f * x * x);
+    float u = (a - KNEE) / (1.0f - KNEE);
+    float y = KNEE + (1.0f - KNEE) * u / (1.0f + u);
+    return x < 0.0f ? -y : y;
 }
 
 tone_settings_t *synth_tone(int instrument)
