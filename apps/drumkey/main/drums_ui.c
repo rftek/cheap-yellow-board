@@ -464,7 +464,9 @@ static void update_playhead(void)
 #define TEMPO_STEP 10
 
 /* The menu's info line, kept between visits. */
-static char status_text[COLUMNS + 1] = " No speaker: silent";
+/* One status line for both menus (dk_ui.c), so the output picked in
+   one shows in the other. */
+#define status_text dk_status_text
 
 static void menu_status(const char *status)
 {

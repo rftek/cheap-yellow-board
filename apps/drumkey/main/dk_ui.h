@@ -61,5 +61,13 @@ int keys_current_instrument(void);
 void keys_select_instrument(int instrument);
 
 /* The keys' settings menu (loop length, quantize, clear, speaker and the
-   rest), until BACK; the Piano Roll's MENU opens it. */
+   rest), until BACK; SYNTH's MENU opens it. roll_menu is the same menu
+   for the Piano Roll's MENU, named for it: ROLL SETTINGS, CLEAR ROLL and
+   BACK TO ROLL. Clearing empties the keys loop, which the roll edits; the
+   drums stay. */
 void keys_menu(QueueHandle_t touch_queue);
+void roll_menu(QueueHandle_t touch_queue);
+
+/* The status line both settings menus show, so the output picked in one
+   (a speaker or the wired DAC) shows in the other too. */
+extern char dk_status_text[CYD_TEXT_COLUMNS + 1];

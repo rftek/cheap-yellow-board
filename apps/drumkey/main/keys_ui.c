@@ -700,7 +700,10 @@ static void save_tempo_when_settled(void)
 #define VOLUME_STEP 10
 #define TEMPO_STEP 10
 
-static char status_text[COLUMNS + 1] = " No speaker: silent";
+/* One status line for both menus (dk_ui.c), so the output picked in
+   one shows in the other. */
+#define status_text dk_status_text
+static bool menu_from_roll;
 
 static void menu_status(const char *status)
 {
@@ -770,12 +773,16 @@ static void draw_count_in_row(void)
 
 static void draw_clear_row(bool armed)
 {
-    draw_button_row(MENU_CLEAR, armed ? " CLEAR LOOP? TAP AGAIN" : " CLEAR LOOP");
+    if (menu_from_roll) {
+        draw_button_row(MENU_CLEAR, armed ? " CLEAR ROLL? TAP AGAIN" : " CLEAR ROLL (DRUMS STAY)");
+    } else {
+        draw_button_row(MENU_CLEAR, armed ? " CLEAR LOOP? TAP AGAIN" : " CLEAR KEYS LOOP");
+    }
 }
 
 static void draw_menu(void)
 {
-    ESP_ERROR_CHECK(cyd_text_row(0, CYD_COLOR_BLACK, CYD_COLOR_YELLOW, " DRUM&KEY: KEYS SETTINGS"));
+    ESP_ERROR_CHECK(cyd_text_row(0, CYD_COLOR_BLACK, CYD_COLOR_YELLOW, menu_from_roll ? " DRUM&KEY: ROLL SETTINGS" : " DRUM&KEY: KEYS SETTINGS"));
     ESP_ERROR_CHECK(cyd_text_row(MENU_INFO, CYD_COLOR_YELLOW, CYD_COLOR_BLACK, status_text));
     music_out_draw_wifi_row(MENU_WIFI);
     music_out_draw_output_row(MENU_OUTPUT);
@@ -786,7 +793,7 @@ static void draw_menu(void)
     draw_count_in_row();
     draw_clear_row(false);
     music_out_draw_latency_row(MENU_LATENCY);
-    draw_button_row(MENU_BACK, " BACK TO KEYS");
+    draw_button_row(MENU_BACK, menu_from_roll ? " BACK TO ROLL" : " BACK TO KEYS");
 }
 
 /* Waits for the audio task to take a command, so the menu shows its
@@ -875,7 +882,7 @@ static void run_menu(QueueHandle_t touch_queue)
                 keys_clear();
                 clear_armed = false;
                 draw_clear_row(false);
-                menu_status(" Loop cleared");
+                menu_status(menu_from_roll ? " Roll cleared; drums kept" : " Keys loop cleared");
             } else {
                 clear_armed = true;
                 draw_clear_row(true);
@@ -1262,10 +1269,18 @@ int keys_current_instrument(void)
     return instrument;
 }
 
-/* The keys' settings menu, which the Piano Roll's MENU opens too. */
+/* The keys' settings menu, which SYNTH's MENU opens too. */
 void keys_menu(QueueHandle_t touch_queue)
 {
     run_menu(touch_queue);
+}
+
+/* The same menu for the Piano Roll's MENU, named for the roll. */
+void roll_menu(QueueHandle_t touch_queue)
+{
+    menu_from_roll = true;
+    run_menu(touch_queue);
+    menu_from_roll = false;
 }
 
 /* Makes chosen the keys' style (voice and style together), for the

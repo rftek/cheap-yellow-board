@@ -180,6 +180,8 @@ The image goes in a launcher slot, like the other apps.
 - Presets: 25 in five categories (BASS, LEAD, PAD, KEYS, FX), with eight basses. Load a whole patch or only its oscillators, with UNDO.
 - New VOICE page: POLY, MONO or LEGATO, and GLIDE, for basses and leads.
 - Each oscillator has its own pitch: OCTAVE, SEMI and FINE (cents). Unison and its detune moved to a new UNISON page.
+- The Piano Roll's MENU is ROLL SETTINGS, with CLEAR ROLL (the keys loop the roll edits; the drums stay) and BACK TO ROLL.
+- The drums and keys menus share their status line, so the output picked in one (the wired DAC, say) shows in the other instead of "No speaker: silent".
 
 ### 1.5 (2026-11-15)
 

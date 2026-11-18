@@ -877,7 +877,7 @@ void roll_screen(QueueHandle_t touch_queue)
                     drag.mode = DRAG_NONE;
                     speaker_lost = false;
                     cyd_touch_set_fast(false);
-                    keys_menu(touch_queue);
+                    roll_menu(touch_queue);
                     cyd_touch_set_fast(true);
                     full_redraw();
                     xQueueReset(touch_queue);
