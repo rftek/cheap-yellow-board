@@ -774,7 +774,7 @@ static void draw_count_in_row(void)
 static void draw_clear_row(bool armed)
 {
     if (menu_from_roll) {
-        draw_button_row(MENU_CLEAR, armed ? " CLEAR ROLL? TAP AGAIN" : " CLEAR ROLL (DRUMS STAY)");
+        draw_button_row(MENU_CLEAR, armed ? " CLEAR ROLL? TAP AGAIN" : " CLEAR ROLL");
     } else {
         draw_button_row(MENU_CLEAR, armed ? " CLEAR LOOP? TAP AGAIN" : " CLEAR KEYS LOOP");
     }

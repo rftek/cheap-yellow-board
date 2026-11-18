@@ -238,7 +238,7 @@ k.rep('''static char status_text[COLUMNS + 1] = " No speaker: silent";''',
 static bool menu_from_roll;''')
 k.rep('''    draw_button_row(MENU_CLEAR, armed ? " CLEAR LOOP? TAP AGAIN" : " CLEAR LOOP");''',
       '''    if (menu_from_roll) {
-        draw_button_row(MENU_CLEAR, armed ? " CLEAR ROLL? TAP AGAIN" : " CLEAR ROLL (DRUMS STAY)");
+        draw_button_row(MENU_CLEAR, armed ? " CLEAR ROLL? TAP AGAIN" : " CLEAR ROLL");
     } else {
         draw_button_row(MENU_CLEAR, armed ? " CLEAR LOOP? TAP AGAIN" : " CLEAR KEYS LOOP");
     }''')
