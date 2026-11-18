@@ -10,7 +10,9 @@
    there. dk_audio.c runs both in the audio task; drums_ui.c and keys_ui.c
    are the two screens, adapted from the apps' ui.c, roll_ui.c is the
    Piano Roll, which edits the keyboard loop, and synth_ui.c edits the
-   patch synth (psynth.c), whose patches the keys play as PATCH styles. */
+   patch synth (psynth.c), whose patches the keys play as PATCH styles.
+   live_ui.c is the LIVE screen, LiveDrum's pads and loop recorder,
+   compiled from apps/livedrum/main. */
 
 #include "cyd_display.h"
 #include "dk_audio.h"
@@ -20,6 +22,8 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "kit.h"
+#include "ld_engine.h"
+#include "ld_sounds.h"
 #include "music_out.h"
 #include "nvs_flash.h"
 #include "sdcard.h"
@@ -50,8 +54,12 @@ static void ui_task(void *argument)
             dk_next_screen = DK_KEYS;
             synth_screen(touch_queue);
             break;
-        default:
+        case DK_LIVE:
             dk_next_screen = DK_ROLL;
+            live_screen(touch_queue);
+            break;
+        default:
+            dk_next_screen = DK_LIVE;
             drums_screen(touch_queue);
             break;
         }
@@ -82,6 +90,8 @@ void app_main(void)
     pattern.bpm = music_out_load_tempo(DEFAULT_BPM);
 
     /* Starts silent: no speaker until one is picked in a menu. */
+    ESP_ERROR_CHECK(ld_engine_init());
+    ld_sounds_default();
     ESP_ERROR_CHECK(cyd_touch_start(&touch_queue));
     ESP_ERROR_CHECK(dk_audio_start(&pattern, touch_queue));
 

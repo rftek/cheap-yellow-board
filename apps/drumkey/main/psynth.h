@@ -221,6 +221,11 @@ bool psynth_render_sample(int slot, int sample);
 float psynth_sample_seconds(int sample);
 const char *psynth_sample_name(int sample);
 
+/* A sample slot's sound (44100 Hz mono) and length, or NULL when empty.
+   It is freed when the slot is rendered again: copy it to keep it (the
+   LIVE screen's pads do). */
+const int16_t *psynth_sample_pcm(int sample, uint32_t *frames);
+
 /* Builds the wavetables (in PSRAM), loads the presets (SUPERSAW, REESE,
    PLUCK, WOBBLE) and hands the engine to Keyboard's synth. Call after
    synth_init. */

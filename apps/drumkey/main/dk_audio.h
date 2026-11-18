@@ -1,13 +1,14 @@
 #pragma once
 
-/* Drum&Key's audio task: DrumLoop's drum engine and Keyboard's looper and
-   synth, mixed into one stream through music_out (one speaker takes one
+/* Drum&Key's audio task: DrumLoop's drum engine, Keyboard's looper and
+   synth, and LiveDrum's pads and loop (the LIVE screen), mixed into one
+   stream through music_out (one speaker takes one
    AirPlay stream). The touch task and both screens send it hits, notes and
    commands; it runs them at the start of each 8 ms block.
 
-   The two loops share one transport and one tempo: PLAY starts both from
-   their first bar in the same block, so a drum loop and a keyboard loop of
-   1, 2, 4, 8 (or 16 drum) bars stay in step. */
+   The loops share one transport and one tempo: PLAY starts the drum, keys
+   and LIVE loops from their first bar in the same block, so loops of 1, 2,
+   4, 8 (or 16 drum) bars stay in step. */
 
 #include <stdbool.h>
 #include <stdint.h>
