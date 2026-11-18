@@ -17,6 +17,7 @@ Applications for the ESP32 Cheap Yellow Display (CYD, ESP32-2432S028R), written 
 | [apps/drumloop](apps/drumloop) | Live drum pads with 808, 909, trap and DnB kits and a 1-16 bar step sequencer, played on an AirPlay speaker | esp32s3 |
 | [apps/keyboard](apps/keyboard) | Two-octave touch keyboard with 23 synthesized piano, organ and other styles, sustain and a loop recorder, played on an AirPlay speaker | esp32s3 |
 | [apps/drumkey](apps/drumkey) | Drum&Key: DrumLoop's pads and step sequencer and Keyboard's keys in one app, with a screen switch, one tempo and one AirPlay stream | esp32s3 |
+| [apps/livedrum](apps/livedrum) | LiveDrum: 8 to 16 large pads for playing live, each with a sound from the kits or a WAV on the SD card, a loop recorder with quantize and undo, and banks on the card | esp32s3 |
 | [apps/f1_race](apps/f1_race) | F1 racing game | esp32, esp32s3 |
 | [apps/gear_roll](apps/gear_roll) | LVGL gear demo | esp32, esp32s3 |
 | [apps/pcm5102a_test](apps/pcm5102a_test) | PCM5102A audio DAC test: drum pads and test tones over I2S with a few milliseconds of delay (pcm5102a demo) | esp32s3 |
