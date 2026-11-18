@@ -39,12 +39,12 @@ The loop keeps playing when the output changes, and the beat is kept. If the spe
 
 The grid's playhead and its bar page follow what the speaker is playing. That is the AirPlay delay behind what the board renders, so the screen matches what you hear.
 
-### Track tone: filter, EQ and level
+### Track tone: filter, EQ, level and pitch
 
 Hold a track's label to shape that instrument, in the editor the music apps share ([music_tone](../../components/music_tone)):
 
 ```
- <    BD TONE    >  BACK     track (< > for the others)
+ <  BD TONE FLAT >  BACK     track (< > for the others); FLAT resets it
  FILTER OFF  LP   HP   BP    resonant filter type
  CUT 1.4k [=======|-----]    cutoff, 30 Hz to 18 kHz
  RES  1.1 [==|----------]    resonance, Q 0.5 to 10
@@ -52,10 +52,11 @@ Hold a track's label to shape that instrument, in the editor the music apps shar
  MID   -3 [ ==|        ]     peak at 1 kHz
  HIGH  +0 [   |        ]     high shelf at 6 kHz
  LVL   +0 [   |        ]     level, -24 to +6 dB
- FLAT                        resets the track
+ PTCH  -5 [ ==|        ]     pitch, -12 to +12 semitones
  [BD][SD][CP][CH][OH][LT][RS][CB]   pads, to hear it
 ```
 
+- PITCH retunes the track's hits, as a sampler does: lower is slower and longer, higher is faster and shorter. A deep kick or tom becomes an 808-style boom, a snare tuned up snaps. Each hit takes the pitch set when it starts, so moving PITCH changes the next hit, not one already sounding.
 - Drag a finger along a slider to change it while the loop plays, as a filter sweep. Tap a slider to jump to a value. The EQ and level sliders snap to 0 near the middle.
 - The pads stay live under the editor, and the loop keeps playing, so you hear each change at once.
 - The tone belongs to the track, not the kit, so it stays when you change kit. It is part of the pattern, so EXPORT renders it, and it is not saved across power cycles.

@@ -17,7 +17,7 @@
 #define ROW_HEADER 0
 #define ROW_FILTER 1
 #define ROW_FLAT 8
-#define SLIDERS 6
+#define SLIDERS 7 /* the last, PITCH, only when the editor asks for it */
 #define SLIDER_LABEL_COLUMNS 8
 #define SLIDER_X (SLIDER_LABEL_COLUMNS * FW + 8)
 #define SLIDER_WIDTH (CYD_LCD_WIDTH - SLIDER_X - 12)
@@ -39,6 +39,9 @@ static const span_t FILTER_LABEL_SPAN = {0, 6};
 static const span_t FILTER_SPANS[TONE_FILTERS] = {{6, 5}, {11, 5}, {16, 5}, {21, 5}};
 static const char *const FILTER_NAMES[TONE_FILTERS] = {"OFF", "LP", "HP", "BP"};
 static const span_t FLAT_SPAN = {0, 8};
+/* With PITCH on row 8, FLAT moves into the header beside a shorter title. */
+static const span_t PITCH_TITLE_SPAN = {3, 11};
+static const span_t HEADER_FLAT_SPAN = {14, 5};
 
 typedef struct {
     int row;
@@ -54,6 +57,7 @@ static const slider_t sliders[SLIDERS] = {
     {5, TONE_EQ_MIN, TONE_EQ_MAX, true},
     {6, TONE_EQ_MIN, TONE_EQ_MAX, true},
     {7, TONE_LEVEL_MIN, TONE_LEVEL_MAX, true},
+    {ROW_FLAT, TONE_PITCH_MIN, TONE_PITCH_MAX, true},
 };
 
 static bool in_span(span_t span, int column)
@@ -106,8 +110,10 @@ static int slider_value(const tone_settings_t *tone, int index)
         return tone->mid;
     case 4:
         return tone->high;
-    default:
+    case 5:
         return tone->level;
+    default:
+        return tone->pitch;
     }
 }
 
@@ -131,8 +137,11 @@ static void set_slider_value(tone_settings_t *tone, int index, int value)
     case 4:
         tone->high = (int8_t)value;
         break;
-    default:
+    case 5:
         tone->level = (int8_t)value;
+        break;
+    default:
+        tone->pitch = (int8_t)value;
         break;
     }
 }
@@ -152,7 +161,7 @@ static void slider_label(const tone_settings_t *tone, int index, char *label, si
     } else if (index == 1) {
         snprintf(label, size, "RES %4.1f", (double)tone_q(value));
     } else {
-        static const char *const names[] = {"LOW", "MID", "HIGH", "LVL"};
+        static const char *const names[] = {"LOW", "MID", "HIGH", "LVL", "PTCH"};
         snprintf(label, size, "%-4s%+4d", names[index - 2], value);
     }
 }
@@ -213,10 +222,19 @@ static void draw_buttons(const tone_editor_t *editor, int item)
     char title[32];
     snprintf(title, sizeof(title), "%s TONE", editor->name(item, editor->context));
     put_span(&row, PREV_SPAN, "<", CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
-    put_span(&row, TITLE_SPAN, title, CYD_COLOR_BLACK, color);
+    if (editor->pitch) {
+        put_span(&row, PITCH_TITLE_SPAN, title, CYD_COLOR_BLACK, color);
+        put_span(&row, HEADER_FLAT_SPAN, "FLAT", CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
+    } else {
+        put_span(&row, TITLE_SPAN, title, CYD_COLOR_BLACK, color);
+    }
     put_span(&row, NEXT_SPAN, ">", CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
     put_span(&row, BACK_SPAN, "BACK", CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
     ESP_ERROR_CHECK(cyd_draw_cells(ROW_HEADER, row.text, row.fg, row.bg));
+    if (editor->pitch) {
+        ESP_ERROR_CHECK(cyd_fill_rect(HEADER_FLAT_SPAN.column * FW - 1, 0, 2, FH, CYD_COLOR_BLACK));
+        ESP_ERROR_CHECK(cyd_fill_rect(NEXT_SPAN.column * FW - 1, 0, 2, FH, CYD_COLOR_BLACK));
+    }
 
     clear_row(&row, CYD_COLOR_WHITE);
     put_span(&row, FILTER_LABEL_SPAN, "FILTER", CYD_COLOR_WHITE, CYD_COLOR_BLACK);
@@ -232,6 +250,9 @@ static void draw_buttons(const tone_editor_t *editor, int item)
                                       CYD_COLOR_BLACK));
     }
 
+    if (editor->pitch) {
+        return; /* row 8 is the PITCH slider */
+    }
     clear_row(&row, CYD_COLOR_GRAY);
     put_span(&row, FLAT_SPAN, "FLAT", CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
     static const char hint[] = "Drag a slider to change it";
@@ -263,6 +284,10 @@ int tone_editor_run(QueueHandle_t touch_queue, const tone_editor_t *editor, int 
                 if (in_span(BACK_SPAN, column)) {
                     return item;
                 }
+                if (editor->pitch && in_span(HEADER_FLAT_SPAN, column)) {
+                    memset(tone, 0, sizeof(*tone));
+                    continue;
+                }
                 if (in_span(PREV_SPAN, column)) {
                     item = (item + editor->count - 1) % editor->count;
                 } else if (in_span(NEXT_SPAN, column)) {
@@ -281,7 +306,7 @@ int tone_editor_run(QueueHandle_t touch_queue, const tone_editor_t *editor, int 
                     }
                     tone->filter = (uint8_t)filter;
                 }
-            } else if (row == ROW_FLAT && in_span(FLAT_SPAN, column)) {
+            } else if (row == ROW_FLAT && !editor->pitch && in_span(FLAT_SPAN, column)) {
                 memset(tone, 0, sizeof(*tone));
             }
         }
@@ -291,6 +316,9 @@ int tone_editor_run(QueueHandle_t touch_queue, const tone_editor_t *editor, int 
         for (int i = 0; i < count; ++i) {
             int row = held[i].y / FH;
             for (int index = 0; index < SLIDERS; ++index) {
+                if (index == SLIDERS - 1 && !editor->pitch) {
+                    continue;
+                }
                 if (row == sliders[index].row && held[i].x >= SLIDER_X - FW) {
                     set_slider_value(tone, index, slider_at(index, held[i].x));
                 }
@@ -303,6 +331,9 @@ int tone_editor_run(QueueHandle_t touch_queue, const tone_editor_t *editor, int 
         }
         uint16_t color = editor->color(item, editor->context);
         for (int index = 0; index < SLIDERS; ++index) {
+            if (index == SLIDERS - 1 && !editor->pitch) {
+                continue;
+            }
             bool enabled = index >= 2 || filter_on;
             if (new_item || filter_on != drawn_filter_on ||
                 slider_value(tone, index) != slider_value(&drawn_tone, index)) {

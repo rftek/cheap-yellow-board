@@ -181,6 +181,10 @@ The image goes in a launcher slot, like the other apps.
 
 ## Changelog
 
+### 1.7 (2026-11-17)
+
+- Drum tones have PITCH: hold a drum track's label, and the tone editor has a PITCH slider (-12 to +12 semitones) on its last row, with FLAT beside the title. Hits are resampled, so a tuned-down kick or tom booms like an 808.
+
 ### 1.6 (2026-11-15)
 
 - SYNTH, quicker to use: tap the page title for every page at once, tap the patch name for the presets, and choices with more than three options open a list. The mod matrix shows a routing a row, on two pages instead of four.

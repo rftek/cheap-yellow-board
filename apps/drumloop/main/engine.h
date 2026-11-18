@@ -39,8 +39,12 @@ typedef void (*drum_step_cb_t)(uint64_t frame, uint16_t step, void *context);
 typedef struct {
     const drum_sound_t *sound; /* NULL when idle */
     uint32_t pos;              /* next frame of the sound */
+    float frac;                /* and how far past it, when pitched */
+    float rate;                /* frames of the sound a frame: 1, or the track's pitch */
     const drum_sound_t *fade_sound; /* the previous hit, fading out after a retrigger */
     uint32_t fade_pos;
+    float fade_frac;
+    float fade_rate;
     uint16_t fade_left;
 } drum_voice_t;
 

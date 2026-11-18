@@ -977,6 +977,7 @@ static void run_tone(QueueHandle_t touch_queue)
         .draw_bottom = tone_draw_pads,
         .tick = tone_tick,
         .tap = tone_tap,
+        .pitch = true,
     };
     int track = tone_track;
     tone_track = -1;

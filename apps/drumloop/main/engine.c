@@ -55,6 +55,8 @@ static void fade_out(drum_voice_t *voice)
     if (voice->sound != NULL) {
         voice->fade_sound = voice->sound;
         voice->fade_pos = voice->pos;
+        voice->fade_frac = voice->frac;
+        voice->fade_rate = voice->rate;
         voice->fade_left = RETRIGGER_FADE;
     }
     voice->sound = NULL;
@@ -73,6 +75,11 @@ void engine_hit(drum_engine_t *engine, int track)
     fade_out(voice);
     voice->sound = kit_sound(engine->pattern->kit, track);
     voice->pos = 0;
+    voice->frac = 0.0f;
+    /* PITCH retunes the hit, as a sampler does: faster and higher, or
+       slower and lower. Set at the hit, so a sweep changes the next one. */
+    int pitch = engine->pattern->tone[track].pitch;
+    voice->rate = pitch == 0 ? 1.0f : powf(2.0f, (float)pitch / 12.0f);
 }
 
 static uint16_t loop_steps(const drum_engine_t *engine)
@@ -144,6 +151,23 @@ static float soft_clip(float x)
     return x * (27.0f + x * x) / (27.0f + 9.0f * x * x);
 }
 
+/* A sound's sample at pos plus frac, between it and the next. */
+static inline float sound_at(const drum_sound_t *sound, uint32_t pos, float frac)
+{
+    float a = sound->pcm[pos];
+    float b = pos + 1 < sound->frames ? sound->pcm[pos + 1] : 0.0f;
+    return a + (b - a) * frac;
+}
+
+/* Steps a pitched read position on by rate. */
+static inline void advance(uint32_t *pos, float *frac, float rate)
+{
+    *frac += rate;
+    uint32_t whole = (uint32_t)*frac;
+    *pos += whole;
+    *frac -= (float)whole;
+}
+
 /* Adds a track's hit, and the one fading out under it, into acc. */
 static void add_voice(drum_voice_t *voice, float *acc, size_t frames)
 {
@@ -151,21 +175,30 @@ static void add_voice(drum_voice_t *voice, float *acc, size_t frames)
     if (sound != NULL) {
         float gain = sound->gain / 32768.0f;
         size_t i = 0;
-        for (; i < frames && voice->pos < sound->frames; ++i) {
-            acc[i] += sound->pcm[voice->pos++] * gain;
+        if (voice->rate == 1.0f || voice->rate == 0.0f) {
+            for (; i < frames && voice->pos < sound->frames; ++i) {
+                acc[i] += sound->pcm[voice->pos++] * gain;
+            }
+        } else {
+            for (; i < frames && voice->pos < sound->frames; ++i) {
+                acc[i] += sound_at(sound, voice->pos, voice->frac) * gain;
+                advance(&voice->pos, &voice->frac, voice->rate);
+            }
         }
         if (voice->pos >= sound->frames) {
             voice->sound = NULL;
         }
     }
     const drum_sound_t *fading = voice->fade_sound;
+    float fade_rate = voice->fade_rate == 0.0f ? 1.0f : voice->fade_rate;
     for (size_t i = 0; i < frames && voice->fade_left > 0; ++i) {
         if (voice->fade_pos >= fading->frames) {
             voice->fade_left = 0;
             break;
         }
         float fade = (float)voice->fade_left / RETRIGGER_FADE;
-        acc[i] += fading->pcm[voice->fade_pos++] * (fading->gain / 32768.0f) * fade;
+        acc[i] += sound_at(fading, voice->fade_pos, voice->fade_frac) * (fading->gain / 32768.0f) * fade;
+        advance(&voice->fade_pos, &voice->fade_frac, fade_rate);
         --voice->fade_left;
     }
 }
@@ -179,7 +212,7 @@ static void mix(drum_engine_t *engine, int16_t *out, size_t frames)
         drum_voice_t *voice = &engine->voices[track];
         const tone_settings_t *tone = &engine->pattern->tone[track];
         tone_state_t *state = &engine->tones[track];
-        if (tone_is_flat(tone)) {
+        if (tone_sound_flat(tone)) {
             add_voice(voice, acc, frames); /* nothing to run it through */
             continue;
         }

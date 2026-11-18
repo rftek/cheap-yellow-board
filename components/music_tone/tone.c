@@ -16,10 +16,15 @@
 /* Below this the filters' state is treated as silent. */
 #define RING_FLOOR 1e-6f
 
-bool tone_is_flat(const tone_settings_t *tone)
+bool tone_sound_flat(const tone_settings_t *tone)
 {
     return tone->filter == TONE_FILTER_OFF && tone->low == 0 && tone->mid == 0 &&
            tone->high == 0 && tone->level == 0;
+}
+
+bool tone_is_flat(const tone_settings_t *tone)
+{
+    return tone_sound_flat(tone) && tone->pitch == 0;
 }
 
 float tone_cutoff_hz(int cutoff)
