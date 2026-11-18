@@ -4,7 +4,7 @@
      row 0       PLAY REC - 120 + P1 KEYS MENU   (P1-P4 picks the patch)
      row 1       <  OSC 1  >   SUPERSAW           page (tap: all pages), patch (tap: presets)
      rows 2-7    up to six settings: sliders (drag) or choices (tap)
-     row 8       OC-  [ oscilloscope ]  OC+
+     row 8       OC- OC+ [scope] SAMPLE TO ROLL
      rows 9-11   eight test keys, C to C, playing the patch
 
    Pages: OSC 1, OSC 2, UNISON, VOICE, SUB+NOISE, FILTER 1, FILTER 2, AMP ENV,
@@ -17,6 +17,11 @@
 
    The settings rows, the page list, the presets and a choice's list share
    rows 2-7, so the oscilloscope and the test keys are always there.
+
+   SAMPLE renders the patch into the next free sample slot (the oldest
+   once all four are full) and makes it the Piano Roll's style; TO ROLL
+   opens the roll with that sample, or with the patch if it hasn't been
+   sampled since its last change, ready to draw notes.
 
    While a finger drags a slider the oscilloscope waits, so the screen
    loop follows the finger every 10 ms and the sound moves with it. */
@@ -53,8 +58,9 @@
 #define LABEL_COLUMNS 9
 #define BAR_X (LABEL_COLUMNS * FW + 8)
 #define BAR_WIDTH (CYD_LCD_WIDTH - BAR_X - 12)
-#define SCOPE_X (3 * FW + 6)
-#define SCOPE_WIDTH (20 * FW - 12)
+#define SCOPE_X (6 * FW + 6)
+#define SCOPE_WIDTH (7 * FW - 12)
+#define NOTICE_MS 2500
 #define MAX_FINGERS 16
 
 /* A mod matrix row: SOURCE, DEST, the amount and its bar. */
@@ -90,7 +96,9 @@ static const span_t NEXT_SPAN = {11, 2};
 static const span_t NAME_SPAN = {13, 13};
 static const span_t CHOICE_SPAN = {LABEL_COLUMNS, COLUMNS - LABEL_COLUMNS};
 static const span_t OCT_DOWN_SPAN = {0, 3};
-static const span_t OCT_UP_SPAN = {23, 3};
+static const span_t OCT_UP_SPAN = {3, 3};
+static const span_t SAMPLE_SPAN = {13, 6};
+static const span_t TO_ROLL_SPAN = {19, 7};
 
 /* ---- The settings ---------------------------------------------------------------- */
 
@@ -244,6 +252,13 @@ static char sample_status[COLUMNS + 1];
 /* What the custom pages and the overlays showed, so they redraw only on a change. */
 static uint32_t drawn_custom = 0xFFFFFFFFu;
 static bool dragging;
+/* A short message over the patch name, such as "SAVED AS S2". */
+static char notice[COLUMNS + 1];
+static TickType_t notice_until;
+/* The sample SAMPLE made last, and whether the patch is unchanged since:
+   then TO ROLL takes the sample, else the patch. */
+static int last_sample = -1;
+static bool sampled;
 
 /* Test keys: the note under each finger, or -1. */
 static volatile int test_instrument;
@@ -363,8 +378,13 @@ static void draw_page_row(void)
              listing ? CYD_COLOR_WHITE : pages[page].color);
     put_span(&row, NEXT_SPAN, ">", CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
     bool presets = overlay == OVERLAY_PRESETS;
-    put_span(&row, NAME_SPAN, psynth_patch(slot)->name, presets ? CYD_COLOR_BLACK : CYD_COLOR_YELLOW,
-             presets ? CYD_COLOR_YELLOW : CYD_COLOR_BUTTON);
+    if (notice[0] != '\0' && (int32_t)(xTaskGetTickCount() - notice_until) < 0) {
+        put_span(&row, NAME_SPAN, notice, CYD_COLOR_BLACK, COLOR_SCOPE);
+    } else {
+        notice[0] = '\0';
+        put_span(&row, NAME_SPAN, psynth_patch(slot)->name, presets ? CYD_COLOR_BLACK : CYD_COLOR_YELLOW,
+                 presets ? CYD_COLOR_YELLOW : CYD_COLOR_BUTTON);
+    }
     if (memcmp(&row, &drawn_page_row, sizeof(row)) != 0) {
         draw_row(PAGE_ROW, &row);
         drawn_page_row = row;
@@ -468,7 +488,12 @@ static void draw_scope_row_buttons(void)
     clear_row(&row, CYD_COLOR_WHITE);
     put_span(&row, OCT_DOWN_SPAN, "OC-", CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
     put_span(&row, OCT_UP_SPAN, "OC+", CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
+    put_span(&row, SAMPLE_SPAN, "SAMPLE", CYD_COLOR_WHITE, CYD_COLOR_RED);
+    put_span(&row, TO_ROLL_SPAN, "TO ROLL", CYD_COLOR_WHITE, DK_ROLL_COLOR);
     draw_row(SCOPE_ROW, &row);
+    const span_t buttons[] = {OCT_DOWN_SPAN, OCT_UP_SPAN};
+    draw_dividers(SCOPE_ROW, buttons, 2);
+    ESP_ERROR_CHECK(cyd_fill_rect(TO_ROLL_SPAN.column * FW - 1, SCOPE_ROW * FH, 2, FH, CYD_COLOR_BLACK));
 }
 
 /* The oscilloscope: the edited patch's last few ms, from a rising zero
@@ -776,6 +801,7 @@ static void lift_test_keys(void)
 
 static void set_slot(int new_slot)
 {
+    sampled = false;
     lift_test_keys();
     slot = new_slot;
     update_test_instrument();
@@ -907,6 +933,9 @@ static void tap_matrix(int index, int column)
 static void tap_param(int index, int x)
 {
     const page_t *p = &pages[page];
+    if (p->kind == PAGE_PARAMS || p->kind == PAGE_MATRIX) {
+        sampled = false; /* a choice may change */
+    }
     switch (p->kind) {
     case PAGE_RACK:
         tap_rack(index, x);
@@ -948,6 +977,7 @@ static void tap_page_list(int index, int column)
 /* Loads a preset into the patch, keeping what was there for UNDO. */
 static void load(int preset)
 {
+    sampled = false;
     undo_patch = *psynth_patch(slot);
     undo_slot = slot;
     psynth_load(slot, preset, osc_only);
@@ -990,8 +1020,53 @@ static void tap_choice_list(int index, int column)
     }
     int i = (column >= HALF_SPANS[1].column ? CHOICE_ROWS : 0) + index - 1;
     if (i < option_count(&choice)) {
+        sampled = false;
         set_value(&choice, choice.min + i);
         set_overlay(OVERLAY_NONE);
+    }
+}
+
+static void show_notice(const char *text)
+{
+    snprintf(notice, sizeof(notice), "%s", text);
+    notice_until = xTaskGetTickCount() + pdMS_TO_TICKS(NOTICE_MS);
+    draw_page_row();
+}
+
+/* SAMPLE: renders the patch into the next free sample slot, or the one
+   after the last made once all are full, and makes it the roll's style. */
+static void quick_sample(void)
+{
+    int target = -1;
+    for (int i = 0; i < PSYNTH_SAMPLES && target < 0; ++i) {
+        if (psynth_sample_seconds(i) <= 0.0f) {
+            target = i;
+        }
+    }
+    if (target < 0) {
+        target = (last_sample + 1) % PSYNTH_SAMPLES;
+    }
+    show_notice("SAMPLING...");
+    lift_test_keys();
+    if (!psynth_render_sample(slot, target)) {
+        show_notice("NO MEMORY");
+        return;
+    }
+    last_sample = target;
+    sampled = true;
+    keys_select_instrument(synth_instrument(VOICE_PATCH, PSYNTH_SLOTS + target));
+    char text[COLUMNS + 1];
+    snprintf(text, sizeof(text), "SAVED AS S%d", target + 1);
+    show_notice(text);
+    snprintf(sample_status, sizeof(sample_status), " Saved S%d: %.1f s of %s", target + 1,
+             (double)psynth_sample_seconds(target), psynth_patch(slot)->name);
+}
+
+/* TO ROLL: the roll's style becomes the sample just made, or the patch. */
+static void choose_for_roll(void)
+{
+    if (!sampled) {
+        keys_select_instrument(synth_instrument(VOICE_PATCH, slot));
     }
 }
 
@@ -1037,6 +1112,7 @@ static void follow_sliders(void)
             }
         }
         dragging = true;
+        sampled = false;
         int span = param.max - param.min;
         int value = param.min + ((held[i].x - x) * span + width / 2) / width;
         if (param.min < 0 && value != 0 && abs(value) <= span / 24) {
@@ -1157,6 +1233,15 @@ void synth_screen(QueueHandle_t touch_queue)
                     base_note -= 12;
                 } else if (in_span(OCT_UP_SPAN, column) && base_note < 84) {
                     base_note += 12;
+                } else if (in_span(SAMPLE_SPAN, column)) {
+                    quick_sample();
+                    xQueueReset(touch_queue);
+                    break;
+                } else if (in_span(TO_ROLL_SPAN, column)) {
+                    choose_for_roll();
+                    leave();
+                    dk_next_screen = DK_ROLL;
+                    return;
                 }
             } else if (row >= FIRST_PARAM_ROW && row < FIRST_PARAM_ROW + PARAM_ROWS) {
                 int index = row - FIRST_PARAM_ROW;

@@ -75,9 +75,16 @@ The fourth screen edits the patch synth (`main/psynth.c`), a subtractive and wav
  SHAPE    [      SAW       ]        a choice: tap to pick from a list
  POS   50 [=====|-----------]       a slider: drag along it
  ...                                up to six settings a page
- OC- [ ~~~ oscilloscope ~~~ ] OC+   the patch's sound; test-key octave
+ OC- OC+ [scope] SAMPLE TO ROLL    test-key octave, the sound, keep it, use it
  [C3][D3][E3][F3][G3][A3][B3][C4]   test keys
 ```
+
+From a sound to the Piano Roll:
+1. Pick a patch slot with **P1** in the header, tap the patch name and load a preset (say **BASS**, then **ACID**). Shape it on the pages, playing the test keys.
+2. **SAMPLE** records it: the patch plays middle C for a second and lets go, with its effects, into the next free sample slot (S1-S4; once all four are full, the oldest is replaced). The patch name shows **SAVED AS S2** for a moment, and the sample becomes the roll's style.
+3. **TO ROLL** opens the Piano Roll with that sample as INST, ready to draw notes. Without a SAMPLE since the patch last changed, TO ROLL takes the patch itself, which plays live and follows any later edits; a sample stays as it was.
+
+Patches and samples both play in ROLL (INST lists them: the patch names, then S1-S4). Sample a sound when you want to keep it while you go on changing the patch.
 
 Getting around:
 - **Page title**: tap it for every page at once, three to a row in their group's color (sound sources pink, filters orange, envelopes green, modulation cyan, effects violet, RACK and SAMPLES yellow), and tap one to go there. **<** and **>** step to the next page.
@@ -180,6 +187,7 @@ The image goes in a launcher slot, like the other apps.
 - Presets: 25 in five categories (BASS, LEAD, PAD, KEYS, FX), with eight basses. Load a whole patch or only its oscillators, with UNDO.
 - New VOICE page: POLY, MONO or LEGATO, and GLIDE, for basses and leads.
 - Each oscillator has its own pitch: OCTAVE, SEMI and FINE (cents). Unison and its detune moved to a new UNISON page.
+- SAMPLE and TO ROLL on the SYNTH screen: one tap keeps the sound as a sample, one more opens the Piano Roll with it as INST.
 - The Piano Roll's MENU is ROLL SETTINGS, with CLEAR ROLL (clears the keys loop the roll edits; the drums stay) and BACK TO ROLL.
 - The drums and keys menus share their status line, so the output picked in one (the wired DAC, say) shows in the other instead of "No speaker: silent".
 
