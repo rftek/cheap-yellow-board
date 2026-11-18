@@ -2,15 +2,26 @@
    which the keys and the Piano Roll play as the PATCH voice's styles.
 
      row 0       PLAY REC - 120 + P1 KEYS MENU   (P1-P4 picks the patch)
-     row 1       <  OSC 1  >   SUPERSAW   INIT    page, patch name, preset
+     row 1       <  OSC 1  >   SUPERSAW           page (tap: all pages), patch (tap: presets)
      rows 2-7    up to six settings: sliders (drag) or choices (tap)
-     row 8       OCT-  [ oscilloscope ]  OCT+
+     row 8       OC- OC+ [scope] SAMPLE TO ROLL
      rows 9-11   eight test keys, C to C, playing the patch
 
-   Pages: RACK, OSC 1, OSC 2, SUB+NOISE, FILTER 1, FILTER 2, AMP ENV,
-   MOD ENV, LFOS, MOD 1-2, MOD 3-4, MOD 5-6, MOD 7-8, FX 1, FX 2, SAMPLES.
-   RACK sets LAYER (a key plays every patch switched on) and each patch's
-   level; SAMPLES renders the patch into a sample slot.
+   Pages: OSC 1, OSC 2, UNISON, VOICE, SUB+NOISE, FILTER 1, FILTER 2, AMP ENV,
+   MOD ENV, LFOS, MOD 1-6, MOD 7-8, FX 1, FX 2, RACK, SAMPLES. Tapping the
+   page title shows them all at once to jump to any; < > step through them.
+   Tapping the patch name opens the presets, by category (BASS, LEAD, PAD,
+   KEYS, FX): a tap loads one into the patch, whole or just its oscillators,
+   while the test keys stay live to try it. UNDO takes the last load back.
+   A choice with more than three options opens a list to pick from.
+
+   The settings rows, the page list, the presets and a choice's list share
+   rows 2-7, so the oscilloscope and the test keys are always there.
+
+   SAMPLE renders the patch into the next free sample slot (the oldest
+   once all four are full) and makes it the Piano Roll's style; TO ROLL
+   opens the roll with that sample, or with the patch if it hasn't been
+   sampled since its last change, ready to draw notes.
 
    While a finger drags a slider the oscilloscope waits, so the screen
    loop follows the finger every 10 ms and the sound moves with it. */
@@ -47,14 +58,28 @@
 #define LABEL_COLUMNS 9
 #define BAR_X (LABEL_COLUMNS * FW + 8)
 #define BAR_WIDTH (CYD_LCD_WIDTH - BAR_X - 12)
-#define SCOPE_X (3 * FW + 6)
-#define SCOPE_WIDTH (20 * FW - 12)
+#define SCOPE_X (6 * FW + 6)
+#define SCOPE_WIDTH (7 * FW - 12)
+#define NOTICE_MS 2500
 #define MAX_FINGERS 16
+
+/* A mod matrix row: SOURCE, DEST, the amount and its bar. */
+#define MATRIX_VALUE_COLUMN 16
+#define MATRIX_BAR_X (20 * FW + 4)
+#define MATRIX_BAR_WIDTH (CYD_LCD_WIDTH - MATRIX_BAR_X - 12)
 
 #define COLOR_TRACK 0x2104
 #define COLOR_ZERO 0x7BEF
 #define COLOR_SCOPE_BACK 0x0841
 #define COLOR_SCOPE 0x07E0
+
+/* Each group of pages has a color, in the page list and the title. */
+#define COLOR_OSC 0xFAD2    /* pink, the PATCH voice's */
+#define COLOR_FILTER 0xFC60 /* orange */
+#define COLOR_ENV 0x87F0    /* green */
+#define COLOR_MOD 0x07FF    /* cyan */
+#define COLOR_FX 0xC41F     /* violet */
+#define COLOR_RACK 0xFFE0   /* yellow */
 
 static const span_t PLAY_SPAN = DK_PLAY_SPAN;
 static const span_t REC_SPAN = DK_REC_SPAN;
@@ -66,13 +91,14 @@ static const span_t SWITCH_SPAN = DK_SWITCH_SPAN;
 static const span_t MENU_SPAN = DK_MENU_SPAN;
 
 static const span_t PREV_SPAN = {0, 2};
-static const span_t TITLE_SPAN = {2, 10};
-static const span_t NEXT_SPAN = {12, 2};
-static const span_t NAME_SPAN = {14, 8};
-static const span_t INIT_SPAN = {22, 4};
+static const span_t TITLE_SPAN = {2, 9};
+static const span_t NEXT_SPAN = {11, 2};
+static const span_t NAME_SPAN = {13, 13};
 static const span_t CHOICE_SPAN = {LABEL_COLUMNS, COLUMNS - LABEL_COLUMNS};
 static const span_t OCT_DOWN_SPAN = {0, 3};
-static const span_t OCT_UP_SPAN = {23, 3};
+static const span_t OCT_UP_SPAN = {3, 3};
+static const span_t SAMPLE_SPAN = {13, 6};
+static const span_t TO_ROLL_SPAN = {19, 7};
 
 /* ---- The settings ---------------------------------------------------------------- */
 
@@ -86,6 +112,7 @@ static const char *const dest_names[] = {"NONE", "PITCH", "OSC1 POS", "OSC2 POS"
 static const char *const delay_names[] = {"1/16", "1/8", "3/16", "1/4", "3/8", "1/2"};
 static const char *const sub_names[] = {"SINE", "SQUARE"};
 static const char *const routing_names[] = {"SERIES", "PARALLEL"};
+static const char *const mode_names[] = {"POLY", "MONO", "LEGATO"};
 
 typedef struct {
     const char *label;
@@ -100,66 +127,96 @@ typedef struct {
 #define CHOICE(label, field, names) \
     {label, offsetof(psynth_patch_t, field), 0, (int)(sizeof(names) / sizeof(names[0])) - 1, false, names}
 
-typedef enum { PAGE_PARAMS, PAGE_RACK, PAGE_SAMPLES } page_kind_t;
+typedef enum { PAGE_PARAMS, PAGE_MATRIX, PAGE_RACK, PAGE_SAMPLES } page_kind_t;
 
 typedef struct {
     const char *title;
-    int count;
+    int count; /* settings, or mod slots on a matrix page */
     param_t params[PARAM_ROWS];
     page_kind_t kind;
+    uint16_t color;
+    int first; /* the first mod slot on a matrix page */
 } page_t;
 
 #define OSC_PAGE(title, i)                                                                 \
     {title, 6,                                                                             \
      {CHOICE("SHAPE", osc[i].shape, shape_names), SLIDER("POS", osc[i].position, 0, 100), \
-      SLIDER("UNISON", osc[i].unison, 1, PSYNTH_UNISON_MAX),                               \
-      SLIDER("DETUNE", osc[i].detune, 0, 100), SIGNED("SEMI", osc[i].semi, -24, 24),     \
-      SLIDER("LEVEL", osc[i].level, 0, 100)}, PAGE_PARAMS}
+      SLIDER("LEVEL", osc[i].level, 0, 100), SIGNED("OCTAVE", osc[i].octave, -3, 3),     \
+      SIGNED("SEMI", osc[i].semi, -24, 24), SIGNED("FINE", osc[i].fine, -50, 50)},       \
+     PAGE_PARAMS, COLOR_OSC, 0}
 #define ENV_PAGE(title, i)                                                                   \
     {title, 4,                                                                               \
      {SLIDER("ATTACK", env[i].attack, 0, 100), SLIDER("DECAY", env[i].decay, 0, 100),     \
-      SLIDER("SUSTAIN", env[i].sustain, 0, 100), SLIDER("RELEASE", env[i].release, 0, 100)}, PAGE_PARAMS}
-#define MOD_PAGE(title, a, b)                                                               \
-    {title, 6,                                                                              \
-     {CHOICE("SRC", mod[a].source, source_names), CHOICE("DEST", mod[a].dest, dest_names), \
-      SIGNED("AMOUNT", mod[a].amount, -100, 100), CHOICE("SRC", mod[b].source, source_names), \
-      CHOICE("DEST", mod[b].dest, dest_names), SIGNED("AMOUNT", mod[b].amount, -100, 100)}, PAGE_PARAMS}
+      SLIDER("SUSTAIN", env[i].sustain, 0, 100), SLIDER("RELEASE", env[i].release, 0, 100)}, \
+     PAGE_PARAMS, COLOR_ENV, 0}
 
+/* In the order the page list shows them, three to a row. */
 static const page_t pages[] = {
-    {"RACK", 0, {{0}}, PAGE_RACK},
     OSC_PAGE("OSC 1", 0),
     OSC_PAGE("OSC 2", 1),
-    {"SUB+NOISE", 5,
+    {"UNISON", 4,
+     {SLIDER("UNI 1", osc[0].unison, 1, PSYNTH_UNISON_MAX), SLIDER("DET 1", osc[0].detune, 0, 100),
+      SLIDER("UNI 2", osc[1].unison, 1, PSYNTH_UNISON_MAX), SLIDER("DET 2", osc[1].detune, 0, 100)},
+     PAGE_PARAMS, COLOR_OSC, 0},
+    {"VOICE", 3,
+     {CHOICE("MODE", mono, mode_names), SLIDER("GLIDE", glide, 0, 100), SLIDER("VOLUME", volume, 0, 100)},
+     PAGE_PARAMS, COLOR_OSC, 0},
+    {"SUB+NOISE", 4,
      {SLIDER("SUB", sub_level, 0, 100), CHOICE("SUB WAVE", sub_shape, sub_names),
-      SLIDER("NOISE", noise_level, 0, 100), SLIDER("COLOR", noise_color, 0, 100),
-      SLIDER("VOLUME", volume, 0, 100)}, PAGE_PARAMS},
+      SLIDER("NOISE", noise_level, 0, 100), SLIDER("COLOR", noise_color, 0, 100)}, PAGE_PARAMS, COLOR_OSC, 0},
     {"FILTER 1", 6,
      {CHOICE("TYPE", filter[0].type, filter_names), SLIDER("CUTOFF", filter[0].cutoff, 0, 100),
       SLIDER("RESO", filter[0].resonance, 0, 100), SLIDER("DRIVE", filter[0].drive, 0, 100),
-      SLIDER("KEYTRK", keytrack, 0, 100), CHOICE("ROUTING", routing, routing_names)}, PAGE_PARAMS},
+      SLIDER("KEYTRK", keytrack, 0, 100), CHOICE("ROUTING", routing, routing_names)},
+     PAGE_PARAMS, COLOR_FILTER, 0},
     {"FILTER 2", 4,
      {CHOICE("TYPE", filter[1].type, filter_names), SLIDER("CUTOFF", filter[1].cutoff, 0, 100),
-      SLIDER("RESO", filter[1].resonance, 0, 100), SLIDER("DRIVE", filter[1].drive, 0, 100)}, PAGE_PARAMS},
+      SLIDER("RESO", filter[1].resonance, 0, 100), SLIDER("DRIVE", filter[1].drive, 0, 100)},
+     PAGE_PARAMS, COLOR_FILTER, 0},
     ENV_PAGE("AMP ENV", 0),
     ENV_PAGE("MOD ENV", 1),
     {"LFOS", 6,
      {CHOICE("LFO1", lfo[0].shape, lfo_names), SLIDER("L1 RATE", lfo[0].rate, 0, 100),
       CHOICE("L1 SYNC", lfo[0].sync, sync_names), CHOICE("LFO2", lfo[1].shape, lfo_names),
-      SLIDER("L2 RATE", lfo[1].rate, 0, 100), CHOICE("L2 SYNC", lfo[1].sync, sync_names)}, PAGE_PARAMS},
-    MOD_PAGE("MOD 1-2", 0, 1),
-    MOD_PAGE("MOD 3-4", 2, 3),
-    MOD_PAGE("MOD 5-6", 4, 5),
-    MOD_PAGE("MOD 7-8", 6, 7),
+      SLIDER("L2 RATE", lfo[1].rate, 0, 100), CHOICE("L2 SYNC", lfo[1].sync, sync_names)},
+     PAGE_PARAMS, COLOR_MOD, 0},
+    {"MOD 1-6", 6, {{0}}, PAGE_MATRIX, COLOR_MOD, 0},
+    {"MOD 7-8", 2, {{0}}, PAGE_MATRIX, COLOR_MOD, 6},
     {"FX 1", 5,
      {SLIDER("DRIVE", drive, 0, 100), SLIDER("CHORUS", chorus, 0, 100),
       CHOICE("DLY TIME", delay_time, delay_names), SLIDER("DLY FDBK", delay_feedback, 0, 100),
-      SLIDER("DLY MIX", delay_mix, 0, 100)}, PAGE_PARAMS},
+      SLIDER("DLY MIX", delay_mix, 0, 100)}, PAGE_PARAMS, COLOR_FX, 0},
     {"FX 2", 3,
      {SLIDER("REV SIZE", reverb_size, 0, 100), SLIDER("REV MIX", reverb_mix, 0, 100),
-      SLIDER("VOLUME", volume, 0, 100)}, PAGE_PARAMS},
-    {"SAMPLES", 0, {{0}}, PAGE_SAMPLES},
+      SLIDER("VOLUME", volume, 0, 100)}, PAGE_PARAMS, COLOR_FX, 0},
+    {"RACK", 0, {{0}}, PAGE_RACK, COLOR_RACK, 0},
+    {"SAMPLES", 0, {{0}}, PAGE_SAMPLES, COLOR_RACK, 0},
 };
 #define PAGES ((int)(sizeof(pages) / sizeof(pages[0])))
+
+/* The page list: three columns, with PRESETS after the pages. */
+#define LIST_COLUMNS 3
+_Static_assert(PAGES + 1 <= PARAM_ROWS * LIST_COLUMNS, "the page list has no room for PRESETS");
+static const span_t LIST_SPANS[LIST_COLUMNS] = {{0, 9}, {9, 9}, {18, 8}};
+
+/* The presets: categories on the first row, two columns of four, then
+   LOAD (whole patch or oscillators only), UNDO, INIT and DONE. */
+#define PRESET_ROWS 4
+#define PRESETS_SHOWN (2 * PRESET_ROWS)
+static const span_t CATEGORY_SPANS[CATEGORIES] = {{0, 5}, {5, 5}, {10, 5}, {15, 5}, {20, 6}};
+static const span_t HALF_SPANS[2] = {{0, 13}, {13, 13}};
+static const span_t LOAD_SPAN = {0, 10};
+static const span_t UNDO_SPAN = {10, 5};
+static const span_t INIT_SPAN = {15, 5};
+static const span_t DONE_SPAN = {20, 6};
+
+/* A choice's list: its name and BACK, then two columns of five. */
+#define CHOICE_ROWS 5
+static const span_t BACK_SPAN = {20, 6};
+
+/* A mod matrix row. */
+static const span_t SOURCE_SPAN = {0, 7};
+static const span_t DEST_SPAN = {7, 9};
 
 /* ---- State ---------------------------------------------------------------------------- */
 
@@ -169,10 +226,19 @@ typedef struct {
     uint16_t bg[COLUMNS];
 } row_t;
 
+/* What rows 2-7 show over the page's settings. */
+typedef enum { OVERLAY_NONE, OVERLAY_PAGES, OVERLAY_PRESETS, OVERLAY_CHOICE } overlay_t;
+
 static int slot;
 static int page;
 static int base_note = 48; /* C3 */
-static bool init_armed;
+static overlay_t overlay;
+static int category;
+static bool osc_only;
+static psynth_patch_t undo_patch;
+static int undo_slot = -1;
+static param_t choice;
+static char choice_title[COLUMNS + 1];
 static row_t drawn_header;
 static row_t drawn_page_row;
 static int drawn_values[PARAM_ROWS];
@@ -183,9 +249,16 @@ static TickType_t scope_at;
 /* The sample the test keys play on the SAMPLES page, or -1 for the patch. */
 static int chosen_sample = -1;
 static char sample_status[COLUMNS + 1];
-/* What the custom pages showed, so they redraw only on a change. */
+/* What the custom pages and the overlays showed, so they redraw only on a change. */
 static uint32_t drawn_custom = 0xFFFFFFFFu;
 static bool dragging;
+/* A short message over the patch name, such as "SAVED AS S2". */
+static char notice[COLUMNS + 1];
+static TickType_t notice_until;
+/* The sample SAMPLE made last, and whether the patch is unchanged since:
+   then TO ROLL takes the sample, else the patch. */
+static int last_sample = -1;
+static bool sampled;
 
 /* Test keys: the note under each finger, or -1. */
 static volatile int test_instrument;
@@ -220,6 +293,20 @@ static void put_span(row_t *row, span_t span, const char *label, uint16_t fg, ui
     memcpy(row->text + start, label, (size_t)length);
 }
 
+static void draw_row(int screen_row, const row_t *row)
+{
+    ESP_ERROR_CHECK(cyd_draw_cells(screen_row, row->text, row->fg, row->bg));
+}
+
+/* Thin black lines between cells that touch, after a row of buttons. */
+static void draw_dividers(int screen_row, const span_t *spans, int count)
+{
+    for (int i = 1; i < count; ++i) {
+        ESP_ERROR_CHECK(cyd_fill_rect(spans[i].column * FW - 1, screen_row * FH, 2, FH, CYD_COLOR_BLACK));
+    }
+    ESP_ERROR_CHECK(cyd_fill_rect(0, screen_row * FH, CYD_LCD_WIDTH, 2, CYD_COLOR_BLACK));
+}
+
 static int get_value(const param_t *param)
 {
     const uint8_t *field = (const uint8_t *)psynth_patch(slot) + param->offset;
@@ -233,9 +320,23 @@ static void set_value(const param_t *param, int value)
     *field = (uint8_t)(param->is_signed ? (uint8_t)(int8_t)value : (uint8_t)value);
 }
 
-static uint16_t patch_color(void)
+/* A matrix slot's settings as params, so the shared code sets them. */
+static param_t matrix_param(int mod, int which)
 {
-    return 0xFAD2; /* the PATCH voice's pink */
+    size_t base = offsetof(psynth_patch_t, mod) + (size_t)mod * sizeof(psynth_mod_t);
+    switch (which) {
+    case 0:
+        return (param_t){"SOURCE", base + offsetof(psynth_mod_t, source), 0, MOD_SOURCES - 1, false, source_names};
+    case 1:
+        return (param_t){"DEST", base + offsetof(psynth_mod_t, dest), 0, MOD_DESTS - 1, false, dest_names};
+    default:
+        return (param_t){"AMOUNT", base + offsetof(psynth_mod_t, amount), -100, 100, true, NULL};
+    }
+}
+
+static int option_count(const param_t *param)
+{
+    return param->max - param->min + 1;
 }
 
 /* ---- Drawing ----------------------------------------------------------------------------- */
@@ -257,11 +358,11 @@ static void draw_header(void)
     put_span(&row, BPM_UP_SPAN, "+", CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
     char slot_name[4];
     snprintf(slot_name, sizeof(slot_name), "P%d", slot + 1);
-    put_span(&row, SLOT_SPAN, slot_name, CYD_COLOR_BLACK, patch_color());
+    put_span(&row, SLOT_SPAN, slot_name, CYD_COLOR_BLACK, COLOR_OSC);
     put_span(&row, SWITCH_SPAN, "KEYS", CYD_COLOR_WHITE, DK_KEYS_COLOR);
     put_span(&row, MENU_SPAN, "MENU", CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
     if (memcmp(&row, &drawn_header, sizeof(row)) != 0) {
-        ESP_ERROR_CHECK(cyd_draw_cells(0, row.text, row.fg, row.bg));
+        draw_row(0, &row);
         dk_header_gaps();
         drawn_header = row;
     }
@@ -272,15 +373,47 @@ static void draw_page_row(void)
     row_t row;
     clear_row(&row, CYD_COLOR_WHITE);
     put_span(&row, PREV_SPAN, "<", CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
-    put_span(&row, TITLE_SPAN, pages[page].title, CYD_COLOR_BLACK, CYD_COLOR_CYAN);
+    bool listing = overlay == OVERLAY_PAGES;
+    put_span(&row, TITLE_SPAN, listing ? "PAGES" : pages[page].title, CYD_COLOR_BLACK,
+             listing ? CYD_COLOR_WHITE : pages[page].color);
     put_span(&row, NEXT_SPAN, ">", CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
-    put_span(&row, NAME_SPAN, psynth_patch(slot)->name, CYD_COLOR_YELLOW, CYD_COLOR_BLACK);
-    put_span(&row, INIT_SPAN, init_armed ? "INIT?" : "INIT", CYD_COLOR_WHITE,
-             init_armed ? CYD_COLOR_RED : CYD_COLOR_BUTTON);
+    bool presets = overlay == OVERLAY_PRESETS;
+    if (notice[0] != '\0' && (int32_t)(xTaskGetTickCount() - notice_until) < 0) {
+        put_span(&row, NAME_SPAN, notice, CYD_COLOR_BLACK, COLOR_SCOPE);
+    } else {
+        notice[0] = '\0';
+        put_span(&row, NAME_SPAN, psynth_patch(slot)->name, presets ? CYD_COLOR_BLACK : CYD_COLOR_YELLOW,
+                 presets ? CYD_COLOR_YELLOW : CYD_COLOR_BUTTON);
+    }
     if (memcmp(&row, &drawn_page_row, sizeof(row)) != 0) {
-        ESP_ERROR_CHECK(cyd_draw_cells(PAGE_ROW, row.text, row.fg, row.bg));
+        draw_row(PAGE_ROW, &row);
         drawn_page_row = row;
     }
+}
+
+/* A slider's bar for value in min..max, from x, width wide; a signed one
+   fills from its middle mark. */
+static void draw_bar(int screen_row, int x, int width, int value, int min, int max, uint16_t color)
+{
+    int y = screen_row * FH + FH / 4;
+    int height = FH / 2;
+    int span = max - min;
+    int position = x + (value - min) * width / span;
+    int zero = min < 0 ? x + (0 - min) * width / span : x;
+    ESP_ERROR_CHECK(cyd_fill_rect(x, y, width, height, COLOR_TRACK));
+    int from = position < zero ? position : zero;
+    int to = position < zero ? zero : position;
+    if (to > from) {
+        ESP_ERROR_CHECK(cyd_fill_rect(from, y, to - from, height, color));
+    }
+    if (min < 0) {
+        ESP_ERROR_CHECK(cyd_fill_rect(zero - 1, y - 4, 2, height + 8, COLOR_ZERO));
+    }
+    int thumb = position - 3 < x ? x : position - 3;
+    if (thumb + 6 > x + width) {
+        thumb = x + width - 6;
+    }
+    ESP_ERROR_CHECK(cyd_fill_rect(thumb, y - 6, 6, height + 12, CYD_COLOR_WHITE));
 }
 
 static void draw_param(int index)
@@ -298,32 +431,55 @@ static void draw_param(int index)
     if (param->choices != NULL) {
         memcpy(row.text, param->label, strnlen(param->label, LABEL_COLUMNS));
         put_span(&row, CHOICE_SPAN, param->choices[value], CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
-        ESP_ERROR_CHECK(cyd_draw_cells(screen_row, row.text, row.fg, row.bg));
+        draw_row(screen_row, &row);
         return;
     }
     char label[LABEL_COLUMNS + 8];
     snprintf(label, sizeof(label), "%-5.5s%4d", param->label, value);
     memcpy(row.text, label, strnlen(label, LABEL_COLUMNS));
-    ESP_ERROR_CHECK(cyd_draw_cells(screen_row, row.text, row.fg, row.bg));
-    int y = screen_row * FH + FH / 4;
-    int height = FH / 2;
-    int span = param->max - param->min;
-    int position = BAR_X + (value - param->min) * BAR_WIDTH / span;
-    int zero = param->min < 0 ? BAR_X + (0 - param->min) * BAR_WIDTH / span : BAR_X;
-    ESP_ERROR_CHECK(cyd_fill_rect(BAR_X, y, BAR_WIDTH, height, COLOR_TRACK));
-    int from = position < zero ? position : zero;
-    int to = position < zero ? zero : position;
-    if (to > from) {
-        ESP_ERROR_CHECK(cyd_fill_rect(from, y, to - from, height, patch_color()));
+    draw_row(screen_row, &row);
+    draw_bar(screen_row, BAR_X, BAR_WIDTH, value, param->min, param->max, p->color);
+}
+
+/* A matrix row: SOURCE and DEST buttons, the amount and its bar. */
+static void draw_matrix_row(int index)
+{
+    int screen_row = FIRST_PARAM_ROW + index;
+    const page_t *p = &pages[page];
+    if (index >= p->count) {
+        ESP_ERROR_CHECK(cyd_fill_rect(0, screen_row * FH, CYD_LCD_WIDTH, FH, CYD_COLOR_BLACK));
+        return;
     }
-    if (param->min < 0) {
-        ESP_ERROR_CHECK(cyd_fill_rect(zero - 1, y - 4, 2, height + 8, COLOR_ZERO));
+    const psynth_mod_t *mod = &psynth_patch(slot)->mod[p->first + index];
+    row_t row;
+    clear_row(&row, CYD_COLOR_WHITE);
+    bool on = mod->source != SOURCE_NONE && mod->dest != DEST_NONE;
+    put_span(&row, SOURCE_SPAN, source_names[mod->source % MOD_SOURCES],
+             mod->source != SOURCE_NONE ? CYD_COLOR_BLACK : CYD_COLOR_WHITE,
+             mod->source != SOURCE_NONE ? COLOR_MOD : CYD_COLOR_BUTTON);
+    put_span(&row, DEST_SPAN, dest_names[mod->dest % MOD_DESTS],
+             mod->dest != DEST_NONE ? CYD_COLOR_BLACK : CYD_COLOR_WHITE,
+             mod->dest != DEST_NONE ? COLOR_MOD : CYD_COLOR_BUTTON);
+    char amount[8];
+    snprintf(amount, sizeof(amount), "%+4d", mod->amount);
+    memcpy(row.text + MATRIX_VALUE_COLUMN, amount, 4);
+    draw_row(screen_row, &row);
+    draw_dividers(screen_row, (const span_t[]){SOURCE_SPAN, DEST_SPAN}, 2);
+    draw_bar(screen_row, MATRIX_BAR_X, MATRIX_BAR_WIDTH, mod->amount, -100, 100, on ? COLOR_MOD : COLOR_ZERO);
+}
+
+/* What a settings row shows, as a number, so it redraws on a change. */
+static int row_value(int index)
+{
+    const page_t *p = &pages[page];
+    if (index >= p->count) {
+        return -9999;
     }
-    int thumb = position - 3 < BAR_X ? BAR_X : position - 3;
-    if (thumb + 6 > BAR_X + BAR_WIDTH) {
-        thumb = BAR_X + BAR_WIDTH - 6;
+    if (p->kind == PAGE_MATRIX) {
+        const psynth_mod_t *mod = &psynth_patch(slot)->mod[p->first + index];
+        return (mod->source << 16) | (mod->dest << 8) | (uint8_t)mod->amount;
     }
-    ESP_ERROR_CHECK(cyd_fill_rect(thumb, y - 6, 6, height + 12, CYD_COLOR_WHITE));
+    return get_value(&p->params[index]);
 }
 
 static void draw_scope_row_buttons(void)
@@ -332,7 +488,12 @@ static void draw_scope_row_buttons(void)
     clear_row(&row, CYD_COLOR_WHITE);
     put_span(&row, OCT_DOWN_SPAN, "OC-", CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
     put_span(&row, OCT_UP_SPAN, "OC+", CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
-    ESP_ERROR_CHECK(cyd_draw_cells(SCOPE_ROW, row.text, row.fg, row.bg));
+    put_span(&row, SAMPLE_SPAN, "SAMPLE", CYD_COLOR_WHITE, CYD_COLOR_RED);
+    put_span(&row, TO_ROLL_SPAN, "TO ROLL", CYD_COLOR_WHITE, DK_ROLL_COLOR);
+    draw_row(SCOPE_ROW, &row);
+    const span_t buttons[] = {OCT_DOWN_SPAN, OCT_UP_SPAN};
+    draw_dividers(SCOPE_ROW, buttons, 2);
+    ESP_ERROR_CHECK(cyd_fill_rect(TO_ROLL_SPAN.column * FW - 1, SCOPE_ROW * FH, 2, FH, CYD_COLOR_BLACK));
 }
 
 /* The oscilloscope: the edited patch's last few ms, from a rising zero
@@ -381,29 +542,12 @@ static void draw_test_keys(void)
     }
 }
 
-/* A slider bar for a 0-100 value in a row, from BAR_X. */
-static void draw_bar(int screen_row, int value, uint16_t color)
-{
-    int y = screen_row * FH + FH / 4;
-    int height = FH / 2;
-    int position = BAR_X + value * BAR_WIDTH / 100;
-    ESP_ERROR_CHECK(cyd_fill_rect(BAR_X, y, BAR_WIDTH, height, COLOR_TRACK));
-    if (position > BAR_X) {
-        ESP_ERROR_CHECK(cyd_fill_rect(BAR_X, y, position - BAR_X, height, color));
-    }
-    int thumb = position - 3 < BAR_X ? BAR_X : position - 3;
-    if (thumb + 6 > BAR_X + BAR_WIDTH) {
-        thumb = BAR_X + BAR_WIDTH - 6;
-    }
-    ESP_ERROR_CHECK(cyd_fill_rect(thumb, y - 6, 6, height + 12, CYD_COLOR_WHITE));
-}
-
 static void draw_text_row(int screen_row, const char *text, uint16_t fg)
 {
     row_t row;
     clear_row(&row, fg);
     memcpy(row.text, text, strnlen(text, COLUMNS));
-    ESP_ERROR_CHECK(cyd_draw_cells(screen_row, row.text, row.fg, row.bg));
+    draw_row(screen_row, &row);
 }
 
 static const span_t RACK_LAYER_SPAN = {LABEL_COLUMNS, COLUMNS - LABEL_COLUMNS};
@@ -411,23 +555,34 @@ static const span_t RACK_TOGGLE_SPAN = {0, 4};
 static const span_t SAMPLE_SAVE_SPAN = {LABEL_COLUMNS, 8};
 static const span_t SAMPLE_PLAY_SPAN = {LABEL_COLUMNS + 9, COLUMNS - LABEL_COLUMNS - 9};
 
-/* A number standing for what a custom page shows. */
+static uint32_t hash_bytes(uint32_t sig, const void *data, size_t size)
+{
+    const uint8_t *bytes = data;
+    for (size_t i = 0; i < size; ++i) {
+        sig = (sig ^ bytes[i]) * 16777619u;
+    }
+    return sig;
+}
+
+/* A number standing for what a custom page or an overlay shows. */
 static uint32_t custom_signature(void)
 {
     uint32_t sig = 2166136261u;
-    const psynth_rack_t *rack = psynth_rack();
-    const uint8_t *bytes = (const uint8_t *)rack;
-    for (size_t i = 0; i < sizeof(*rack); ++i) {
-        sig = (sig ^ bytes[i]) * 16777619u;
+    int words[] = {overlay, page, slot, category, osc_only, undo_slot, chosen_sample, psynth_slot_preset(slot)};
+    sig = hash_bytes(sig, words, sizeof(words));
+    if (overlay == OVERLAY_CHOICE) {
+        int value = get_value(&choice);
+        sig = hash_bytes(sig, &value, sizeof(value));
     }
+    if (overlay == OVERLAY_PRESETS) {
+        sig = hash_bytes(sig, psynth_patch(slot)->name, PSYNTH_NAME_MAX);
+    }
+    sig = hash_bytes(sig, psynth_rack(), sizeof(psynth_rack_t));
     for (int i = 0; i < PSYNTH_SAMPLES; ++i) {
-        sig = (sig ^ (uint32_t)(psynth_sample_seconds(i) * 100.0f)) * 16777619u;
+        uint32_t tenths = (uint32_t)(psynth_sample_seconds(i) * 10.0f);
+        sig = hash_bytes(sig, &tenths, sizeof(tenths));
     }
-    for (const char *c = sample_status; *c != '\0'; ++c) {
-        sig = (sig ^ (uint8_t)*c) * 16777619u;
-    }
-    sig ^= (uint32_t)(chosen_sample + 7) * 977u + (uint32_t)slot * 31u;
-    return sig;
+    return hash_bytes(sig, sample_status, strlen(sample_status));
 }
 
 static void draw_rack(void)
@@ -439,19 +594,19 @@ static void draw_rack(void)
     put_span(&row, RACK_LAYER_SPAN, rack->layer ? "ON: KEYS PLAY ALL ON" : "OFF: ONE PATCH AT A TIME",
              rack->layer ? CYD_COLOR_BLACK : CYD_COLOR_WHITE,
              rack->layer ? CYD_COLOR_CYAN : CYD_COLOR_BUTTON);
-    ESP_ERROR_CHECK(cyd_draw_cells(FIRST_PARAM_ROW, row.text, row.fg, row.bg));
+    draw_row(FIRST_PARAM_ROW, &row);
     for (int i = 0; i < PSYNTH_SLOTS; ++i) {
         int screen_row = FIRST_PARAM_ROW + 1 + i;
         clear_row(&row, CYD_COLOR_WHITE);
         char name[8];
         snprintf(name, sizeof(name), "P%d", i + 1);
         put_span(&row, RACK_TOGGLE_SPAN, name, rack->on[i] ? CYD_COLOR_BLACK : CYD_COLOR_GRAY,
-                 rack->on[i] ? patch_color() : CYD_COLOR_BUTTON_DISABLED);
+                 rack->on[i] ? COLOR_OSC : CYD_COLOR_BUTTON_DISABLED);
         char level[8];
         snprintf(level, sizeof(level), "%4d", rack->level[i]);
         memcpy(row.text + 4, level, 4);
-        ESP_ERROR_CHECK(cyd_draw_cells(screen_row, row.text, row.fg, row.bg));
-        draw_bar(screen_row, rack->level[i], rack->on[i] ? patch_color() : COLOR_ZERO);
+        draw_row(screen_row, &row);
+        draw_bar(screen_row, BAR_X, BAR_WIDTH, rack->level[i], 0, 100, rack->on[i] ? COLOR_OSC : COLOR_ZERO);
     }
     char hint[COLUMNS + 1];
     snprintf(hint, sizeof(hint), " P1-P4 ON: in the layer. %s", psynth_patch(slot)->name);
@@ -479,10 +634,109 @@ static void draw_samples(void)
         put_span(&row, SAMPLE_PLAY_SPAN, seconds > 0.0f ? (chosen ? "ON TEST KEYS" : "PLAY ON KEYS") : "-",
                  chosen ? CYD_COLOR_BLACK : CYD_COLOR_WHITE,
                  seconds > 0.0f ? (chosen ? CYD_COLOR_CYAN : CYD_COLOR_BUTTON) : CYD_COLOR_BUTTON_DISABLED);
-        ESP_ERROR_CHECK(cyd_draw_cells(screen_row, row.text, row.fg, row.bg));
+        draw_row(screen_row, &row);
     }
     draw_text_row(FIRST_PARAM_ROW + 4, sample_status, CYD_COLOR_YELLOW);
     draw_text_row(FIRST_PARAM_ROW + 5, " Samples play as PATCH styles S1-S4; ROLL: INST", CYD_COLOR_GRAY);
+}
+
+/* Every page, three to a row in its group's color, and PRESETS. */
+static void draw_page_list(void)
+{
+    for (int r = 0; r < PARAM_ROWS; ++r) {
+        row_t row;
+        clear_row(&row, CYD_COLOR_WHITE);
+        for (int c = 0; c < LIST_COLUMNS; ++c) {
+            int i = r * LIST_COLUMNS + c;
+            if (i < PAGES) {
+                bool here = i == page;
+                put_span(&row, LIST_SPANS[c], pages[i].title, here ? CYD_COLOR_WHITE : CYD_COLOR_BLACK,
+                         here ? CYD_COLOR_BLACK : pages[i].color);
+            } else if (i == PAGES) {
+                put_span(&row, LIST_SPANS[c], "PRESETS", CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
+            }
+        }
+        draw_row(FIRST_PARAM_ROW + r, &row);
+        draw_dividers(FIRST_PARAM_ROW + r, LIST_SPANS, LIST_COLUMNS);
+    }
+}
+
+/* The presets in the chosen category, up to PRESETS_SHOWN. */
+static int category_presets(int *out)
+{
+    int count = 0;
+    for (int i = 0; i < psynth_preset_count() && count < PRESETS_SHOWN; ++i) {
+        if (psynth_preset_category(i) == category) {
+            out[count++] = i;
+        }
+    }
+    return count;
+}
+
+static void draw_presets(void)
+{
+    row_t row;
+    clear_row(&row, CYD_COLOR_WHITE);
+    for (int c = 0; c < CATEGORIES; ++c) {
+        bool here = c == category;
+        put_span(&row, CATEGORY_SPANS[c], psynth_category_name(c), here ? CYD_COLOR_BLACK : CYD_COLOR_WHITE,
+                 here ? CYD_COLOR_YELLOW : CYD_COLOR_BUTTON);
+    }
+    draw_row(FIRST_PARAM_ROW, &row);
+    draw_dividers(FIRST_PARAM_ROW, CATEGORY_SPANS, CATEGORIES);
+
+    int list[PRESETS_SHOWN];
+    int count = category_presets(list);
+    int current = psynth_slot_preset(slot);
+    for (int r = 0; r < PRESET_ROWS; ++r) {
+        clear_row(&row, CYD_COLOR_WHITE);
+        for (int c = 0; c < 2; ++c) {
+            int i = c * PRESET_ROWS + r;
+            if (i < count) {
+                bool here = list[i] == current;
+                put_span(&row, HALF_SPANS[c], psynth_preset_name(list[i]), here ? CYD_COLOR_BLACK : CYD_COLOR_WHITE,
+                         here ? COLOR_OSC : CYD_COLOR_BUTTON);
+            }
+        }
+        draw_row(FIRST_PARAM_ROW + 1 + r, &row);
+        draw_dividers(FIRST_PARAM_ROW + 1 + r, HALF_SPANS, 2);
+    }
+
+    clear_row(&row, CYD_COLOR_WHITE);
+    put_span(&row, LOAD_SPAN, osc_only ? "OSC ONLY" : "LOAD ALL", CYD_COLOR_BLACK,
+             osc_only ? COLOR_FILTER : CYD_COLOR_CYAN);
+    bool can_undo = undo_slot == slot;
+    put_span(&row, UNDO_SPAN, "UNDO", can_undo ? CYD_COLOR_WHITE : CYD_COLOR_GRAY,
+             can_undo ? CYD_COLOR_BUTTON : CYD_COLOR_BUTTON_DISABLED);
+    put_span(&row, INIT_SPAN, "INIT", CYD_COLOR_WHITE, CYD_COLOR_RED);
+    put_span(&row, DONE_SPAN, "DONE", CYD_COLOR_WHITE, 0x0560);
+    draw_row(FIRST_PARAM_ROW + 5, &row);
+    const span_t tools[] = {LOAD_SPAN, UNDO_SPAN, INIT_SPAN, DONE_SPAN};
+    draw_dividers(FIRST_PARAM_ROW + 5, tools, 4);
+}
+
+static void draw_choice(void)
+{
+    row_t row;
+    clear_row(&row, CYD_COLOR_CYAN);
+    memcpy(row.text, choice_title, strnlen(choice_title, BACK_SPAN.column));
+    put_span(&row, BACK_SPAN, "BACK", CYD_COLOR_WHITE, CYD_COLOR_BUTTON);
+    draw_row(FIRST_PARAM_ROW, &row);
+    int value = get_value(&choice);
+    int count = option_count(&choice);
+    for (int r = 0; r < CHOICE_ROWS; ++r) {
+        clear_row(&row, CYD_COLOR_WHITE);
+        for (int c = 0; c < 2; ++c) {
+            int i = c * CHOICE_ROWS + r;
+            if (i < count) {
+                bool here = choice.min + i == value;
+                put_span(&row, HALF_SPANS[c], choice.choices[i], here ? CYD_COLOR_BLACK : CYD_COLOR_WHITE,
+                         here ? pages[page].color : CYD_COLOR_BUTTON);
+            }
+        }
+        draw_row(FIRST_PARAM_ROW + 1 + r, &row);
+        draw_dividers(FIRST_PARAM_ROW + 1 + r, HALF_SPANS, 2);
+    }
 }
 
 /* ---- Touch ------------------------------------------------------------------------------- */
@@ -539,14 +793,53 @@ static void update_test_instrument(void)
     test_instrument = synth_instrument(VOICE_PATCH, sample ? PSYNTH_SLOTS + chosen_sample : slot);
 }
 
-static void set_slot(int new_slot)
+static void lift_test_keys(void)
 {
     keys_all_notes_off();
     memset(finger_notes, 0xFF, sizeof(finger_notes));
+}
+
+static void set_slot(int new_slot)
+{
+    sampled = false;
+    lift_test_keys();
     slot = new_slot;
     update_test_instrument();
     psynth_set_scope_slot(slot);
-    init_armed = false;
+}
+
+static void set_page(int new_page)
+{
+    page = (new_page + PAGES) % PAGES;
+    overlay = OVERLAY_NONE;
+    update_test_instrument();
+}
+
+/* Shows rows 2-7 as an overlay, or the page again with OVERLAY_NONE. */
+static void set_overlay(overlay_t new_overlay)
+{
+    overlay = new_overlay;
+    drawn_page = -1; /* rows 2-7 are drawn from scratch */
+}
+
+static void open_choice(const param_t *param, const char *title)
+{
+    choice = *param;
+    snprintf(choice_title, sizeof(choice_title), " %s", title);
+    set_overlay(OVERLAY_CHOICE);
+}
+
+/* A choice: up to three options step on a tap; more open a list. */
+static void tap_choice(const param_t *param)
+{
+    if (option_count(param) <= 3) {
+        int value = get_value(param) + 1;
+        set_value(param, value > param->max ? param->min : value);
+    } else {
+        char title[COLUMNS + 1];
+        snprintf(title, sizeof(title), "%s %s", pages[page].title, param->label);
+        open_choice(param, title);
+    }
 }
 
 static void tap_header(int column, const looper_state_t *state)
@@ -570,21 +863,17 @@ static void tap_header(int column, const looper_state_t *state)
 static void tap_page_row(int column)
 {
     if (in_span(PREV_SPAN, column)) {
-        page = (page + PAGES - 1) % PAGES;
-        init_armed = false;
-        update_test_instrument();
+        set_page(page - 1);
     } else if (in_span(NEXT_SPAN, column)) {
-        page = (page + 1) % PAGES;
-        init_armed = false;
-        update_test_instrument();
-    } else if (in_span(INIT_SPAN, column)) {
-        if (init_armed) {
-            psynth_reset(slot);
-            init_armed = false;
-            drawn_page = -1; /* every value may have changed */
-        } else {
-            init_armed = true;
+        set_page(page + 1);
+    } else if (in_span(TITLE_SPAN, column)) {
+        set_overlay(overlay == OVERLAY_PAGES ? OVERLAY_NONE : OVERLAY_PAGES);
+    } else if (in_span(NAME_SPAN, column)) {
+        if (overlay != OVERLAY_PRESETS) {
+            int current = psynth_preset_category(psynth_slot_preset(slot));
+            category = current >= 0 ? current : category;
         }
+        set_overlay(overlay == OVERLAY_PRESETS ? OVERLAY_NONE : OVERLAY_PRESETS);
     }
 }
 
@@ -618,39 +907,179 @@ static void tap_samples(int index, int x)
     } else if (in_span(SAMPLE_PLAY_SPAN, column) && psynth_sample_seconds(index) > 0.0f) {
         chosen_sample = chosen_sample == index ? -1 : index;
     }
-    keys_all_notes_off();
-    memset(finger_notes, 0xFF, sizeof(finger_notes));
+    lift_test_keys();
     update_test_instrument();
+}
+
+static void tap_matrix(int index, int column)
+{
+    const page_t *p = &pages[page];
+    if (index >= p->count) {
+        return;
+    }
+    int mod = p->first + index;
+    char title[16];
+    if (in_span(SOURCE_SPAN, column)) {
+        param_t param = matrix_param(mod, 0);
+        snprintf(title, sizeof(title), "MOD %d SOURCE", mod + 1);
+        open_choice(&param, title);
+    } else if (in_span(DEST_SPAN, column)) {
+        param_t param = matrix_param(mod, 1);
+        snprintf(title, sizeof(title), "MOD %d DEST", mod + 1);
+        open_choice(&param, title);
+    }
 }
 
 static void tap_param(int index, int x)
 {
     const page_t *p = &pages[page];
-    if (p->kind == PAGE_RACK) {
+    if (p->kind == PAGE_PARAMS || p->kind == PAGE_MATRIX) {
+        sampled = false; /* a choice may change */
+    }
+    switch (p->kind) {
+    case PAGE_RACK:
         tap_rack(index, x);
         return;
-    }
-    if (p->kind == PAGE_SAMPLES) {
+    case PAGE_SAMPLES:
         tap_samples(index, x);
         return;
+    case PAGE_MATRIX:
+        tap_matrix(index, x / FW);
+        return;
+    default:
+        break;
     }
     if (index >= p->count) {
         return;
     }
     const param_t *param = &p->params[index];
     if (param->choices != NULL && x >= LABEL_COLUMNS * FW) {
-        int value = get_value(param) + 1;
-        set_value(param, value > param->max ? param->min : value);
+        tap_choice(param);
+    }
+}
+
+static void tap_page_list(int index, int column)
+{
+    for (int c = 0; c < LIST_COLUMNS; ++c) {
+        int i = index * LIST_COLUMNS + c;
+        if (!in_span(LIST_SPANS[c], column)) {
+            continue;
+        }
+        if (i < PAGES) {
+            set_page(i);
+            set_overlay(OVERLAY_NONE);
+        } else if (i == PAGES) {
+            set_overlay(OVERLAY_PRESETS);
+        }
+    }
+}
+
+/* Loads a preset into the patch, keeping what was there for UNDO. */
+static void load(int preset)
+{
+    sampled = false;
+    undo_patch = *psynth_patch(slot);
+    undo_slot = slot;
+    psynth_load(slot, preset, osc_only);
+}
+
+static void tap_presets(int index, int column)
+{
+    if (index == 0) {
+        for (int c = 0; c < CATEGORIES; ++c) {
+            if (in_span(CATEGORY_SPANS[c], column)) {
+                category = c;
+            }
+        }
+    } else if (index <= PRESET_ROWS) {
+        int list[PRESETS_SHOWN];
+        int count = category_presets(list);
+        int i = (column >= HALF_SPANS[1].column ? PRESET_ROWS : 0) + index - 1;
+        if (i < count) {
+            load(list[i]);
+        }
+    } else if (in_span(LOAD_SPAN, column)) {
+        osc_only = !osc_only;
+    } else if (in_span(UNDO_SPAN, column) && undo_slot == slot) {
+        *psynth_patch(slot) = undo_patch;
+        undo_slot = -1;
+    } else if (in_span(INIT_SPAN, column)) {
+        load(psynth_preset_init());
+    } else if (in_span(DONE_SPAN, column)) {
+        set_overlay(OVERLAY_NONE);
+    }
+}
+
+static void tap_choice_list(int index, int column)
+{
+    if (index == 0) {
+        if (in_span(BACK_SPAN, column)) {
+            set_overlay(OVERLAY_NONE);
+        }
+        return;
+    }
+    int i = (column >= HALF_SPANS[1].column ? CHOICE_ROWS : 0) + index - 1;
+    if (i < option_count(&choice)) {
+        sampled = false;
+        set_value(&choice, choice.min + i);
+        set_overlay(OVERLAY_NONE);
+    }
+}
+
+static void show_notice(const char *text)
+{
+    snprintf(notice, sizeof(notice), "%s", text);
+    notice_until = xTaskGetTickCount() + pdMS_TO_TICKS(NOTICE_MS);
+    draw_page_row();
+}
+
+/* SAMPLE: renders the patch into the next free sample slot, or the one
+   after the last made once all are full, and makes it the roll's style. */
+static void quick_sample(void)
+{
+    int target = -1;
+    for (int i = 0; i < PSYNTH_SAMPLES && target < 0; ++i) {
+        if (psynth_sample_seconds(i) <= 0.0f) {
+            target = i;
+        }
+    }
+    if (target < 0) {
+        target = (last_sample + 1) % PSYNTH_SAMPLES;
+    }
+    show_notice("SAMPLING...");
+    lift_test_keys();
+    if (!psynth_render_sample(slot, target)) {
+        show_notice("NO MEMORY");
+        return;
+    }
+    last_sample = target;
+    sampled = true;
+    keys_select_instrument(synth_instrument(VOICE_PATCH, PSYNTH_SLOTS + target));
+    char text[COLUMNS + 1];
+    snprintf(text, sizeof(text), "SAVED AS S%d", target + 1);
+    show_notice(text);
+    snprintf(sample_status, sizeof(sample_status), " Saved S%d: %.1f s of %s", target + 1,
+             (double)psynth_sample_seconds(target), psynth_patch(slot)->name);
+}
+
+/* TO ROLL: the roll's style becomes the sample just made, or the patch. */
+static void choose_for_roll(void)
+{
+    if (!sampled) {
+        keys_select_instrument(synth_instrument(VOICE_PATCH, slot));
     }
 }
 
 /* Fingers held on the sliders set them, so a drag sweeps a value. */
 static void follow_sliders(void)
 {
+    dragging = false;
+    if (overlay != OVERLAY_NONE) {
+        return;
+    }
     cyd_touch_point_t held[5];
     int count = cyd_touch_held(held, 5);
     const page_t *p = &pages[page];
-    dragging = false;
     for (int i = 0; i < count; ++i) {
         int index = held[i].y / FH - FIRST_PARAM_ROW;
         if (p->kind == PAGE_RACK) {
@@ -661,24 +1090,87 @@ static void follow_sliders(void)
             }
             continue;
         }
-        if (index < 0 || index >= p->count || held[i].x < BAR_X - FW) {
+        if (index < 0 || index >= p->count || p->kind == PAGE_SAMPLES) {
             continue;
+        }
+        param_t param;
+        int x = BAR_X, width = BAR_WIDTH;
+        if (p->kind == PAGE_MATRIX) {
+            if (held[i].x < MATRIX_BAR_X - FW) {
+                continue;
+            }
+            param = matrix_param(p->first + index, 2);
+            x = MATRIX_BAR_X;
+            width = MATRIX_BAR_WIDTH;
+        } else {
+            if (held[i].x < BAR_X - FW) {
+                continue;
+            }
+            param = p->params[index];
+            if (param.choices != NULL) {
+                continue;
+            }
         }
         dragging = true;
-        const param_t *param = &p->params[index];
-        if (param->choices != NULL) {
-            continue;
-        }
-        int span = param->max - param->min;
-        int value = param->min + ((held[i].x - BAR_X) * span + BAR_WIDTH / 2) / BAR_WIDTH;
-        if (param->min < 0 && value != 0 && abs(value) <= span / 24) {
+        sampled = false;
+        int span = param.max - param.min;
+        int value = param.min + ((held[i].x - x) * span + width / 2) / width;
+        if (param.min < 0 && value != 0 && abs(value) <= span / 24) {
             value = 0; /* snaps to the middle */
         }
-        set_value(param, value);
+        set_value(&param, value);
     }
 }
 
 /* ---- The screen ----------------------------------------------------------------------------- */
+
+static void draw_area(void)
+{
+    bool all = page != drawn_page || slot != drawn_slot;
+    bool custom = overlay != OVERLAY_NONE || pages[page].kind == PAGE_RACK || pages[page].kind == PAGE_SAMPLES;
+    if (custom) {
+        uint32_t sig = custom_signature();
+        if (all || sig != drawn_custom) {
+            if (all) {
+                ESP_ERROR_CHECK(cyd_fill_rect(0, FIRST_PARAM_ROW * FH, CYD_LCD_WIDTH, PARAM_ROWS * FH,
+                                              CYD_COLOR_BLACK));
+            }
+            switch (overlay) {
+            case OVERLAY_PAGES:
+                draw_page_list();
+                break;
+            case OVERLAY_PRESETS:
+                draw_presets();
+                break;
+            case OVERLAY_CHOICE:
+                draw_choice();
+                break;
+            default:
+                if (pages[page].kind == PAGE_RACK) {
+                    draw_rack();
+                } else {
+                    draw_samples();
+                }
+                break;
+            }
+            drawn_custom = sig;
+        }
+    } else {
+        for (int index = 0; index < PARAM_ROWS; ++index) {
+            int value = row_value(index);
+            if (all || value != drawn_values[index]) {
+                if (pages[page].kind == PAGE_MATRIX) {
+                    draw_matrix_row(index);
+                } else {
+                    draw_param(index);
+                }
+                drawn_values[index] = value;
+            }
+        }
+    }
+    drawn_page = page;
+    drawn_slot = slot;
+}
 
 static void leave(void)
 {
@@ -741,41 +1233,39 @@ void synth_screen(QueueHandle_t touch_queue)
                     base_note -= 12;
                 } else if (in_span(OCT_UP_SPAN, column) && base_note < 84) {
                     base_note += 12;
+                } else if (in_span(SAMPLE_SPAN, column)) {
+                    quick_sample();
+                    xQueueReset(touch_queue);
+                    break;
+                } else if (in_span(TO_ROLL_SPAN, column)) {
+                    choose_for_roll();
+                    leave();
+                    dk_next_screen = DK_ROLL;
+                    return;
                 }
             } else if (row >= FIRST_PARAM_ROW && row < FIRST_PARAM_ROW + PARAM_ROWS) {
-                tap_param(row - FIRST_PARAM_ROW, point.x);
+                int index = row - FIRST_PARAM_ROW;
+                switch (overlay) {
+                case OVERLAY_PAGES:
+                    tap_page_list(index, column);
+                    break;
+                case OVERLAY_PRESETS:
+                    tap_presets(index, column);
+                    break;
+                case OVERLAY_CHOICE:
+                    tap_choice_list(index, column);
+                    break;
+                default:
+                    tap_param(index, point.x);
+                    break;
+                }
             }
         }
         follow_sliders();
 
         draw_header();
         draw_page_row();
-        bool all = page != drawn_page || slot != drawn_slot;
-        if (pages[page].kind != PAGE_PARAMS) {
-            uint32_t sig = custom_signature();
-            if (all || sig != drawn_custom) {
-                if (all) {
-                    ESP_ERROR_CHECK(cyd_fill_rect(0, FIRST_PARAM_ROW * FH, CYD_LCD_WIDTH,
-                                                  PARAM_ROWS * FH, CYD_COLOR_BLACK));
-                }
-                if (pages[page].kind == PAGE_RACK) {
-                    draw_rack();
-                } else {
-                    draw_samples();
-                }
-                drawn_custom = sig;
-            }
-        } else {
-            for (int index = 0; index < PARAM_ROWS; ++index) {
-                int value = index < pages[page].count ? get_value(&pages[page].params[index]) : -9999;
-                if (all || value != drawn_values[index]) {
-                    draw_param(index);
-                    drawn_values[index] = value;
-                }
-            }
-        }
-        drawn_page = page;
-        drawn_slot = slot;
+        draw_area();
         if (base_note != drawn_base) {
             draw_test_keys();
             drawn_base = base_note;

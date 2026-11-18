@@ -106,6 +106,10 @@ d.rep('''    ESP_ERROR_CHECK(cyd_draw_cells(0, text, fg, bg));
     dk_header_gaps();
     memcpy(drawn_header, text, sizeof(drawn_header));''')
 d.rep('" DRUMLOOP SETTINGS"', '" DRUM&KEY: DRUM SETTINGS"')
+d.rep('''static char status_text[COLUMNS + 1] = " No speaker: silent";''',
+      '''/* One status line for both menus (dk_ui.c), so the output picked in
+   one shows in the other. */
+#define status_text dk_status_text''')
 d.rep('''void ui_run(QueueHandle_t touch_queue, drum_pattern_t *loop_pattern)
 {
     pattern = loop_pattern;
@@ -224,7 +228,24 @@ k.rep('''        case MENU_COUNT_IN:
             draw_count_in_row();
             break;
 ''', '')
-k.rep('" KEYBOARD SETTINGS"', '" DRUM&KEY: KEYS SETTINGS"')
+k.rep('" KEYBOARD SETTINGS"', 'menu_from_roll ? " DRUM&KEY: ROLL SETTINGS" : " DRUM&KEY: KEYS SETTINGS"')
+# The Piano Roll opens this menu too, named for it; CLEAR empties the keys
+# loop (what the roll edits) and leaves the drums.
+k.rep('''static char status_text[COLUMNS + 1] = " No speaker: silent";''',
+      '''/* One status line for both menus (dk_ui.c), so the output picked in
+   one shows in the other. */
+#define status_text dk_status_text
+static bool menu_from_roll;''')
+k.rep('''    draw_button_row(MENU_CLEAR, armed ? " CLEAR LOOP? TAP AGAIN" : " CLEAR LOOP");''',
+      '''    if (menu_from_roll) {
+        draw_button_row(MENU_CLEAR, armed ? " CLEAR ROLL? TAP AGAIN" : " CLEAR ROLL");
+    } else {
+        draw_button_row(MENU_CLEAR, armed ? " CLEAR LOOP? TAP AGAIN" : " CLEAR KEYS LOOP");
+    }''')
+k.rep('''    draw_button_row(MENU_BACK, " BACK TO KEYS");''',
+      '''    draw_button_row(MENU_BACK, menu_from_roll ? " BACK TO ROLL" : " BACK TO KEYS");''')
+k.rep('''                menu_status(" Loop cleared");''',
+      '''                menu_status(menu_from_roll ? " Roll cleared; drums kept" : " Keys loop cleared");''')
 k.rep('''void ui_run(QueueHandle_t touch_queue)
 {''', '''static void setup(void)
 {''')
@@ -278,10 +299,18 @@ int keys_current_instrument(void)
     return instrument;
 }
 
-/* The keys' settings menu, which the Piano Roll's MENU opens too. */
+/* The keys' settings menu, which SYNTH's MENU opens too. */
 void keys_menu(QueueHandle_t touch_queue)
 {
     run_menu(touch_queue);
+}
+
+/* The same menu for the Piano Roll's MENU, named for the roll. */
+void roll_menu(QueueHandle_t touch_queue)
+{
+    menu_from_roll = true;
+    run_menu(touch_queue);
+    menu_from_roll = false;
 }
 
 /* Makes chosen the keys' style (voice and style together), for the

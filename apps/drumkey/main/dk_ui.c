@@ -12,3 +12,5 @@ void dk_header_gaps(void)
                                       CYD_COLOR_BLACK));
     }
 }
+
+char dk_status_text[CYD_TEXT_COLUMNS + 1] = " No speaker: silent";

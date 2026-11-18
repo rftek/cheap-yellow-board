@@ -17,7 +17,8 @@
        per-note random value onto pitch, wavetable positions, detune,
        cutoffs, resonance, the second oscillator's level and the amp
      - effects: drive, chorus, tempo-synced delay and reverb
-   Up to 6 notes sound at once across the patches. The output is mono.
+   Up to 6 notes sound at once across the patches; a patch can be mono or
+   legato instead, with glide, for basses and leads. The output is mono.
 
    The rack: each patch has a level, and in LAYER mode a note on any patch
    plays every patch switched on in the rack, stacked.
@@ -122,6 +123,8 @@ typedef struct {
     uint8_t detune;   /* 0-100: up to 50 cents either side */
     int8_t semi;      /* -24 to +24 */
     uint8_t level;    /* 0-100 */
+    int8_t octave;    /* -3 to +3 */
+    int8_t fine;      /* -50 to +50 cents */
 } psynth_osc_t;
 
 typedef struct {
@@ -163,7 +166,41 @@ typedef struct {
     uint8_t delay_time, delay_feedback, delay_mix;
     uint8_t reverb_size, reverb_mix;
     uint8_t volume; /* 0-100 */
+    uint8_t mono;   /* psynth_mode_t */
+    uint8_t glide;  /* 0 off, 1-100: about 5 ms to 2 s to slide to a new note */
 } psynth_patch_t;
+
+typedef enum {
+    MODE_POLY,   /* up to 6 notes at once */
+    MODE_MONO,   /* one note: a new key takes the note over and restarts the envelopes */
+    MODE_LEGATO, /* one note: a key played while another is held slides without restarting */
+    MODES,
+} psynth_mode_t;
+
+/* The preset library, by category. */
+typedef enum {
+    CATEGORY_BASS,
+    CATEGORY_LEAD,
+    CATEGORY_PAD,
+    CATEGORY_KEYS,
+    CATEGORY_FX,
+    CATEGORIES,
+} psynth_category_t;
+
+int psynth_preset_count(void);
+const char *psynth_preset_name(int preset);
+const char *psynth_category_name(int category);
+/* A preset's category, or -1 for INIT, the plain starting patch. */
+int psynth_preset_category(int preset);
+int psynth_preset_init(void);
+
+/* Loads a preset into a slot: the whole patch, or with osc_only just the
+   sound sources (both oscillators, sub, noise, mode and glide), keeping the
+   slot's filters, envelopes, modulation and effects. */
+void psynth_load(int slot, int preset, bool osc_only);
+
+/* The preset a slot was last loaded from. */
+int psynth_slot_preset(int slot);
 
 typedef struct {
     uint8_t layer;                 /* 0 off, 1 on */
@@ -191,7 +228,7 @@ void psynth_init(void);
 
 psynth_patch_t *psynth_patch(int slot);
 
-/* Resets a slot to its preset. */
+/* Resets a slot to the preset it was last loaded from. */
 void psynth_reset(int slot);
 
 /* The tempo for synced LFOs and the delay. */
