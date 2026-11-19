@@ -159,19 +159,27 @@ static bool run_transport(void)
     return false;
 }
 
-/* The engines' soft clip, on the sum: linear when quiet, rounding off
-   toward full scale. */
+static inline float soft_knee(float x)
+{
+    /* Exactly linear up to KNEE of full scale, so chords stay clean, then
+       rounding off toward full scale with no corner (its slope is 1 at the
+       knee), so a peak is caught softly instead of wrapping. */
+    const float KNEE = 0.7f;
+    float a = x < 0.0f ? -x : x;
+    if (a <= KNEE) {
+        return x;
+    }
+    float u = (a - KNEE) / (1.0f - KNEE);
+    float y = KNEE + (1.0f - KNEE) * u / (1.0f + u);
+    return x < 0.0f ? -y : y;
+}
+
+/* The keys, drums and LIVE pads summed, through the soft knee: linear
+   until the sum is loud, then rounding off toward full scale. */
 static int16_t mix(int16_t keys, int16_t drums, int16_t live)
 {
     float x = ((float)keys + (float)drums + (float)live) / 32768.0f;
-    if (x > 3.0f) {
-        x = 1.0f;
-    } else if (x < -3.0f) {
-        x = -1.0f;
-    } else {
-        x = x * (27.0f + x * x) / (27.0f + 9.0f * x * x);
-    }
-    return (int16_t)lrintf(x * 32767.0f);
+    return (int16_t)lrintf(soft_knee(x) * 32767.0f);
 }
 
 /* Logs how long a block takes to render, against the 8 ms it lasts. */
