@@ -90,7 +90,7 @@ hit 0 1 1
 hit 96 2 1
 ```
 
-`pad` lines are: pad, level, pitch, choke group, then `kit <drum 0-7> <kit name>`, `wav <path>` or `none`. `hit` lines are: tick (96 to a beat), pad, take. A pad that plays a synth sample is saved as a WAV beside the bank (`bank1_pad5.wav`), since synth samples are gone after a power cycle. A WAV that isn't on the card any more leaves its pad empty, and the status line says how many were missing.
+`pad` lines are: pad, level, pitch, choke group, then `kit <drum 0-7> <kit name>`, `wav <path>` or `none`. `hit` lines are: tick (96 to a beat), pad, take. A pad that plays a synth sample is saved as a WAV beside the banks under a new name (`synth001.wav`, `synth002.wav` and so on), since synth samples are gone after a power cycle. These files are never written over, so every bank that uses one keeps its sound. A WAV that isn't on the card any more leaves its pad empty, and the status line says how many were missing.
 
 ## The default set
 

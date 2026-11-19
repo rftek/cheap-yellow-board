@@ -510,7 +510,7 @@ static void refresh_strip(void)
                                   : CYD_COLOR_BUTTON_DISABLED);
     char position[12];
     if (heard_beat == NO_BEAT) {
-        snprintf(position, sizeof(position), "%d HITS", ld_hit_count());
+        snprintf(position, sizeof(position), ld_hit_count() < 100 ? "%d HITS" : "%d H", ld_hit_count());
     } else if (heard_beat < 0) {
         snprintf(position, sizeof(position), "IN %d", -heard_beat);
     } else {
