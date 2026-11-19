@@ -1646,6 +1646,16 @@ float psynth_sample_seconds(int sample)
     return (float)samples[sample].frames / RATE;
 }
 
+const int16_t *psynth_sample_pcm(int sample, uint32_t *frames)
+{
+    if (sample < 0 || sample >= PSYNTH_SAMPLES || samples[sample].pcm == NULL) {
+        *frames = 0;
+        return NULL;
+    }
+    *frames = samples[sample].frames;
+    return samples[sample].pcm;
+}
+
 const char *psynth_sample_name(int sample)
 {
     static char empty[PSYNTH_SAMPLES][PSYNTH_NAME_MAX + 1];

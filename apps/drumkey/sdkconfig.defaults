@@ -13,3 +13,8 @@ CONFIG_FREERTOS_HZ=1000
 # 44100 times a second; at the default -Og its loops run several times
 # slower than at -O2.
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# Long file names on the SD card, so the LIVE screen's sample picker shows
+# "Big Kick 2.wav" instead of BIGKIC~1.WAV.
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=255

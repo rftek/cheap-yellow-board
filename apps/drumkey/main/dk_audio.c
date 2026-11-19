@@ -5,6 +5,7 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "ld_engine.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "music_out.h"
@@ -66,8 +67,10 @@ static QueueHandle_t steps;
 static QueueHandle_t commands;
 static QueueHandle_t heard;
 static volatile bool want_playing;
-/* The drums render here, the keys into the output, then they are mixed. */
+/* The drums and the LIVE screen's pads render here, the keys into the
+   output, then they are mixed. */
 static int16_t drum_pcm[MUSIC_OUT_BLOCK_FRAMES];
+static int16_t live_pcm[MUSIC_OUT_BLOCK_FRAMES];
 
 /* ---- In the audio task --------------------------------------------------- */
 
@@ -142,10 +145,12 @@ static bool run_transport(void)
     if (want_playing && !engine.playing) {
         engine_start(&engine);
         looper_play();
+        ld_engine_start(0); /* no count-in: the drums keep time */
     } else if (!want_playing && engine.playing) {
         engine_stop(&engine);
         engine_silence(&engine);
         looper_stop();
+        ld_engine_stop();
         synth_silence();
         xQueueReset(steps);
         xQueueReset(heard);
@@ -169,11 +174,11 @@ static inline float soft_knee(float x)
     return x < 0.0f ? -y : y;
 }
 
-/* The keys and drums summed, through the soft knee: linear until the sum
-   is loud, then rounding off toward full scale. */
-static int16_t mix(int16_t keys, int16_t drums)
+/* The keys, drums and LIVE pads summed, through the soft knee: linear
+   until the sum is loud, then rounding off toward full scale. */
+static int16_t mix(int16_t keys, int16_t drums, int16_t live)
 {
-    float x = ((float)keys + (float)drums) / 32768.0f;
+    float x = ((float)keys + (float)drums + (float)live) / 32768.0f;
     return (int16_t)lrintf(soft_knee(x) * 32767.0f);
 }
 
@@ -220,8 +225,9 @@ static bool render(int16_t *pcm, size_t frames, bool speaker_attached, void *con
         }
         looper_render(pcm + done, chunk, first_frame + (uint32_t)done, &settings);
         engine_render(&engine, drum_pcm, chunk);
+        ld_engine_render(live_pcm, chunk, pattern->bpm, first_frame + (uint32_t)done);
         for (size_t i = 0; i < chunk; ++i) {
-            pcm[done + i] = mix(pcm[done + i], drum_pcm[i]);
+            pcm[done + i] = mix(pcm[done + i], drum_pcm[i], live_pcm[i]);
         }
         done += chunk;
     }

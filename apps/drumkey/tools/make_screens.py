@@ -97,7 +97,7 @@ d.rep('''    char bar[8];
     }''')
 d.rep('''    put_span(text, fg, bg, MENU_SPAN, "MENU", CYD_COLOR_WHITE,
              speaker_lost_notice ? CYD_COLOR_RED : CYD_COLOR_BUTTON);
-''', '''    put_span(text, fg, bg, SWITCH_SPAN, "ROLL", CYD_COLOR_WHITE, DK_ROLL_COLOR);
+''', '''    put_span(text, fg, bg, SWITCH_SPAN, "LIVE", CYD_COLOR_WHITE, DK_LIVE_COLOR);
     put_span(text, fg, bg, MENU_SPAN, "MENU", CYD_COLOR_WHITE,
              speaker_lost_notice ? CYD_COLOR_RED : CYD_COLOR_BUTTON);
 ''')

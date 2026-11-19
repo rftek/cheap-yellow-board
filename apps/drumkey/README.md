@@ -9,7 +9,8 @@ This app lives in `apps/drumkey`. The [root README](../../README.md) lists every
 Both screens have the same header:
 
 ```
- PLAY REC - 120 + [1/4] ROLL MENU     drums screen
+ PLAY REC - 120 + [1/4] LIVE MENU     drums screen
+ PLAY REC - 120 + EDIT ROLL MENU      LIVE pads
  PLAY REC - 120 + [MET] DRUM MENU     keys screen
  PLAY REC - 120 + [1/16] SYN MENU     Piano Roll
  PLAY REC - 120 + [P1] KEYS MENU      SYNTH
@@ -22,16 +23,26 @@ Both screens have the same header:
 | **- / +** | The shared tempo, 60 to 200 BPM. Both loops follow it. |
 | **1/4** (drums) | The bar page, as in DrumLoop. Past 9 bars it shows `B12` and so on. |
 | **MET** (keys) | The keyboard's metronome. |
-| **DRUM / ROLL / SYN / KEYS** | The screen button: goes round keys → drums → Piano Roll → SYNTH → keys, at once. Sounds keep playing; keys held when you leave are lifted. |
+| **DRUM / LIVE / ROLL / SYN / KEYS** | The screen button: goes round keys → drums → LIVE → Piano Roll → SYNTH → keys, at once. Sounds keep playing; keys held when you leave are lifted. |
 | **MENU** | That screen's settings, as in its own app: kits, styles, export and the drum loop length on the drums side; voices, quantize and the keyboard loop length on the keys side. Wi-Fi, the speaker, volume and the AirPlay delay are shared, so they can be set from either. |
 
 Everything else works as in [DrumLoop](../drumloop/README.md) and [Keyboard](../keyboard/README.md): eight pads and a 16-step grid (hold a step to double it, hold a track label for its filter, EQ and level), hold Style for a keyboard style's filter, EQ and level, 25 keys that move across seven octaves (OCT - / OCT + and a tappable octave map), a sustain pedal, seven voices in 23 styles, kits from an SD card, and EXPORT (which renders the drums only).
 
 The drum loop runs 1 to 16 bars and the keyboard loop 1 to 8. Both start together at bar 1, so with power-of-two lengths they stay in step.
 
+## LIVE
+
+The LIVE screen is [LiveDrum](../livedrum): 8, 12 or 16 large pads for playing live, each with its own sound, level, pitch and choke group, and a loop recorder of its own. Tap **LIVE** on the drums screen to get there. Everything works as in the [LiveDrum README](../livedrum/README.md), with these differences:
+
+- PLAY, STOP and the tempo are Drum&Key's: the LIVE loop starts from bar 1 with the drum and keyboard loops, in the same block. REC from stop starts all of them, with no count-in, since the drums keep time.
+- The fourth header button is the screen switch (**ROLL**), so the banks are in MENU → **BANKS**.
+- The pad picker has a **SYNTH** tab: the SYNTH screen's rendered samples S1-S4. A pad keeps its own copy, and a bank saves it as a WAV beside the bank file, so a synth sound survives a power cycle on a pad.
+- MENU's Wi-Fi, speaker, volume and AirPlay delay are the shared ones, and the status line is shared with the other menus.
+- The LIVE pads are mixed into the same stream as the drums and keys, through the same soft clipper.
+
 ## Piano Roll
 
-The screen button in the header goes round **KEYS → DRUM → ROLL**: tap **ROLL** on the drums screen to open the Piano Roll (or tap the keys screen's loop row). It works on an empty loop too, so you can draw a part from scratch. It is the keyboard loop drawn as a grid of pitch against time, in the spirit of LMMS's piano roll. Recorded takes show up there, and drawn notes play on the keys' loop in time with the drums.
+The screen button in the header goes round **KEYS → DRUM → LIVE → ROLL**: tap **ROLL** on the LIVE screen to open the Piano Roll (or tap the keys screen's loop row). It works on an empty loop too, so you can draw a part from scratch. It is the keyboard loop drawn as a grid of pitch against time, in the spirit of LMMS's piano roll. Recorded takes show up there, and drawn notes play on the keys' loop in time with the drums.
 
 ```
  PLAY REC - 120 + 1/16 KEYS MENU     header: SNAP, on to the KEYS screen, the keys' MENU
@@ -147,13 +158,15 @@ How it runs:
 | `main/psynth.c` | The patch synth: oscillators, wavetables, unison, filters, envelopes, LFOs, mod matrix, effects, mono and glide, and the preset library; Keyboard's synth hands it the PATCH notes (`synth_set_external`) |
 | `main/synth_ui.c` | The SYNTH screen |
 | `main/roll_ui.c` | The Piano Roll, which edits the keyboard loop through looper.h |
+| `main/live_ui.c` | The LIVE screen: LiveDrum's screens (`ld_ui.c`) on Drum&Key's transport, tempo and status line, with the SYNTH samples as a sound source |
 | `main/dk_ui.c` | The header layout, the gaps between its buttons, and which screen is next |
 
 The engines are compiled from the other apps' folders, so a fix there reaches Drum&Key too:
 - `apps/drumloop/main`: `engine.c`, `kit.c`, `export.c`, `sdcard.c` and `wav.c`
 - `apps/keyboard/main`: `synth.c` and `looper.c`
+- `apps/livedrum/main`: `ld_engine.c`, `ld_sounds.c` and `ld_ui.c` (the LIVE screen)
 
-`uses-apps.txt` names those two apps, so CI rebuilds Drum&Key when either changes.
+`uses-apps.txt` names those three apps, so CI rebuilds Drum&Key when either changes.
 
 The two screens are made from the apps' `ui.c` by `tools/make_screens.py`. It applies Drum&Key's changes: the shared header with the screen button, the shared transport and tempo, and a screen that returns when the switch is tapped. After a change to `apps/drumloop/main/ui.c` or `apps/keyboard/main/ui.c`, run it from the repository root and commit the result:
 
@@ -180,6 +193,11 @@ pio run -e esp32s3
 The image goes in a launcher slot, like the other apps.
 
 ## Changelog
+
+### 1.8 (2026-11-17)
+
+- New LIVE screen, between DRUM and ROLL: LiveDrum's large pads for playing live, with a sound picker per pad (kits, SD card WAVs, and the SYNTH screen's samples), level, pitch and choke groups, a loop recorder with quantize and undo on the shared transport, and banks on the SD card. See [LiveDrum](../livedrum).
+- The SD card shows long file names.
 
 ### 1.7 (2026-11-17)
 
