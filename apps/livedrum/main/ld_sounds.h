@@ -11,8 +11,8 @@
 
    A bank is a text file, LD_BANK_DIR/bank<N>.txt: the tempo, each pad's
    sound, level, pitch and choke group, and the loop. A synth sample is
-   saved next to it as a WAV (bank<N>_pad<P>.wav), since synth samples
-   don't outlive a power cycle. */
+   saved beside it as a WAV under a new name (synth001.wav...), since synth
+   samples don't outlive a power cycle; it is never written over. */
 
 #include <stdbool.h>
 #include <stddef.h>

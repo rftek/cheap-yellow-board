@@ -28,7 +28,7 @@
 #define EARLY_TICKS (LD_TICKS_PER_BEAT / 4)
 #define CLICK_FRAMES (LD_RATE / 40)
 #define CLICK_GAIN 0.45f
-#define CALL_TIMEOUT_MS 2000
+#define CALL_WARN_MS 2000
 
 static const char *TAG = "ld_engine";
 
@@ -91,7 +91,9 @@ static volatile bool rendering;
 
 /* Runs fn in the audio task at the start of its next block and waits for
    it, so the loop and the pads' sounds are only ever changed there. Before
-   the audio task runs, fn runs here. */
+   the audio task runs, fn runs here. Once it runs, fn never runs anywhere
+   else, even if the task is held up (a slow AirPlay send): a sample must
+   not be freed while a voice may still read it. */
 static void call(call_fn_t fn, void *argument)
 {
     if (!rendering) {
@@ -101,14 +103,8 @@ static void call(call_fn_t fn, void *argument)
     xSemaphoreTake(call_mutex, portMAX_DELAY);
     pending_argument = argument;
     __atomic_store_n(&pending_call, fn, __ATOMIC_RELEASE);
-    if (xSemaphoreTake(call_done, pdMS_TO_TICKS(CALL_TIMEOUT_MS)) != pdTRUE) {
-        /* The audio task has stopped rendering: take the call back. */
-        if (__atomic_exchange_n(&pending_call, NULL, __ATOMIC_ACQ_REL) == fn) {
-            ESP_LOGW(TAG, "Audio task not rendering; ran the call here");
-            fn(argument);
-        } else {
-            xSemaphoreTake(call_done, portMAX_DELAY);
-        }
+    while (xSemaphoreTake(call_done, pdMS_TO_TICKS(CALL_WARN_MS)) != pdTRUE) {
+        ESP_LOGW(TAG, "Waiting for the audio task");
     }
     xSemaphoreGive(call_mutex);
 }
@@ -274,17 +270,8 @@ static double ticks_per_frame(uint16_t bpm)
     return (double)bpm * LD_TICKS_PER_BEAT / (60.0 * LD_RATE);
 }
 
-/* After the loop changed: the next hit to play is the first after the
-   cursor, and the stats are counted again. */
-static void reposition(void)
+static void count_takes(void)
 {
-    int i = 0;
-    if (cursor >= 0) {
-        while (i < hit_count && hits[i].tick <= cursor) {
-            ++i;
-        }
-    }
-    next_hit = i;
     uint32_t seen[8] = {0};
     int takes = 0;
     for (int h = 0; h < hit_count; ++h) {
@@ -295,6 +282,21 @@ static void reposition(void)
         }
     }
     take_count = takes;
+}
+
+/* After the loop changed: the next hit to play is the first after the
+   cursor (everything at or before it has played), and the takes are
+   counted again. */
+static void reposition(void)
+{
+    int i = 0;
+    if (cursor >= 0) {
+        while (i < hit_count && hits[i].tick <= cursor) {
+            ++i;
+        }
+    }
+    next_hit = i;
+    count_takes();
 }
 
 static uint8_t highest_take(void)
@@ -333,6 +335,14 @@ static void begin_take(void)
     }
     if (highest_take() >= 250) {
         renumber_takes();
+    }
+    if (highest_take() == 255) {
+        /* 255 takes in the loop: the two oldest become one. */
+        for (int h = 0; h < hit_count; ++h) {
+            if (hits[h].take > 1) {
+                --hits[h].take;
+            }
+        }
     }
     current_take = (uint8_t)(highest_take() + 1);
     recording = true;
@@ -395,10 +405,11 @@ static void record_hit(int pad)
         ++at;
     }
     memmove(&hits[at + 1], &hits[at], (size_t)(hit_count - at) * sizeof(hits[0]));
-    /* A hit at or behind the cursor has had its turn in this pass (it was
-       just played live); one ahead of it plays later in the pass. Either
-       way, how far ahead of the render it next plays: */
-    bool passed = cursor >= 0 && tick <= cursor;
+    /* A hit placed before next_hit has had its turn in this pass (it was
+       just played live); one from next_hit on plays later in the pass.
+       Either way, how far ahead of the render it next plays (below 0 when
+       it is due now): */
+    bool passed = at < next_hit;
     double ahead = (double)tick - cursor + (passed ? total : 0);
     hits[at] = (ld_loop_hit_t){
         .tick = (uint16_t)tick,
@@ -407,7 +418,10 @@ static void record_hit(int pad)
         .skip = ahead < SKIP_TICKS,
     };
     ++hit_count;
-    reposition(); /* moves next_hit past it when it has passed */
+    if (passed) {
+        ++next_hit;
+    }
+    count_takes();
 }
 
 static void post_heard(uint32_t frame, ld_heard_type_t type, int pad, int beat)
@@ -477,6 +491,7 @@ void ld_engine_start(int count_in)
         hits[h].skip = 0;
     }
     reposition();
+    next_hit = 0; /* the hits on tick 0 are still to play */
 }
 
 void ld_engine_stop(void)
@@ -522,6 +537,12 @@ void ld_engine_render(int16_t *pcm, size_t frames, uint16_t bpm, uint32_t first_
             played += segment * per_frame;
         }
         done += segment;
+    }
+    /* What falls due at the block's end starts the next block, so between
+       blocks everything at or before the cursor has played. reposition()
+       and record_hit() rely on that. */
+    if (playing) {
+        play_due(first_frame + (uint32_t)frames);
     }
 }
 
@@ -681,7 +702,7 @@ static void fit_cursor(void)
         cursor = fmod(cursor, total);
     }
     if (cursor >= 0) {
-        next_beat = (int32_t)ceil(cursor / LD_TICKS_PER_BEAT) * LD_TICKS_PER_BEAT;
+        next_beat = ((int32_t)floor(cursor / LD_TICKS_PER_BEAT) + 1) * LD_TICKS_PER_BEAT;
     }
     reposition();
 }

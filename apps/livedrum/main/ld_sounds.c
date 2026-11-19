@@ -327,14 +327,19 @@ esp_err_t ld_bank_save(int bank, uint16_t bpm, char *status, size_t status_size)
         snprintf(status, status_size, " Can't make " LD_BANK_DIR);
         return ESP_FAIL;
     }
-    /* A synth sample is saved as a WAV beside the bank, and the pad then
-       plays that file. */
+    /* A synth sample is saved as a WAV beside the banks, and the pad then
+       plays that file. The file gets a name no other file has, and is
+       never written over, since other banks may play it too. */
     for (int pad = 0; pad < LD_PADS; ++pad) {
         if (sources[pad].kind != LD_SOURCE_SYNTH || owned[pad] == NULL) {
             continue;
         }
         char path[LD_PATH_MAX];
-        snprintf(path, sizeof(path), LD_BANK_DIR "/bank%d_pad%d.wav", bank + 1, pad + 1);
+        struct stat info;
+        int number = 1;
+        do {
+            snprintf(path, sizeof(path), LD_BANK_DIR "/synth%03d.wav", number++);
+        } while (stat(path, &info) == 0 && number < 1000);
         if (write_wav(path, owned[pad], ld_sample(pad)->frames) != ESP_OK) {
             snprintf(status, status_size, " Can't write pad %d's sample", pad + 1);
             return ESP_FAIL;
