@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
@@ -723,7 +724,7 @@ static void env_release(voice_t *v)
 }
 
 /* Advances an envelope by frames; returns its level. */
-static float env_step(voice_t *v, int which, const psynth_env_t *e, int frames)
+static IRAM_ATTR float env_step(voice_t *v, int which, const psynth_env_t *e, int frames)
 {
     float level = v->env[which];
     float dt = (float)frames / RATE;
@@ -768,7 +769,7 @@ static float lfo_hz(const psynth_lfo_t *lfo)
 }
 
 /* Advances an LFO by frames; returns -1..1. */
-static float lfo_step(voice_t *v, int which, const psynth_lfo_t *lfo, int frames)
+static IRAM_ATTR float lfo_step(voice_t *v, int which, const psynth_lfo_t *lfo, int frames)
 {
     static const float gate[8] = {1, -1, 1, -1, 1, 1, -1, 1};
     float phase = v->lfo_phase[which] + lfo_hz(lfo) * (float)frames / RATE;
@@ -1056,7 +1057,7 @@ typedef struct {
     float amp;
 } mods_t;
 
-static void apply_mods(const psynth_patch_t *p, const voice_t *v, float lfo1, float lfo2,
+static IRAM_ATTR void apply_mods(const psynth_patch_t *p, const voice_t *v, float lfo1, float lfo2,
                        float mod_env, mods_t *m)
 {
     memset(m, 0, sizeof(*m));
@@ -1119,7 +1120,7 @@ static void apply_mods(const psynth_patch_t *p, const voice_t *v, float lfo1, fl
 }
 
 /* Adds one oscillator (all its unison voices) into out. */
-static void render_osc(voice_t *v, int index, const psynth_osc_t *osc, float freq, float pos,
+static IRAM_ATTR void render_osc(voice_t *v, int index, const psynth_osc_t *osc, float freq, float pos,
                        float detune, float level, float scale, float *out, int n)
 {
     int count = osc->unison < 1 ? 1 : osc->unison > PSYNTH_UNISON_MAX ? PSYNTH_UNISON_MAX : osc->unison;
@@ -1234,7 +1235,7 @@ static inline void svf_run(svf_t *s, const svf_coefs_t *c, float x, float *low, 
     *high = x - c->k * v1 - v2;
 }
 
-static void run_filter(filter_state_t *state, const psynth_filter_t *f, float cutoff,
+static IRAM_ATTR void run_filter(filter_state_t *state, const psynth_filter_t *f, float cutoff,
                        float resonance, float *buf, int n)
 {
     if (f->type == FILTER_OFF) {
@@ -1317,7 +1318,7 @@ static void run_filter(filter_state_t *state, const psynth_filter_t *f, float cu
 /* Adds a voice's sound for n frames into out. */
 /* scale shrinks the unison when the oscillator budget is spent (1 for
    none). */
-static void render_voice(voice_t *v, const psynth_patch_t *p, float scale, float *out, int n)
+static IRAM_ATTR void render_voice(voice_t *v, const psynth_patch_t *p, float scale, float *out, int n)
 {
     float lfo1 = lfo_step(v, 0, &p->lfo[0], n);
     float lfo2 = lfo_step(v, 1, &p->lfo[1], n);
@@ -1414,7 +1415,7 @@ static void render_voice(voice_t *v, const psynth_patch_t *p, float scale, float
 
 /* ---- Effects ------------------------------------------------------------------------ */
 
-static void run_fx(slot_fx_t *f, const psynth_patch_t *p, float *buf, int n)
+static IRAM_ATTR void run_fx(slot_fx_t *f, const psynth_patch_t *p, float *buf, int n)
 {
     if (p->drive > 0) {
         float drive = 1.0f + p->drive * 0.08f;
@@ -1494,7 +1495,7 @@ static bool ext_sounding(int slot)
 
 /* Adds a sample voice: the slot's sound, pitched, fading out after the
    key is released. */
-static void render_sample_voice(voice_t *v, float *out, int n)
+static IRAM_ATTR void render_sample_voice(voice_t *v, float *out, int n)
 {
     const sample_t *s = &samples[v->slot - PSYNTH_SLOTS];
     if (s->pcm == NULL) {
@@ -1519,7 +1520,7 @@ static void render_sample_voice(voice_t *v, float *out, int n)
 
 /* The share of each voice's unison the budget allows this block: 1, or
    less when the sounding voices ask for more than UNISON_BUDGET. */
-static float unison_scale(void)
+static IRAM_ATTR float unison_scale(void)
 {
     int wanted = 0;
     for (int i = 0; i < VOICES; ++i) {
@@ -1537,7 +1538,7 @@ static float unison_scale(void)
     return wanted > UNISON_BUDGET ? (float)UNISON_BUDGET / (float)wanted : 1.0f;
 }
 
-static void ext_render(int slot, float *mix, int n)
+static IRAM_ATTR void ext_render(int slot, float *mix, int n)
 {
     float buf[BLOCK_MAX];
     if (n > BLOCK_MAX) {
