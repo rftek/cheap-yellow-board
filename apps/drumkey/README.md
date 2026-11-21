@@ -187,6 +187,7 @@ The image goes in a launcher slot, like the other apps.
 - DECAY beside PITCH: how much of each hit plays (5-100%), fading out over the last half, for tight kicks and short hats.
 - Rolls: holding a drum step steps it through 2, 3 (a triplet) and 4 hits, then back to one, for trap hat rolls.
 - Cleaner chords: the output clipper is linear up to 70% of full scale and rounds off only above it. The old tanh-like curve squeezed even moderate levels, twice (in the keys and in the final mix), so 4-5 SYNTH voices distorted slightly.
+- No crackle at the 5th SYNTH note: past 42 unison oscillators across the sounding notes (five SUPERSAW notes ask for 60), every note's unison shrinks in proportion, so a block renders well inside its 8 ms and the wired DAC, with only 9 ms of buffer, doesn't run dry. The SYNTH scope shows **CPU %**, the worst block of the last second, since the serial log can't run while SW1 serves the DAC.
 
 ### 1.6 (2026-11-15)
 

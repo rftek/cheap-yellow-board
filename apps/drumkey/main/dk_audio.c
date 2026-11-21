@@ -177,6 +177,16 @@ static int16_t mix(int16_t keys, int16_t drums)
     return (int16_t)lrintf(soft_knee(x) * 32767.0f);
 }
 
+/* The worst block of the last second, as a % of the block's 8 ms, for
+   the SYNTH screen's CPU meter (the log needs SW1 on UART1, which the
+   wired DAC can't share). */
+static volatile int load_percent;
+
+int dk_load_percent(void)
+{
+    return load_percent;
+}
+
 /* Logs how long a block takes to render, against the 8 ms it lasts. */
 static void report_load(int64_t start, int64_t took)
 {
@@ -184,8 +194,16 @@ static void report_load(int64_t start, int64_t took)
     static int64_t total_us;
     static int64_t worst_us;
     static uint32_t blocks;
+    static int64_t second_at;
+    static int64_t second_worst_us;
     total_us += took;
     worst_us = took > worst_us ? took : worst_us;
+    second_worst_us = took > second_worst_us ? took : second_worst_us;
+    if (start >= second_at) {
+        load_percent = (int)(second_worst_us * 100 / BLOCK_US);
+        second_worst_us = 0;
+        second_at = start + 1000000;
+    }
     ++blocks;
     if (start >= report_at) {
         if (blocks > 1) {

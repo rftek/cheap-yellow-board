@@ -34,6 +34,10 @@ void dk_play(bool play);
 bool dk_is_playing(void);
 
 uint16_t dk_tempo(void);
+
+/* The worst audio block of the last second, as a % of its 8 ms: over 100
+   and the output underruns (crackles). */
+int dk_load_percent(void);
 void dk_set_tempo(int bpm);
 
 /* ---- Drums --------------------------------------------------------------- */
