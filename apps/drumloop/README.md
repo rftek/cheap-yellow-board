@@ -34,17 +34,17 @@ The loop keeps playing when the output changes, and the beat is kept. If the spe
 | **bar page** (`1/4`) | Which bar the grid shows. Cyan means it follows the playhead. Tap to go to bar 1, 2, ... and back to follow. |
 | **MENU** | The settings below. |
 | **Track label** | Mutes or unmutes the track in the loop. The pads still play. Hold it (about half a second) to open the track's tone editor (see below). A `~` after the label marks a track with a tone. |
-| **Step** | Turns that step on or off in the bar on view. Hold it (about half a second) to make it a double: it plays twice in its sixteenth, as two thirty-seconds (two claps in one step, a hat roll), and is drawn split in two. Hold a double to make it single again. |
+| **Step** | Turns that step on or off in the bar on view. Hold it (about half a second) for a roll: each hold steps it on through **2** hits (two thirty-seconds), **3** (a triplet) and **4** (sixty-fourths), then back to one. The hits are spread evenly across the sixteenth, and the step is drawn split into that many parts: trap hat rolls, a flam on the snare. |
 | **Pads** | Play the sound at once. The pad flashes white. Play with several fingers: each new finger is a hit, even while others are down. |
 
 The grid's playhead and its bar page follow what the speaker is playing. That is the AirPlay delay behind what the board renders, so the screen matches what you hear.
 
-### Track tone: filter, EQ and level
+### Track tone: filter, EQ, level, pitch and decay
 
 Hold a track's label to shape that instrument, in the editor the music apps share ([music_tone](../../components/music_tone)):
 
 ```
- <    BD TONE    >  BACK     track (< > for the others)
+ <  BD TONE FLAT >  BACK     track (< > for the others); FLAT resets it
  FILTER OFF  LP   HP   BP    resonant filter type
  CUT 1.4k [=======|-----]    cutoff, 30 Hz to 18 kHz
  RES  1.1 [==|----------]    resonance, Q 0.5 to 10
@@ -52,10 +52,12 @@ Hold a track's label to shape that instrument, in the editor the music apps shar
  MID   -3 [ ==|        ]     peak at 1 kHz
  HIGH  +0 [   |        ]     high shelf at 6 kHz
  LVL   +0 [   |        ]     level, -24 to +6 dB
- FLAT                        resets the track
+ PIT -5 [=|  ] DEC 40 [==  ]  pitch -12 to +12 semitones; decay 5-100% of the hit
  [BD][SD][CP][CH][OH][LT][RS][CB]   pads, to hear it
 ```
 
+- PITCH retunes the track's hits, as a sampler does: lower is slower and longer, higher is faster and shorter. A deep kick or tom becomes an 808-style boom, a snare tuned up snaps. Each hit takes the pitch set when it starts, so moving PITCH changes the next hit, not one already sounding.
+- DECAY plays part of each hit (100% is the whole sound), fading out over the last half of that part: a closed-sounding open hat, a tight kick, a short clap. With PITCH down for length, it shapes an 808 tail.
 - Drag a finger along a slider to change it while the loop plays, as a filter sweep. Tap a slider to jump to a value. The EQ and level sliders snap to 0 near the middle.
 - The pads stay live under the editor, and the loop keeps playing, so you hear each change at once.
 - The tone belongs to the track, not the kit, so it stays when you change kit. It is part of the pattern, so EXPORT renders it, and it is not saved across power cycles.

@@ -5,7 +5,9 @@
      row 0       <   BD TONE   >   BACK     the item, < > for the others
      row 1       FILTER  OFF  LP  HP  BP
      rows 2-7    sliders: cutoff, resonance, low, mid, high, level
-     row 8       FLAT (resets the item's tone)
+     row 8       FLAT (resets the item's tone), or in a drum editor PITCH
+                 (semitones) and DECAY (% of the hit), with FLAT moved up
+                 beside the title
      rows 9-11   the app's own: DrumLoop's pads, Keyboard's test keys
 
    A slider follows a finger dragged along it, so a filter can be swept
@@ -37,6 +39,7 @@ typedef struct {
     /* A tap from the queue in rows 9-11. */
     void (*tap)(const cyd_touch_point_t *point, int item, void *context);
     void *context;
+    bool drum; /* PITCH and DECAY on row 8 (DrumLoop's tracks) */
 } tone_editor_t;
 
 /* Runs the editor from item until BACK; returns the item it ended on. */

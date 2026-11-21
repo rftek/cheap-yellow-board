@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
@@ -30,6 +31,11 @@ static const int mip_harmonics[WT_MIPS] = {256, 64, 16, 4};
 #define TAIL_FRAMES (44100 * 4) /* how long effects ring on after the notes */
 #define SCOPE_SIZE 1024
 #define VOICE_GAIN 0.22f
+/* The most unison oscillators rendered at once, across every sounding
+   voice. Five SUPERSAW notes ask for 60, which took longer than the 8 ms
+   block and crackled on the wired DAC; past the budget every voice's
+   unison shrinks in proportion, so the stack keeps its width. */
+#define UNISON_BUDGET 42
 
 static const char *TAG = "psynth";
 
@@ -718,7 +724,7 @@ static void env_release(voice_t *v)
 }
 
 /* Advances an envelope by frames; returns its level. */
-static float env_step(voice_t *v, int which, const psynth_env_t *e, int frames)
+static IRAM_ATTR float env_step(voice_t *v, int which, const psynth_env_t *e, int frames)
 {
     float level = v->env[which];
     float dt = (float)frames / RATE;
@@ -763,7 +769,7 @@ static float lfo_hz(const psynth_lfo_t *lfo)
 }
 
 /* Advances an LFO by frames; returns -1..1. */
-static float lfo_step(voice_t *v, int which, const psynth_lfo_t *lfo, int frames)
+static IRAM_ATTR float lfo_step(voice_t *v, int which, const psynth_lfo_t *lfo, int frames)
 {
     static const float gate[8] = {1, -1, 1, -1, 1, 1, -1, 1};
     float phase = v->lfo_phase[which] + lfo_hz(lfo) * (float)frames / RATE;
@@ -1051,7 +1057,7 @@ typedef struct {
     float amp;
 } mods_t;
 
-static void apply_mods(const psynth_patch_t *p, const voice_t *v, float lfo1, float lfo2,
+static IRAM_ATTR void apply_mods(const psynth_patch_t *p, const voice_t *v, float lfo1, float lfo2,
                        float mod_env, mods_t *m)
 {
     memset(m, 0, sizeof(*m));
@@ -1114,10 +1120,14 @@ static void apply_mods(const psynth_patch_t *p, const voice_t *v, float lfo1, fl
 }
 
 /* Adds one oscillator (all its unison voices) into out. */
-static void render_osc(voice_t *v, int index, const psynth_osc_t *osc, float freq, float pos,
-                       float detune, float level, float *out, int n)
+static IRAM_ATTR void render_osc(voice_t *v, int index, const psynth_osc_t *osc, float freq, float pos,
+                       float detune, float level, float scale, float *out, int n)
 {
     int count = osc->unison < 1 ? 1 : osc->unison > PSYNTH_UNISON_MAX ? PSYNTH_UNISON_MAX : osc->unison;
+    if (scale < 1.0f && count > 1) {
+        count = (int)((float)count * scale + 0.5f);
+        count = count < 1 ? 1 : count;
+    }
     float gain = level / sqrtf((float)count);
     float spread_cents = (osc->detune / 100.0f) * 50.0f * (1.0f + detune);
     pos = clampf(pos, 0.0f, 1.0f);
@@ -1225,7 +1235,7 @@ static inline void svf_run(svf_t *s, const svf_coefs_t *c, float x, float *low, 
     *high = x - c->k * v1 - v2;
 }
 
-static void run_filter(filter_state_t *state, const psynth_filter_t *f, float cutoff,
+static IRAM_ATTR void run_filter(filter_state_t *state, const psynth_filter_t *f, float cutoff,
                        float resonance, float *buf, int n)
 {
     if (f->type == FILTER_OFF) {
@@ -1306,7 +1316,9 @@ static void run_filter(filter_state_t *state, const psynth_filter_t *f, float cu
 }
 
 /* Adds a voice's sound for n frames into out. */
-static void render_voice(voice_t *v, const psynth_patch_t *p, float *out, int n)
+/* scale shrinks the unison when the oscillator budget is spent (1 for
+   none). */
+static IRAM_ATTR void render_voice(voice_t *v, const psynth_patch_t *p, float scale, float *out, int n)
 {
     float lfo1 = lfo_step(v, 0, &p->lfo[0], n);
     float lfo2 = lfo_step(v, 1, &p->lfo[1], n);
@@ -1349,7 +1361,7 @@ static void render_voice(voice_t *v, const psynth_patch_t *p, float *out, int n)
             continue;
         }
         float freq = 440.0f * powf(2.0f, (v->pitch - 69.0f + osc_offset(osc) + m.pitch) / 12.0f);
-        render_osc(v, o, osc, freq, v->smooth[3 + o], v->smooth[7], level, buf, n);
+        render_osc(v, o, osc, freq, v->smooth[3 + o], v->smooth[7], level, scale, buf, n);
     }
     if (p->sub_level > 0) {
         float level = p->sub_level / 100.0f;
@@ -1403,7 +1415,7 @@ static void render_voice(voice_t *v, const psynth_patch_t *p, float *out, int n)
 
 /* ---- Effects ------------------------------------------------------------------------ */
 
-static void run_fx(slot_fx_t *f, const psynth_patch_t *p, float *buf, int n)
+static IRAM_ATTR void run_fx(slot_fx_t *f, const psynth_patch_t *p, float *buf, int n)
 {
     if (p->drive > 0) {
         float drive = 1.0f + p->drive * 0.08f;
@@ -1483,7 +1495,7 @@ static bool ext_sounding(int slot)
 
 /* Adds a sample voice: the slot's sound, pitched, fading out after the
    key is released. */
-static void render_sample_voice(voice_t *v, float *out, int n)
+static IRAM_ATTR void render_sample_voice(voice_t *v, float *out, int n)
 {
     const sample_t *s = &samples[v->slot - PSYNTH_SLOTS];
     if (s->pcm == NULL) {
@@ -1506,7 +1518,27 @@ static void render_sample_voice(voice_t *v, float *out, int n)
     }
 }
 
-static void ext_render(int slot, float *mix, int n)
+/* The share of each voice's unison the budget allows this block: 1, or
+   less when the sounding voices ask for more than UNISON_BUDGET. */
+static IRAM_ATTR float unison_scale(void)
+{
+    int wanted = 0;
+    for (int i = 0; i < VOICES; ++i) {
+        const voice_t *v = &voices[i];
+        if (!v->active || v->sample || v->slot >= PSYNTH_SLOTS) {
+            continue;
+        }
+        const psynth_patch_t *p = &patches[v->slot];
+        for (int o = 0; o < 2; ++o) {
+            if (p->osc[o].level > 0) {
+                wanted += p->osc[o].unison < 1 ? 1 : p->osc[o].unison;
+            }
+        }
+    }
+    return wanted > UNISON_BUDGET ? (float)UNISON_BUDGET / (float)wanted : 1.0f;
+}
+
+static IRAM_ATTR void ext_render(int slot, float *mix, int n)
 {
     float buf[BLOCK_MAX];
     if (n > BLOCK_MAX) {
@@ -1525,10 +1557,11 @@ static void ext_render(int slot, float *mix, int n)
         return;
     }
     const psynth_patch_t *p = &patches[slot];
+    float scale = unison_scale();
     bool any = false;
     for (int i = 0; i < VOICES; ++i) {
         if (voices[i].active && voices[i].slot == slot) {
-            render_voice(&voices[i], p, buf, n);
+            render_voice(&voices[i], p, scale, buf, n);
             any = true;
         }
     }
@@ -1706,7 +1739,7 @@ bool psynth_render_sample(int slot, int sample)
                 env_release(v);
             }
             if (v->active) {
-                render_voice(v, &p, buf, n);
+                render_voice(v, &p, 1.0f, buf, n);
             }
             run_fx(f, &p, buf, n);
             float block_peak = 0.0f;

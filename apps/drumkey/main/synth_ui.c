@@ -524,6 +524,13 @@ static void draw_scope(void)
         ESP_ERROR_CHECK(cyd_fill_rect(SCOPE_X + x, y0, 1, y1 - y0 + 1, COLOR_SCOPE));
         previous = y;
     }
+    /* The CPU meter: the worst audio block of the last second against its
+       8 ms. Over 100% the output crackles. */
+    int load = dk_load_percent();
+    char meter[12];
+    snprintf(meter, sizeof(meter), "CPU %d%%", load);
+    uint16_t color = load < 70 ? COLOR_SCOPE : load < 90 ? CYD_COLOR_YELLOW : CYD_COLOR_RED;
+    ESP_ERROR_CHECK(cyd_draw_small_text(SCOPE_X + 2, top + 1, meter, color, COLOR_SCOPE_BACK));
 }
 
 static void draw_test_keys(void)

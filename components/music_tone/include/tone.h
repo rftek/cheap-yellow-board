@@ -26,6 +26,8 @@ typedef enum {
 #define TONE_EQ_MAX 12
 #define TONE_LEVEL_MIN (-24) /* dB */
 #define TONE_LEVEL_MAX 6
+#define TONE_PITCH_MIN (-12) /* semitones, for editors that show PITCH */
+#define TONE_PITCH_MAX 12
 
 /* Where a filter starts when it is first switched on. */
 #define TONE_DEFAULT_CUTOFF 60    /* about 1.4 kHz */
@@ -40,9 +42,14 @@ typedef struct {
     int8_t mid;        /* dB, a peak at 1 kHz */
     int8_t high;       /* dB, a high shelf at 6 kHz */
     int8_t level;      /* dB */
+    int8_t pitch;      /* semitones: DrumLoop retunes a track's hits; 0 elsewhere */
+    uint8_t decay;     /* 0 the whole hit; up to 95: DrumLoop cuts the hit short */
 } tone_settings_t;
 
+/* Nothing set: no filter, EQ, level, pitch or decay. */
 bool tone_is_flat(const tone_settings_t *tone);
+/* No filter, EQ or level to run the sound through (pitch and decay aside). */
+bool tone_sound_flat(const tone_settings_t *tone);
 float tone_cutoff_hz(int cutoff);
 float tone_q(int resonance);
 
