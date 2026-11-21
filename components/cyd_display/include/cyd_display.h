@@ -129,6 +129,20 @@ esp_err_t cyd_text_row(int row, uint16_t foreground, uint16_t background, const 
 esp_err_t cyd_draw_small_text(int x, int y, const char *text, uint16_t foreground,
                               uint16_t background);
 
+/* Draws one row of an on-screen keyboard on text row `row`: the display
+   width split into `slots` equal keys (10 for QWERTY: 32 pixels each on the
+   CYD, 80 on the S3), whatever the text grid. The characters of `keys` are
+   centered in the row, so a shorter row is indented by half a key per
+   missing key, as on a real keyboard. Each key shows its character in the
+   text font, on background[(key + row) % 2] so neighbors stand apart; the
+   rest of the row is black. */
+esp_err_t cyd_draw_key_row(int row, const char *keys, int slots, uint16_t foreground,
+                           const uint16_t background[2]);
+
+/* The index in `keys` of the key at display x, in a row drawn by
+   cyd_draw_key_row with the same keys and slots, or -1 beside the keys. */
+int cyd_key_row_hit(const char *keys, int slots, int x);
+
 /* Starts the touchscreen and a task that posts one cyd_touch_point_t per tap,
    in display coordinates, to the returned queue. It loads the calibration
    saved in NVS, if any. */

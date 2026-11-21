@@ -274,6 +274,81 @@ esp_err_t cyd_draw_small_text(int x, int y, const char *text, uint16_t foregroun
     return ESP_OK;
 }
 
+/* Pixel (cell_x, y) of a text-font glyph cell, on the given background. */
+static uint16_t glyph_pixel(char character, int cell_x, int y, uint16_t background,
+                            uint16_t foreground)
+{
+#if CYD_FONT_SMOOTH
+    int shift = cell_x % 2 == 0 ? 4 : 0;
+    unsigned coverage = (smooth_font[glyph_index(character)][y][cell_x / 2] >> shift) & 0x0F;
+    return blend565(background, foreground, coverage);
+#else
+    int glyph_x = cell_x / CYD_FONT_SCALE;
+    uint8_t bits = glyph_x < 5 ? font5x7[glyph_index(character)][glyph_x] : 0;
+    int glyph_y = (y - 1) / CYD_FONT_SCALE;
+    return y >= 1 && glyph_y < 7 && (bits & (1U << glyph_y)) ? foreground : background;
+#endif
+}
+
+/* The x of a key row's first key: the keys are centered in the display. */
+static int key_row_left(int count, int slots)
+{
+    int key_width = CYD_LCD_WIDTH / slots;
+    return (CYD_LCD_WIDTH - count * key_width) / 2;
+}
+
+esp_err_t cyd_draw_key_row(int row, const char *keys, int slots, uint16_t foreground,
+                           const uint16_t background[2])
+{
+    ESP_RETURN_ON_FALSE(row >= 0 && row < CYD_TEXT_ROWS && slots > 0 &&
+                            CYD_LCD_WIDTH / slots >= CYD_FONT_WIDTH,
+                        ESP_ERR_INVALID_ARG, TAG, "key row outside display");
+    int count = (int)strnlen(keys, (size_t)slots);
+    int key_width = CYD_LCD_WIDTH / slots;
+    int left = key_row_left(count, slots);
+    int glyph_left = (key_width - CYD_FONT_WIDTH) / 2; /* within a key */
+    for (int chunk_x = 0; chunk_x < CYD_LCD_WIDTH; chunk_x += TEXT_CHUNK_COLUMNS) {
+        int columns = CYD_LCD_WIDTH - chunk_x < TEXT_CHUNK_COLUMNS ? CYD_LCD_WIDTH - chunk_x
+                                                                   : TEXT_CHUNK_COLUMNS;
+        for (int dx = 0; dx < columns; ++dx) {
+            int x = chunk_x + dx;
+            int key = x >= left ? (x - left) / key_width : -1;
+            if (key >= count) {
+                key = -1;
+            }
+            uint16_t back = key < 0 ? CYD_COLOR_BLACK : background[(key + row) % 2];
+            int cell_x = key < 0 ? -1 : x - left - key * key_width - glyph_left;
+            for (int y = 0; y < CYD_FONT_HEIGHT; ++y) {
+                uint16_t color = back;
+                if (y == CYD_FONT_HEIGHT - 1) {
+                    color = CYD_COLOR_BLACK;
+                } else if (cell_x >= 0 && cell_x < CYD_FONT_WIDTH) {
+                    color = glyph_pixel(keys[key], cell_x, y, back, foreground);
+                }
+                chunk[y * columns + dx] = color;
+            }
+        }
+        ESP_RETURN_ON_ERROR(cyd_backend_blit(chunk_x, row * CYD_FONT_HEIGHT, columns,
+                                             CYD_FONT_HEIGHT, chunk),
+                            TAG, "send key row chunk");
+    }
+    return ESP_OK;
+}
+
+int cyd_key_row_hit(const char *keys, int slots, int x)
+{
+    if (slots <= 0) {
+        return -1;
+    }
+    int count = (int)strnlen(keys, (size_t)slots);
+    int left = key_row_left(count, slots);
+    if (x < left) {
+        return -1;
+    }
+    int key = (x - left) / (CYD_LCD_WIDTH / slots);
+    return key < count ? key : -1;
+}
+
 esp_err_t cyd_text_row(int row, uint16_t foreground, uint16_t background, const char *text)
 {
     uint16_t foregrounds[CYD_TEXT_COLUMNS];

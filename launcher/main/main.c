@@ -1502,20 +1502,23 @@ enum { FIELD_SSID, FIELD_PASSWORD, FIELD_COUNT };
 #define EDITOR_MESSAGE_ROW 2
 #define KEY_FIRST_ROW 3
 #define KEY_ROWS 5
-#define KEY_COLUMNS 2 /* each key is two cells wide, for the resistive panel */
-#define KEYS_PER_ROW (CYD_TEXT_COLUMNS / KEY_COLUMNS)
+/* Keys to a row: QWERTY's ten. cyd_draw_key_row sizes them in pixels
+   (32 on the CYD, wide enough for the resistive panel; 80 on the S3). */
+#define KEY_SLOTS 10
 #define CONTROL_ROW (KEY_FIRST_ROW + KEY_ROWS)
 #define ACTION_ROW (CONTROL_ROW + 1)
 #define KEY_COLOR_ALTERNATE 0x39E7
 
-/* Letters, digits and the symbols most passwords use; the symbol page has
-   the rest of printable ASCII. */
+/* A QWERTY keyboard: digits, the three letter rows, and the symbols most
+   passwords use. The symbol page has the rest of printable ASCII, in the
+   order of a US keyboard's shifted keys. */
 static const char *const letter_keys[KEY_ROWS] = {
-    "abcdefgh", "ijklmnop", "qrstuvwx", "yz012345", "6789.-_@",
+    "1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm", ".-_@",
 };
 static const char *const symbol_keys[KEY_ROWS] = {
-    "!\"#$%&'(", ")*+,-./:", ";<=>?@[\\", "]^_`{|}~", "",
+    "1234567890", "!@#$%^&*()", "-_=+[]{}\\|", ";:'\",.<>/?", "`~",
 };
+static const uint16_t key_backgrounds[2] = {CYD_COLOR_BUTTON, KEY_COLOR_ALTERNATE};
 
 enum { CONTROL_CAPS, CONTROL_SYMBOLS, CONTROL_SPACE, CONTROL_DELETE, CONTROL_COUNT };
 enum { ACTION_CANCEL, ACTION_SAVE, ACTION_COUNT };
@@ -1534,17 +1537,15 @@ static size_t field_capacity(int field)
     return field == FIELD_SSID ? 32 : 64;
 }
 
-static char editor_key(const editor_t *editor, int row, int key)
+/* A keyboard row's keys as shown: upper case when Caps is on. */
+static void editor_row_keys(const editor_t *editor, int row, char keys[KEY_SLOTS + 1])
 {
-    const char *keys = (editor->symbols ? symbol_keys : letter_keys)[row];
-    if (key >= (int)strlen(keys)) {
-        return '\0';
+    snprintf(keys, KEY_SLOTS + 1, "%s", (editor->symbols ? symbol_keys : letter_keys)[row]);
+    for (char *key = keys; editor->caps && *key != '\0'; ++key) {
+        if (*key >= 'a' && *key <= 'z') {
+            *key = (char)(*key - 'a' + 'A');
+        }
     }
-    char character = keys[key];
-    if (editor->caps && character >= 'a' && character <= 'z') {
-        character = (char)(character - 'a' + 'A');
-    }
-    return character;
 }
 
 /* "N network_" / "P password": the end of the text, so the cursor shows. */
@@ -1576,27 +1577,10 @@ static void draw_editor_message(const editor_t *editor)
 static void draw_keyboard(const editor_t *editor)
 {
     for (int row = 0; row < KEY_ROWS; ++row) {
-        char text[CYD_TEXT_COLUMNS + 1];
-        uint16_t foreground[CYD_TEXT_COLUMNS];
-        uint16_t background[CYD_TEXT_COLUMNS];
-        memset(text, ' ', CYD_TEXT_COLUMNS);
-        text[CYD_TEXT_COLUMNS] = '\0';
-        for (int column = 0; column < CYD_TEXT_COLUMNS; ++column) {
-            int key = column / KEY_COLUMNS;
-            bool present = key < KEYS_PER_ROW && editor_key(editor, row, key) != '\0';
-            foreground[column] = CYD_COLOR_WHITE;
-            /* Alternate shades in a checkerboard so neighboring keys stand apart. */
-            background[column] = !present          ? CYD_COLOR_BLACK
-                                 : (key + row) % 2 ? KEY_COLOR_ALTERNATE
-                                                   : CYD_COLOR_BUTTON;
-        }
-        for (int key = 0; key < KEYS_PER_ROW; ++key) {
-            char character = editor_key(editor, row, key);
-            if (character != '\0') {
-                text[key * KEY_COLUMNS] = character;
-            }
-        }
-        ESP_ERROR_CHECK(cyd_draw_cells(KEY_FIRST_ROW + row, text, foreground, background));
+        char keys[KEY_SLOTS + 1];
+        editor_row_keys(editor, row, keys);
+        ESP_ERROR_CHECK(cyd_draw_key_row(KEY_FIRST_ROW + row, keys, KEY_SLOTS, CYD_COLOR_WHITE,
+                                         key_backgrounds));
     }
 }
 
@@ -1677,9 +1661,11 @@ static bool edit_wifi_settings(const char *ssid)
             draw_editor_field(&editor, editor.active);
             draw_editor_message(&editor);
         } else if (row >= KEY_FIRST_ROW && row < KEY_FIRST_ROW + KEY_ROWS) {
-            char character = editor_key(&editor, row - KEY_FIRST_ROW, column / KEY_COLUMNS);
-            if (column / KEY_COLUMNS < KEYS_PER_ROW && character != '\0') {
-                editor_type(&editor, character);
+            char keys[KEY_SLOTS + 1];
+            editor_row_keys(&editor, row - KEY_FIRST_ROW, keys);
+            int key = cyd_key_row_hit(keys, KEY_SLOTS, point.x);
+            if (key >= 0) {
+                editor_type(&editor, keys[key]);
             }
         } else if (row == CONTROL_ROW) {
             button_t controls[CONTROL_COUNT];
